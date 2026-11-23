@@ -67,17 +67,22 @@ function createDesktopUpdaterBridge(): DesktopUpdaterBridge {
     snapshot.error = null;
   });
 
+  function formatUpdaterError(err: unknown): string {
+    const raw = String((err as any)?.message || err || "שגיאה בבדיקת עדכון");
+    if (raw.includes("404") || raw.includes("No published versions")) {
+      return "לא נמצאה גישה לעדכונים ב-GitHub (404) — אם המאגר פרטי, הזן טוקן קריאה (ghp_...) למעלה או הפוך את המאגר לציבורי.";
+    }
+    if (raw.includes("401") || raw.includes("403")) {
+      return "המאגר פרטי (401/403) — הזן טוקן קריאה (ghp_...) בהגדרות העדכון או הפוך את המאגר לציבורי.";
+    }
+    const compact = raw.split(/\s*Headers:\s*\{/)[0].trim();
+    return (compact || "שגיאה בבדיקת עדכונים מול GitHub").slice(0, 260);
+  }
+
   autoUpdater.on("error", (err) => {
     snapshot.checking = false;
     snapshot.downloading = false;
-    const msg = String(err?.message || err || "שגיאה בבדיקת עדכון");
-    if (msg.includes("404") || msg.includes("No published versions")) {
-      snapshot.error = "עדיין לא פורסמה גרסת התקנה (Release) ב-GitHub";
-    } else if (msg.includes("401") || msg.includes("403")) {
-      snapshot.error = "המאגר פרטי — הזן טוקן קריאה (GitHub Token) בהגדרות העדכון או הפוך את המאגר לציבורי";
-    } else {
-      snapshot.error = msg;
-    }
+    snapshot.error = formatUpdaterError(err);
   });
 
   function applyFeedConfig(token?: string) {
@@ -114,7 +119,7 @@ function createDesktopUpdaterBridge(): DesktopUpdaterBridge {
         applyFeedConfig(token);
         await autoUpdater.checkForUpdates();
       } catch (err: any) {
-        snapshot.error = String(err?.message || "שגיאה בבדיקת עדכונים מול GitHub Releases");
+        snapshot.error = formatUpdaterError(err);
       } finally {
         snapshot.checking = false;
       }

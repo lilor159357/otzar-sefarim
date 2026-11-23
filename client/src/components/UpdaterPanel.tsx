@@ -496,7 +496,7 @@ export const UpdaterPanel: React.FC<UpdaterPanelProps> = ({ onUpdateStatusChange
 
       {msg && (
         <div
-          className={`flex items-center gap-2 p-2.5 rounded-lg text-xs font-medium border ${
+          className={`flex items-start gap-2 p-2.5 rounded-lg text-xs font-medium border overflow-hidden ${
             msg.type === "err"
               ? "bg-red-500/10 border-red-500/30 text-red-600 dark:text-red-400"
               : msg.type === "ok"
@@ -505,11 +505,11 @@ export const UpdaterPanel: React.FC<UpdaterPanelProps> = ({ onUpdateStatusChange
           }`}
         >
           {msg.type === "err" ? (
-            <AlertCircle className="w-4 h-4 shrink-0" />
+            <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
           ) : (
-            <CheckCircle2 className="w-4 h-4 shrink-0" />
+            <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
           )}
-          <span>{msg.text}</span>
+          <span className="min-w-0 break-words">{msg.text}</span>
         </div>
       )}
     </div>
