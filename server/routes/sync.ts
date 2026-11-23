@@ -3,6 +3,12 @@ import type { DbClient } from "../db/adapter.ts";
 import { isAdminRequest, requireAdmin } from "../auth/adminAuth.ts";
 import { buildNormalizedBookSearch, enqueueSyncOutbox, newSyncId } from "../db/schema.ts";
 import { FIRESTORE_RULES_TEMPLATE, type OtzarFirebaseSyncService } from "../sync/firebaseSync.ts";
+import {
+  cleanStartCatalogReset,
+  exportEncryptedSetupBundle,
+  getSetupBundleSummary,
+  importEncryptedSetupBundle,
+} from "../sync/setupBundle.ts";
 
 function parseTagsSafe(raw: unknown): string[] {
   if (Array.isArray(raw)) return raw.map((t) => String(t).trim()).filter(Boolean);
@@ -159,5 +165,51 @@ export function registerSyncRoutes(app: Express, db: DbClient, syncService: Otza
       newBarcode,
       nextBarcode: prefix + String(nextNum),
     });
+  });
+
+  app.get("/api/sync/setup-bundle/summary", requireAdmin, (_req, res) => {
+    res.json(getSetupBundleSummary(db));
+  });
+
+  app.post("/api/sync/setup-bundle/export", requireAdmin, (req, res) => {
+    try {
+      const passcode = String(req.body?.passcode || "");
+      const result = exportEncryptedSetupBundle(db, passcode);
+      res.json(result);
+    } catch (err: any) {
+      res.status(400).json({ error: err?.message || "שגיאה ביצירת חבילת ההעברה" });
+    }
+  });
+
+  app.post("/api/sync/setup-bundle/import", requireAdmin, async (req, res) => {
+    try {
+      const { bundleInput, passcode, clearDemoData = true } = req.body || {};
+      const result = await importEncryptedSetupBundle({
+        db,
+        syncService,
+        dataDir: syncService.getDataDir(),
+        bundleInput,
+        passcode: String(passcode || ""),
+        clearDemoData: Boolean(clearDemoData),
+      });
+      res.json(result);
+    } catch (err: any) {
+      res.status(400).json({ error: err?.message || "שגיאה בייבוא חבילת ההעברה" });
+    }
+  });
+
+  app.post("/api/sync/clean-start", requireAdmin, async (req, res) => {
+    try {
+      const confirmText = String(req.body?.confirmText || "");
+      const result = await cleanStartCatalogReset({
+        db,
+        syncService,
+        dataDir: syncService.getDataDir(),
+        confirmText,
+      });
+      res.json(result);
+    } catch (err: any) {
+      res.status(400).json({ error: err?.message || "שגיאה באיפוס מאגר הספרים" });
+    }
   });
 }

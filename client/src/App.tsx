@@ -24,6 +24,7 @@ import { CirculationModule } from "./components/CirculationModule.tsx";
 import { CatalogModule } from "./components/CatalogModule.tsx";
 import { AiSettingsPanel } from "./components/AiSettingsPanel.tsx";
 import { FirebaseSyncPanel } from "./components/FirebaseSyncPanel.tsx";
+import { SetupTransferPanel } from "./components/SetupTransferPanel.tsx";
 import { UpdaterPanel } from "./components/UpdaterPanel.tsx";
 import { LabelsModule } from "./components/LabelsModule.tsx";
 import { AdminPinModal } from "./components/AdminPinModal.tsx";
@@ -539,6 +540,10 @@ export default function App() {
                   />
 
                   <FirebaseSyncPanel
+                    onReload={() => loadAll(searchQuery, statusFilter, categoryFilter, semanticMode)}
+                  />
+
+                  <SetupTransferPanel
                     onReload={() => loadAll(searchQuery, statusFilter, categoryFilter, semanticMode)}
                   />
 

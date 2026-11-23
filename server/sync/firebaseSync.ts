@@ -268,6 +268,28 @@ function parseTagsArray(raw: unknown): string[] {
   return [];
 }
 
+export function reconcileNextBarcodeFromBooks(db: DbClient, minimumNext = 100001): number {
+  const prefix = getSettingVal(db, "barcode_prefix", "");
+  const currentVal = parseInt(getSettingVal(db, "next_barcode", "100001"), 10) || 100001;
+  const rows = db.all<{ barcode: string }>("SELECT barcode FROM books WHERE deleted_at IS NULL");
+  let maxNum = 0;
+  for (const r of rows) {
+    let raw = String(r.barcode || "").trim();
+    if (prefix && raw.startsWith(prefix)) {
+      raw = raw.slice(prefix.length);
+    }
+    if (/^\d+$/.test(raw)) {
+      const n = parseInt(raw, 10);
+      if (Number.isFinite(n) && n > maxNum && n < 900000000) {
+        maxNum = n;
+      }
+    }
+  }
+  const safeNext = Math.max(minimumNext, currentVal, maxNum > 0 ? maxNum + 1 : 100001, 100001);
+  setSettingVal(db, "next_barcode", String(safeNext));
+  return safeNext;
+}
+
 export class OtzarFirebaseSyncService {
   private db: DbClient;
   private dataDir: string;
@@ -367,6 +389,45 @@ export class OtzarFirebaseSyncService {
       email: cfg.email,
       hasPassword: Boolean(cfg.password),
     };
+  }
+
+  public getDataDir(): string {
+    return this.dataDir;
+  }
+
+  public async verifyCredentials(
+    configInput: unknown,
+    emailInput: string,
+    passwordInput: string
+  ): Promise<{ config: FirebaseWebConfig; email: string; password: string }> {
+    const parsedConfig = parseFirebaseConfigInput(configInput);
+    if (!parsedConfig) {
+      throw new Error("תצורת Firebase בחבילה אינה תקינה — נדרשים לפחות apiKey, projectId ו-appId");
+    }
+    const email = String(emailInput || "").trim();
+    const password = String(passwordInput || "");
+    if (!email || !password) {
+      throw new Error("חסרים פרטי התחברות (אימייל/סיסמה) ל-Firebase");
+    }
+    const tempApp = initializeApp(parsedConfig, `otzar-preflight-${++this.appSeq}`);
+    try {
+      const tempAuth = getAuth(tempApp);
+      const tempFs = initializeFirestore(tempApp, { experimentalForceLongPolling: true });
+      await signInWithEmailAndPassword(tempAuth, email, password);
+      await getDocs(query(collection(tempFs, "library_meta"), limit(1)));
+      this.addSparkUsage({ reads: 1 });
+      return { config: parsedConfig, email, password };
+    } catch (err) {
+      throw new Error(formatFirebaseErrorHe(err));
+    } finally {
+      try {
+        await deleteApp(tempApp);
+      } catch {}
+    }
+  }
+
+  public async disconnect(): Promise<void> {
+    await this.teardownClient();
   }
 
   public getStatus(): FirebaseSyncStatus {
@@ -1148,6 +1209,10 @@ export class OtzarFirebaseSyncService {
       }
     }
 
+    if (totalPulled > 0) {
+      reconcileNextBarcodeFromBooks(this.db);
+    }
+
     return totalPulled;
   }
 
@@ -1291,11 +1356,19 @@ export class OtzarFirebaseSyncService {
         barcodeStatus = "pending_barcode";
       }
 
-      // Guard against rare barcode collision across offline devices
-      const collision = this.db.get<{ sync_id: string }>("SELECT sync_id FROM books WHERE barcode = ?", targetBarcode);
+      // Guard against rare barcode collision across offline devices (free stale soft-deleted rows first)
+      const collision = this.db.get<{ sync_id: string; deleted_at: string | null }>(
+        "SELECT sync_id, deleted_at FROM books WHERE barcode = ?",
+        targetBarcode
+      );
       if (collision && collision.sync_id !== syncId) {
-        targetBarcode = `MOB-${syncId.slice(0, 8).toUpperCase()}`;
-        barcodeStatus = "pending_barcode";
+        if (collision.deleted_at) {
+          this.db.run("DELETE FROM loans WHERE book_barcode = ?", targetBarcode);
+          this.db.run("DELETE FROM books WHERE sync_id = ? AND deleted_at IS NOT NULL", collision.sync_id);
+        } else {
+          targetBarcode = `MOB-${syncId.slice(0, 8).toUpperCase()}`;
+          barcodeStatus = "pending_barcode";
+        }
       }
 
       const norm = buildNormalizedBookSearch([
