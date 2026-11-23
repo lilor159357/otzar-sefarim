@@ -9,6 +9,14 @@ export interface HealthData {
   ok: boolean;
   driver: string;
   dbPath: string;
+  dataDir?: string;
+  isElectron?: boolean;
+  appVersion?: string;
+  migratedFrom?: string | null;
+  certSummary?: {
+    loadedCount: number;
+    mode: string;
+  } | null;
   counts: {
     books: number;
     cabinets: number;

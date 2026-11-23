@@ -1,0 +1,39 @@
+appId: com.otzarsefarim.desktop
+productName: Otzar Sefarim
+directories:
+  output: release
+  buildResources: build
+npmRebuild: false
+asar: true
+asarUnpack:
+  - node_modules/sql.js/dist/*.wasm
+files:
+  - dist/client/**/*
+  - dist-electron/**/*
+  - build/icon.*
+  - package.json
+  - "!**/*.map"
+  - "!data/**"
+  - "!.git/**"
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  icon: build/icon.ico
+  verifyUpdateCodeSignature: false
+  artifactName: Otzar-Sefarim-Setup-${version}.${ext}
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: אוצר ספרים
+  uninstallDisplayName: אוצר ספרים - ניהול ספרייה תורנית
+  deleteAppDataOnUninstall: false
+publish:
+  provider: github
+  owner: lilor159357
+  repo: otzar-sefarim
+  releaseType: release

@@ -16,11 +16,12 @@ export interface DbClient {
   all<T = Record<string, unknown>>(sql: string, ...params: unknown[]): T[];
   transaction<T>(fn: () => T): T;
   backupTo(destPath: string): void;
+  close(): void;
 }
 
 export async function openDatabase(dbPath: string): Promise<DbClient> {
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
-  const req = createRequire(import.meta.url);
+  const req = typeof require === "function" ? require : createRequire(import.meta.url);
 
   // 1. Try better-sqlite3 if native binary compiled/installed cleanly
   try {
@@ -42,6 +43,9 @@ export async function openDatabase(dbPath: string): Promise<DbClient> {
       backupTo: (destPath: string) => {
         nativeDb.pragma("wal_checkpoint(TRUNCATE)");
         fs.copyFileSync(dbPath, destPath);
+      },
+      close: () => {
+        try { nativeDb.close(); } catch {}
       },
     };
   } catch {
@@ -91,6 +95,9 @@ export async function openDatabase(dbPath: string): Promise<DbClient> {
         backupTo: (destPath: string) => {
           try { nodeDb.exec("PRAGMA wal_checkpoint(TRUNCATE);"); } catch {}
           fs.copyFileSync(dbPath, destPath);
+        },
+        close: () => {
+          try { nodeDb.close(); } catch {}
         },
       };
     }
@@ -185,6 +192,10 @@ export async function openDatabase(dbPath: string): Promise<DbClient> {
     backupTo: (destPath: string) => {
       flush();
       fs.copyFileSync(dbPath, destPath);
+    },
+    close: () => {
+      try { flush(); } catch {}
+      try { wasmDb.close(); } catch {}
     },
   };
 }

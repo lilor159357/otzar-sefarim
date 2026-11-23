@@ -1,6 +1,8 @@
 # Dependencies & build outputs
 node_modules/
 dist/
+dist-electron/
+release/
 
 # Local runtime database, backups, AI images & Edge profile (NEVER commit)
 data/
@@ -8,6 +10,15 @@ data/
 *.db-wal
 *.db-shm
 *.sqlite
+
+# Installers, binaries & generated certs
+*.exe
+*.msi
+*.blockmap
+*.AppImage
+*.dmg
+win-root-cas.pem
+electron_install.log
 
 # Environment & secrets
 .env

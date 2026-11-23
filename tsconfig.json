@@ -18,6 +18,7 @@
   },
   "include": [
     "client/src",
-    "server"
+    "server",
+    "electron"
   ]
 }

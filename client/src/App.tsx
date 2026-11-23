@@ -636,9 +636,35 @@ export default function App() {
                   </div>
 
                   <div className="p-5 rounded-xl border border-[var(--otzar-border-muted)] text-sm space-y-1.5">
-                    <div className="font-semibold">פרטי מסד הנתונים המקומי</div>
-                    <div className="text-[var(--otzar-text-muted)]">דרייבר פעיל: <span className="font-mono text-[var(--otzar-text)]">{health?.driver}</span></div>
-                    <div className="text-[var(--otzar-text-muted)]">נתיב קובץ: <span className="font-mono text-[var(--otzar-text)]" dir="ltr">{health?.dbPath}</span></div>
+                    <div className="font-semibold">פרטי מסד הנתונים והסביבה המקומית</div>
+                    <div className="text-[var(--otzar-text-muted)]">
+                      סביבת הרצה:{" "}
+                      <span className="text-[var(--otzar-text)]">
+                        {health?.isElectron ? "תוכנת שולחן עבודה עצמאית (Desktop)" : "שרת מקומי בדפדפן"}
+                      </span>
+                      {health?.appVersion && (
+                        <>
+                          <span aria-hidden="true" className="mx-1.5">·</span>
+                          <span className="font-mono tabular-nums text-[var(--otzar-text)]">v{health.appVersion}</span>
+                        </>
+                      )}
+                    </div>
+                    <div className="text-[var(--otzar-text-muted)]">דרייבר SQLite: <span className="font-mono text-[var(--otzar-text)]">{health?.driver}</span></div>
+                    {health?.dataDir && (
+                      <div className="text-[var(--otzar-text-muted)]">תיקיית נתונים: <span className="font-mono text-[var(--otzar-text)]" dir="ltr">{health.dataDir}</span></div>
+                    )}
+                    <div className="text-[var(--otzar-text-muted)]">נתיב קובץ מסד: <span className="font-mono text-[var(--otzar-text)]" dir="ltr">{health?.dbPath}</span></div>
+                    {health?.migratedFrom && (
+                      <div className="text-[var(--otzar-text-muted)]">
+                        הועתקו נתונים קיימים מ: <span className="font-mono text-[var(--otzar-text)]" dir="ltr">{health.migratedFrom}</span>
+                      </div>
+                    )}
+                    {health?.certSummary && health.certSummary.loadedCount > 0 && (
+                      <div className="text-[var(--otzar-text-muted)]">
+                        תעודות שורש Windows (תמיכת אתרוג/סינון):{" "}
+                        <span className="tabular-nums text-[var(--otzar-text)]">{health.certSummary.loadedCount} נטענו</span>
+                      </div>
+                    )}
                   </div>
                 </div>
               )}

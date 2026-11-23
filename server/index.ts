@@ -1,4 +1,4 @@
-import express from "express";
+import express, { type Express } from "express";
 import fs from "fs";
 import net from "net";
 import path from "path";
@@ -9,14 +9,56 @@ import { searchBooksOffline, type SearchableBook } from "./search/torahSearch.ts
 import { registerCirculationRoutes } from "./routes/circulation.ts";
 import { registerCatalogAiRoutes } from "./routes/catalogAi.ts";
 import { registerLabelsAndAdminRoutes } from "./routes/labelsAndAdmin.ts";
-import { registerUpdaterRoutes, scheduleStartupAutoUpdateCheck, type UpdaterRestartHooks } from "./routes/updater.ts";
+import {
+  registerUpdaterRoutes,
+  scheduleStartupAutoUpdateCheck,
+  type DesktopUpdaterBridge,
+  type UpdaterRestartHooks,
+} from "./routes/updater.ts";
 import { isAdminRequest, requireAdmin } from "./auth/adminAuth.ts";
 import { blobToFloat32, buildBookEmbeddingText, cosineSimilarity, float32ToBlob, generateTextEmbedding, getAiConfig, hasConfiguredAiKeys } from "./ai/geminiService.ts";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const ROOT_DIR = path.resolve(__dirname, "..");
-const DATA_DIR = path.join(ROOT_DIR, "data");
-const DB_PATH = path.join(DATA_DIR, "otzar.db");
+export interface OtzarServerOptions {
+  rootDir?: string;
+  dataDir?: string;
+  preferredPort?: number;
+  isElectron?: boolean;
+  appVersion?: string;
+  migratedFrom?: string | null;
+  certSummary?: { loadedCount: number; mode: string };
+  desktopUpdater?: DesktopUpdaterBridge;
+}
+
+export interface StartedOtzarServer {
+  app: Express;
+  port: number;
+  url: string;
+  dataDir: string;
+  dbPath: string;
+  close: () => void;
+}
+
+function resolveDefaultRootDir(): string {
+  if (typeof __dirname !== "undefined" && __dirname) {
+    return path.resolve(__dirname, "..");
+  }
+  try {
+    const metaUrl = import.meta?.url;
+    if (metaUrl) {
+      return path.resolve(path.dirname(fileURLToPath(metaUrl)), "..");
+    }
+  } catch {}
+  return process.cwd();
+}
+
+function readPackageVersion(rootDir: string): string {
+  try {
+    const raw = JSON.parse(fs.readFileSync(path.join(rootDir, "package.json"), "utf8"));
+    return typeof raw?.version === "string" ? raw.version : "1.0.0";
+  } catch {
+    return "1.0.0";
+  }
+}
 
 function findFreePort(startPort: number): Promise<number> {
   return new Promise((resolve) => {
@@ -41,7 +83,12 @@ function parseTags(raw: unknown): string[] {
   return [];
 }
 
-async function main() {
+export async function startOtzarServer(options: OtzarServerOptions = {}): Promise<StartedOtzarServer> {
+  const ROOT_DIR = options.rootDir || resolveDefaultRootDir();
+  const DATA_DIR = options.dataDir || process.env.OTZAR_DATA_DIR || path.join(ROOT_DIR, "data");
+  const DB_PATH = path.join(DATA_DIR, "otzar.db");
+  const appVersion = options.appVersion || readPackageVersion(ROOT_DIR);
+
   fs.mkdirSync(DATA_DIR, { recursive: true });
   fs.mkdirSync(path.join(DATA_DIR, "ai_images"), { recursive: true });
   fs.mkdirSync(path.join(DATA_DIR, "backups"), { recursive: true });
@@ -64,6 +111,11 @@ async function main() {
       ok: true,
       driver: db.driverName,
       dbPath: db.dbPath,
+      dataDir: DATA_DIR,
+      isElectron: Boolean(options.isElectron),
+      appVersion,
+      migratedFrom: options.migratedFrom ?? null,
+      certSummary: options.certSummary ?? null,
       counts: { books, cabinets, borrowers, activeLoans, printQueue, aiQueue },
     });
   });
@@ -526,32 +578,66 @@ async function main() {
 
   // Stage 6: Auto-Update & GitHub Sync
   const updaterHooks: UpdaterRestartHooks = {};
-  registerUpdaterRoutes(app, db, ROOT_DIR, DATA_DIR, updaterHooks);
+  registerUpdaterRoutes(app, db, ROOT_DIR, DATA_DIR, updaterHooks, options.desktopUpdater);
 
   const distDir = path.join(ROOT_DIR, "dist", "client");
   if (fs.existsSync(path.join(distDir, "index.html")) && process.env.VITE_DEV !== "1") {
     app.use(express.static(distDir));
     app.get("*", (_req, res) => res.sendFile(path.join(distDir, "index.html")));
-  } else {
-    const { createServer: createViteServer } = await import("vite");
+  } else if (!options.isElectron || process.env.VITE_DEV === "1") {
+    const vitePkgName = "vite";
+    const { createServer: createViteServer } = await import(/* @vite-ignore */ vitePkgName);
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
       configFile: path.join(ROOT_DIR, "vite.config.ts"),
     });
     app.use(vite.middlewares);
+  } else {
+    app.get("*", (_req, res) => {
+      res.status(503).send("Client build (dist/client/index.html) not found. Run npm run build first.");
+    });
   }
 
-  const preferredPort = Number(process.env.PORT || 4747);
+  const preferredPort = options.preferredPort ?? Number(process.env.PORT || 4747);
   const port = await findFreePort(preferredPort);
-  const httpServer = app.listen(port, "127.0.0.1", () => {
-    console.log("OTZAR_SEFARIM_READY http://127.0.0.1:" + port + " (SQLite driver: " + db.driverName + ")");
+  const url = `http://127.0.0.1:${port}`;
+  const httpServer = await new Promise<ReturnType<Express["listen"]>>((resolve) => {
+    const srv = app.listen(port, "127.0.0.1", () => {
+      console.log(`OTZAR_SEFARIM_READY ${url} (SQLite driver: ${db.driverName})`);
+      resolve(srv);
+    });
   });
-  updaterHooks.closeServer = () => httpServer.close();
-  scheduleStartupAutoUpdateCheck(db, ROOT_DIR, DATA_DIR, updaterHooks);
+
+  const close = () => {
+    try {
+      updaterHooks.cancelStartupCheck?.();
+    } catch {}
+    try {
+      httpServer.close();
+    } catch {}
+    try {
+      db.close();
+    } catch {}
+  };
+
+  updaterHooks.closeServer = close;
+  scheduleStartupAutoUpdateCheck(db, ROOT_DIR, DATA_DIR, updaterHooks, options.desktopUpdater);
+
+  return { app, port, url, dataDir: DATA_DIR, dbPath: db.dbPath, close };
 }
 
-main().catch((err) => {
-  console.error("Failed to start Otzar Sefarim server:", err);
-  process.exit(1);
-});
+const entryArg = process.argv[1] ? path.resolve(process.argv[1]).toLowerCase() : "";
+const isRunningAsServerCli =
+  !process.versions.electron &&
+  (process.env.OTZAR_STANDALONE_SERVER === "1" ||
+    entryArg.endsWith(`${path.sep}server${path.sep}index.ts`) ||
+    entryArg.endsWith(`${path.sep}server${path.sep}index.js`) ||
+    entryArg.endsWith(`${path.sep}server${path.sep}index.cjs`));
+
+if (isRunningAsServerCli) {
+  startOtzarServer().catch((err) => {
+    console.error("Failed to start Otzar Sefarim server:", err);
+    process.exit(1);
+  });
+}

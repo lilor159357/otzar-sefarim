@@ -11,6 +11,35 @@ const execFileAsync = promisify(execFile);
 
 export interface UpdaterRestartHooks {
   closeServer?: () => void;
+  cancelStartupCheck?: () => void;
+}
+
+export interface DesktopUpdaterSnapshot {
+  isElectron: boolean;
+  isPackaged: boolean;
+  currentVersion: string;
+  availableVersion: string | null;
+  releaseNotes: string | null;
+  checking: boolean;
+  downloading: boolean;
+  downloadPercent: number;
+  downloaded: boolean;
+  hasUpdate: boolean;
+  checkedAt: string | null;
+  error: string | null;
+}
+
+export interface DesktopUpdaterBridge {
+  getSnapshot: () => DesktopUpdaterSnapshot;
+  checkForUpdates: (githubToken?: string) => Promise<DesktopUpdaterSnapshot>;
+  downloadAndInstall: (backupBeforeUpdate: () => string, githubToken?: string) => Promise<{
+    ok: boolean;
+    downloaded: boolean;
+    installing: boolean;
+    backupPath?: string;
+    message?: string;
+  }>;
+  quitAndInstall: () => void;
 }
 
 export interface UpdateCommitInfo {
@@ -129,16 +158,27 @@ function setSetting(db: DbClient, key: string, value: string): void {
   );
 }
 
+function createBackupFile(db: DbClient, dataDir: string, prefix = "pre-update"): string {
+  const backupsDir = path.join(dataDir, "backups");
+  fs.mkdirSync(backupsDir, { recursive: true });
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+  const backupPath = path.join(backupsDir, `${prefix}-${stamp}.db`);
+  db.backupTo(backupPath);
+  return backupPath;
+}
+
 async function getRepoInfo(rootDir: string) {
   const gitDirExists = fs.existsSync(path.join(rootDir, ".git"));
   let gitAvailable = false;
   let gitVersion = "";
-  try {
-    const v = await runGit(rootDir, ["--version"], 5000);
-    gitAvailable = true;
-    gitVersion = v.stdout;
-  } catch {
-    gitAvailable = false;
+  if (!process.versions.electron || gitDirExists) {
+    try {
+      const v = await runGit(rootDir, ["--version"], 5000);
+      gitAvailable = true;
+      gitVersion = v.stdout;
+    } catch {
+      gitAvailable = false;
+    }
   }
 
   let branch = "main";
@@ -328,17 +368,10 @@ export async function applyUpdateAndRestart(
       throw new Error("חיבור GitHub אינו מוגדר עדיין");
     }
 
-    // 1. Always backup local SQLite database before applying code updates
-    const backupsDir = path.join(dataDir, "backups");
-    fs.mkdirSync(backupsDir, { recursive: true });
-    const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-    const backupPath = path.join(backupsDir, `pre-update-${stamp}.db`);
-    db.backupTo(backupPath);
-
+    const backupPath = createBackupFile(db, dataDir, "pre-update");
     const lockBefore = fileSha256(path.join(rootDir, "package-lock.json"));
     const pkgBefore = fileSha256(path.join(rootDir, "package.json"));
 
-    // 2. Pull fast-forward from origin
     try {
       await runGit(rootDir, ["pull", "--ff-only", "origin", info.branch], 45000);
     } catch (err: any) {
@@ -348,14 +381,12 @@ export async function applyUpdateAndRestart(
     const lockAfter = fileSha256(path.join(rootDir, "package-lock.json"));
     const pkgAfter = fileSha256(path.join(rootDir, "package.json"));
 
-    // 3. Install dependencies if manifest changed
     let ranInstall = false;
     if (lockBefore !== lockAfter || pkgBefore !== pkgAfter) {
       await runNpm(rootDir, ["install"], 240000);
       ranInstall = true;
     }
 
-    // 4. Rebuild frontend & typecheck
     await runNpm(rootDir, ["run", "build"], 180000);
 
     const newInfo = await getRepoInfo(rootDir);
@@ -392,16 +423,45 @@ export function scheduleStartupAutoUpdateCheck(
   db: DbClient,
   rootDir: string,
   dataDir: string,
-  hooks: UpdaterRestartHooks
+  hooks: UpdaterRestartHooks,
+  desktopUpdater?: DesktopUpdaterBridge
 ) {
+  let cancelled = false;
   const runCheck = async () => {
-    const autoCheck = getSetting(db, "auto_update_check", "1") !== "0";
-    if (!autoCheck) return;
+    if (cancelled) return;
+    let autoCheck = true;
+    try {
+      autoCheck = getSetting(db, "auto_update_check", "1") !== "0";
+    } catch {
+      return;
+    }
+    if (!autoCheck || cancelled) return;
+
+    if (desktopUpdater) {
+      try {
+        const token = getSetting(db, "github_release_token", "").trim();
+        const snap = await desktopUpdater.checkForUpdates(token);
+        const autoInstall = getSetting(db, "auto_update_install", "0") === "1";
+        if (snap.hasUpdate && autoInstall && !snap.downloaded) {
+          await desktopUpdater.downloadAndInstall(() => createBackupFile(db, dataDir, "pre-update"), token);
+        }
+      } catch (err: any) {
+        console.error("[DesktopUpdater] Auto-download failed:", err?.message || err);
+      }
+      return;
+    }
+
     const info = await getRepoInfo(rootDir);
-    if (!info.gitAvailable || !info.repoInitialized || !info.remoteUrl) return;
+    if (cancelled || !info.gitAvailable || !info.repoInitialized || !info.remoteUrl) return;
 
     const result = await checkForUpdates(rootDir);
-    const autoInstall = getSetting(db, "auto_update_install", "0") === "1";
+    if (cancelled) return;
+    let autoInstall = false;
+    try {
+      autoInstall = getSetting(db, "auto_update_install", "0") === "1";
+    } catch {
+      return;
+    }
     if (result.hasUpdate && autoInstall && info.dirtyFiles === 0) {
       try {
         console.log("[Updater] Update detected at startup, applying automatically...");
@@ -412,9 +472,14 @@ export function scheduleStartupAutoUpdateCheck(
     }
   };
 
-  setTimeout(() => {
+  const timer = setTimeout(() => {
     void runCheck();
   }, 5000);
+  timer.unref?.();
+  hooks.cancelStartupCheck = () => {
+    cancelled = true;
+    clearTimeout(timer);
+  };
 }
 
 export function registerUpdaterRoutes(
@@ -422,16 +487,41 @@ export function registerUpdaterRoutes(
   db: DbClient,
   rootDir: string,
   dataDir: string,
-  hooks: UpdaterRestartHooks
+  hooks: UpdaterRestartHooks,
+  desktopUpdater?: DesktopUpdaterBridge
 ) {
   app.get("/api/updater/status", requireAdmin, async (_req, res) => {
     const info = await getRepoInfo(rootDir);
+    const hasReleaseToken = Boolean(getSetting(db, "github_release_token", "").trim());
+    const desktop = desktopUpdater ? desktopUpdater.getSnapshot() : null;
     res.json({
       ...info,
+      isElectron: Boolean(desktop?.isElectron),
+      desktop,
+      hasReleaseToken,
       autoCheck: getSetting(db, "auto_update_check", "1") !== "0",
       autoInstall: getSetting(db, "auto_update_install", "0") === "1",
-      updateInProgress,
-      lastCheck: { ...lastCheckState },
+      updateInProgress: updateInProgress || Boolean(desktop?.downloading),
+      lastCheck: desktop
+        ? {
+            checkedAt: desktop.checkedAt,
+            hasUpdate: desktop.hasUpdate,
+            behindCount: desktop.hasUpdate ? 1 : 0,
+            aheadCount: 0,
+            localHash: desktop.currentVersion,
+            remoteHash: desktop.availableVersion || desktop.currentVersion,
+            latestCommits: desktop.availableVersion
+              ? [
+                  {
+                    hash: "v" + desktop.availableVersion,
+                    message: desktop.releaseNotes || `גרסה חדשה v${desktop.availableVersion} מוכנה להורדה`,
+                    date: desktop.checkedAt || new Date().toISOString(),
+                  },
+                ]
+              : [],
+            error: desktop.error,
+          }
+        : { ...lastCheckState },
     });
   });
 
@@ -439,9 +529,10 @@ export function registerUpdaterRoutes(
     const remoteUrlRaw = typeof req.body?.remoteUrl === "string" ? req.body.remoteUrl.trim() : undefined;
     const autoCheck = req.body?.autoCheck;
     const autoInstall = req.body?.autoInstall;
+    const githubReleaseToken = typeof req.body?.githubReleaseToken === "string" ? req.body.githubReleaseToken.trim() : undefined;
 
     try {
-      if (remoteUrlRaw !== undefined) {
+      if (remoteUrlRaw !== undefined && !desktopUpdater) {
         if (remoteUrlRaw && !/^(https:\/\/github\.com\/|git@github\.com:).+/i.test(remoteUrlRaw)) {
           return res.status(400).json({ error: "יש להזין כתובת תקינה של מאגר GitHub (למשל https://github.com/user/repo.git)" });
         }
@@ -465,6 +556,9 @@ export function registerUpdaterRoutes(
         setSetting(db, "update_remote_url", remoteUrlRaw);
       }
 
+      if (githubReleaseToken !== undefined && !githubReleaseToken.includes("••••")) {
+        setSetting(db, "github_release_token", githubReleaseToken);
+      }
       if (typeof autoCheck === "boolean") {
         setSetting(db, "auto_update_check", autoCheck ? "1" : "0");
       }
@@ -476,6 +570,9 @@ export function registerUpdaterRoutes(
       res.json({
         ok: true,
         ...info,
+        isElectron: Boolean(desktopUpdater),
+        desktop: desktopUpdater ? desktopUpdater.getSnapshot() : null,
+        hasReleaseToken: Boolean(getSetting(db, "github_release_token", "").trim()),
         autoCheck: getSetting(db, "auto_update_check", "1") !== "0",
         autoInstall: getSetting(db, "auto_update_install", "0") === "1",
       });
@@ -485,6 +582,27 @@ export function registerUpdaterRoutes(
   });
 
   app.post("/api/updater/check", requireAdmin, async (_req, res) => {
+    if (desktopUpdater) {
+      const token = getSetting(db, "github_release_token", "").trim();
+      const desktop = await desktopUpdater.checkForUpdates(token);
+      return res.json({
+        isElectron: true,
+        desktop,
+        lastCheck: {
+          checkedAt: desktop.checkedAt,
+          hasUpdate: desktop.hasUpdate,
+          behindCount: desktop.hasUpdate ? 1 : 0,
+          aheadCount: 0,
+          localHash: desktop.currentVersion,
+          remoteHash: desktop.availableVersion || desktop.currentVersion,
+          latestCommits: desktop.availableVersion
+            ? [{ hash: "v" + desktop.availableVersion, message: desktop.releaseNotes || "גרסת Desktop חדשה זמינה", date: desktop.checkedAt || "" }]
+            : [],
+          error: desktop.error,
+        },
+      });
+    }
+
     const check = await checkForUpdates(rootDir);
     const info = await getRepoInfo(rootDir);
     res.json({
@@ -494,11 +612,31 @@ export function registerUpdaterRoutes(
   });
 
   app.post("/api/updater/apply", requireAdmin, async (_req, res) => {
+    if (desktopUpdater) {
+      try {
+        const token = getSetting(db, "github_release_token", "").trim();
+        const result = await desktopUpdater.downloadAndInstall(() => createBackupFile(db, dataDir, "pre-update"), token);
+        return res.json({ ...result, isElectron: true, desktop: desktopUpdater.getSnapshot() });
+      } catch (err: any) {
+        return res.status(400).json({ error: err?.message || "שגיאה בהורדת העדכון" });
+      }
+    }
+
     try {
       const result = await applyUpdateAndRestart(db, rootDir, dataDir, hooks, false);
       res.json(result);
     } catch (err: any) {
       res.status(400).json({ error: err?.message || "שגיאה בהחלת העדכון" });
     }
+  });
+
+  app.post("/api/updater/install-now", requireAdmin, (_req, res) => {
+    if (!desktopUpdater) {
+      return res.status(400).json({ error: "התקנת Setup זמינה רק בגרסת ה-Desktop" });
+    }
+    res.json({ ok: true, installing: true });
+    setTimeout(() => {
+      desktopUpdater.quitAndInstall();
+    }, 300);
   });
 }
