@@ -13,6 +13,7 @@ interface DesktopUpdaterSnapshot {
   currentVersion: string;
   availableVersion: string | null;
   releaseNotes: string | null;
+  releaseHighlights?: string[];
   checking: boolean;
   downloading: boolean;
   downloadPercent: number;
@@ -276,13 +277,13 @@ export const UpdaterPanel: React.FC<UpdaterPanelProps> = ({ onUpdateStatusChange
 
   const handleInstallNow = async () => {
     setInstallingNow(true);
-    setMsg({ type: "info", text: "סוגר את התוכנה ומריץ את התקנת הגרסה החדשה..." });
+    setMsg({ type: "info", text: "מגבה את מסד הנתונים, מתקין את העדכון בשקט ופותח מחדש..." });
     try {
       const res = await fetch("/api/updater/install-now", { method: "POST" });
       if (!res.ok) {
         const d = await res.json().catch(() => ({}));
         setInstallingNow(false);
-        setMsg({ type: "err", text: d.error || "שגיאה בהפעלת המתקין" });
+        setMsg({ type: "err", text: d.error || "שגיאה בהחלת העדכון" });
       }
     } catch {
       setInstallingNow(false);
@@ -374,7 +375,7 @@ export const UpdaterPanel: React.FC<UpdaterPanelProps> = ({ onUpdateStatusChange
           </div>
           <p className="text-xs text-[var(--otzar-text-muted)] flex items-center gap-1.5">
             <ShieldCheck className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-            <span>מסד הנתונים נשמר ב-%AppData%\OtzarSefarim\data בנפרד מקבצי התוכנה ואינו נדרס בעדכונים או בהסרת התקנה.</span>
+            <span>מסד הנתונים נשמר ב-%AppData%\OtzarSefarim\data בנפרד מקבצי התוכנה, ומעתה העדכונים מוחלים בשקט ללא אשף התקנה.</span>
           </p>
         </div>
       ) : (
@@ -485,7 +486,7 @@ export const UpdaterPanel: React.FC<UpdaterPanelProps> = ({ onUpdateStatusChange
             className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-semibold text-white bg-emerald-600 hover:bg-emerald-700 cursor-pointer disabled:opacity-50 whitespace-nowrap shrink-0"
           >
             <RotateCcw className="w-4 h-4" />
-            {installingNow ? "מפעיל מתקין..." : "הפעל מחדש והתקן עכשיו"}
+            {installingNow ? "מכין גיבוי ומתקין..." : "הפעל מחדש והתקן עכשיו"}
           </button>
         ) : (
           hasUpdate && (
@@ -508,18 +509,36 @@ export const UpdaterPanel: React.FC<UpdaterPanelProps> = ({ onUpdateStatusChange
         )}
       </div>
 
-      {hasUpdate && status?.lastCheck?.latestCommits && status.lastCheck.latestCommits.length > 0 && (
-        <div className="p-3 rounded-lg bg-[var(--otzar-surface)] border border-[var(--otzar-border-muted)] space-y-1.5 text-xs">
-          <div className="font-semibold">שינויים בגרסה החדשה:</div>
-          <ul className="space-y-1 list-disc list-inside text-[var(--otzar-text-muted)]">
-            {status.lastCheck.latestCommits.map((c) => (
-              <li key={c.hash}>
-                <span className="font-mono text-[var(--otzar-text)]">{c.hash}</span> — {c.message}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
+      {hasUpdate &&
+        ((isElectron && desktop?.releaseHighlights && desktop.releaseHighlights.length > 0) ||
+          (status?.lastCheck?.latestCommits && status.lastCheck.latestCommits.length > 0)) && (
+          <div className="p-3 rounded-lg bg-[var(--otzar-surface)] border border-[var(--otzar-border-muted)] space-y-1.5 text-xs">
+            <div className="font-semibold text-[var(--otzar-text)]">
+              שינויים בגרסה החדשה
+              {isElectron && desktop?.availableVersion && (
+                <span className="font-mono tabular-nums text-[var(--otzar-text-muted)] mr-1.5" dir="ltr">
+                  v{desktop.availableVersion}
+                </span>
+              )}
+              :
+            </div>
+            {isElectron && desktop?.releaseHighlights && desktop.releaseHighlights.length > 0 ? (
+              <ul className="space-y-1 list-disc list-inside text-[var(--otzar-text-muted)] leading-relaxed">
+                {desktop.releaseHighlights.map((line, idx) => (
+                  <li key={idx}>{line}</li>
+                ))}
+              </ul>
+            ) : (
+              <ul className="space-y-1 list-disc list-inside text-[var(--otzar-text-muted)] leading-relaxed">
+                {status?.lastCheck?.latestCommits?.map((c) => (
+                  <li key={c.hash}>
+                    <span className="font-mono text-[var(--otzar-text)]">{c.hash}</span> — {c.message}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
 
       {msg && (
         <div

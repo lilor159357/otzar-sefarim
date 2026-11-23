@@ -49,6 +49,7 @@ jobs:
             release/*.exe
             release/latest.yml
             release/*.blockmap
+          body_path: RELEASE_NOTES.md
           generate_release_notes: true
 
       - name: Upload installer artifact

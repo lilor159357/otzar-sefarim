@@ -11,6 +11,7 @@ files:
   - dist/client/**/*
   - dist-electron/**/*
   - build/icon.*
+  - build/splash.html
   - package.json
   - "!**/*.map"
   - "!data/**"
@@ -24,14 +25,14 @@ win:
   verifyUpdateCodeSignature: false
   artifactName: Otzar-Sefarim-Setup-${version}.${ext}
 nsis:
-  oneClick: false
+  oneClick: true
   perMachine: false
-  allowToChangeInstallationDirectory: true
+  deleteAppDataOnUninstall: false
   createDesktopShortcut: true
   createStartMenuShortcut: true
   shortcutName: אוצר ספרים
   uninstallDisplayName: אוצר ספרים - ניהול ספרייה תורנית
-  deleteAppDataOnUninstall: false
+  runAfterFinish: true
 publish:
   provider: github
   owner: lilor159357

@@ -26,6 +26,7 @@ import { AiSettingsPanel } from "./components/AiSettingsPanel.tsx";
 import { FirebaseSyncPanel } from "./components/FirebaseSyncPanel.tsx";
 import { SetupTransferPanel } from "./components/SetupTransferPanel.tsx";
 import { UpdaterPanel } from "./components/UpdaterPanel.tsx";
+import { WhatsNewModal, type RecentUpdateInfo } from "./components/WhatsNewModal.tsx";
 import { LabelsModule } from "./components/LabelsModule.tsx";
 import { AdminPinModal } from "./components/AdminPinModal.tsx";
 import { installFetchAdminInterceptor, setAdminToken } from "./lib/adminSession.ts";
@@ -61,7 +62,11 @@ export default function App() {
   const [pinMsg, setPinMsg] = useState<string | null>(null);
   const [backupMsg, setBackupMsg] = useState<string | null>(null);
   const [updateBehindCount, setUpdateBehindCount] = useState(0);
+  const [updateReadyToInstall, setUpdateReadyToInstall] = useState(false);
+  const [updateAvailableVer, setUpdateAvailableVer] = useState<string | null>(null);
+  const [installingBannerUpdate, setInstallingBannerUpdate] = useState(false);
   const [dismissUpdateBanner, setDismissUpdateBanner] = useState(false);
+  const [recentUpdate, setRecentUpdate] = useState<RecentUpdateInfo | null>(null);
 
   const applyTheme = (preset: string, mode: string) => {
     const root = document.documentElement;
@@ -151,8 +156,21 @@ export default function App() {
   }, [isAdmin]);
 
   useEffect(() => {
+    fetch("/api/updater/recent-update", { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d: RecentUpdateInfo | null) => {
+        if (d?.hasRecentUpdate) {
+          setRecentUpdate(d);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
     if (!isAdmin) {
       setUpdateBehindCount(0);
+      setUpdateReadyToInstall(false);
+      setUpdateAvailableVer(null);
       return;
     }
     fetch("/api/updater/status")
@@ -161,6 +179,8 @@ export default function App() {
         if (d?.lastCheck?.behindCount > 0) {
           setUpdateBehindCount(Number(d.lastCheck.behindCount) || 0);
         }
+        setUpdateReadyToInstall(Boolean(d?.isElectron && d?.desktop?.downloaded));
+        setUpdateAvailableVer(d?.desktop?.availableVersion || null);
       })
       .catch(() => {});
   }, [isAdmin]);
@@ -358,24 +378,49 @@ export default function App() {
           {isAdmin && updateBehindCount > 0 && !dismissUpdateBanner && !(effectiveTab === "admin" && adminSubTab === "settings") && (
             <div className="p-3 rounded-xl border border-[var(--otzar-accent)]/40 bg-[var(--otzar-surface)] flex flex-wrap items-center justify-between gap-2 text-sm">
               <div className="flex items-center gap-2 font-medium">
-                <RefreshCw className="w-4 h-4 text-[var(--otzar-accent)]" />
-                <span>קיים עדכון תוכנה חדש מ-GitHub ({updateBehindCount} שינויים ממתינים).</span>
+                <RefreshCw className="w-4 h-4 text-[var(--otzar-accent)] shrink-0" />
+                <span>
+                  {updateReadyToInstall
+                    ? `גרסה חדשה${updateAvailableVer ? ` v${updateAvailableVer}` : ""} ירדה ומוכנה להתקנה שקטה.`
+                    : updateAvailableVer
+                    ? `גרסה חדשה v${updateAvailableVer} זמינה להורדה.`
+                    : `קיים עדכון תוכנה חדש מ-GitHub (${updateBehindCount} שינויים ממתינים).`}
+                </span>
               </div>
               <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setActiveTab("admin");
-                    setAdminSubTab("settings");
-                  }}
-                  className="px-3 py-1.5 rounded-lg text-xs font-semibold text-white bg-[var(--otzar-accent)] hover:bg-[var(--otzar-accent-hover)] cursor-pointer"
-                >
-                  פתח עדכונים
-                </button>
+                {updateReadyToInstall ? (
+                  <button
+                    type="button"
+                    disabled={installingBannerUpdate}
+                    onClick={async () => {
+                      setInstallingBannerUpdate(true);
+                      try {
+                        const r = await fetch("/api/updater/install-now", { method: "POST" });
+                        if (!r.ok) setInstallingBannerUpdate(false);
+                      } catch {
+                        setInstallingBannerUpdate(false);
+                      }
+                    }}
+                    className="px-3 py-1.5 rounded-lg text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-700 cursor-pointer disabled:opacity-60 whitespace-nowrap shrink-0"
+                  >
+                    {installingBannerUpdate ? "מכין גיבוי ומתקין..." : "הפעל מחדש והתקן עכשיו"}
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setActiveTab("admin");
+                      setAdminSubTab("settings");
+                    }}
+                    className="px-3 py-1.5 rounded-lg text-xs font-semibold text-white bg-[var(--otzar-accent)] hover:bg-[var(--otzar-accent-hover)] cursor-pointer whitespace-nowrap shrink-0"
+                  >
+                    פתח עדכונים
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() => setDismissUpdateBanner(true)}
-                  className="px-2.5 py-1.5 rounded-lg text-xs text-[var(--otzar-text-muted)] hover:bg-[var(--otzar-bg)] cursor-pointer"
+                  className="px-2.5 py-1.5 rounded-lg text-xs text-[var(--otzar-text-muted)] hover:bg-[var(--otzar-bg)] cursor-pointer whitespace-nowrap shrink-0"
                 >
                   הסתר
                 </button>
@@ -713,6 +758,17 @@ export default function App() {
         </main>
       </div>
 
+      {recentUpdate?.hasRecentUpdate && (
+        <WhatsNewModal
+          info={recentUpdate}
+          onAcknowledge={async () => {
+            try {
+              await fetch("/api/updater/ack-release-notes", { method: "POST" });
+            } catch {}
+            setRecentUpdate(null);
+          }}
+        />
+      )}
       {showPinModal && (
         <AdminPinModal
           onSuccess={async (t) => {

@@ -6,6 +6,14 @@ import path from "path";
 import { promisify } from "util";
 import type { DbClient } from "../db/adapter.ts";
 import { requireAdmin } from "../auth/adminAuth.ts";
+import {
+  cleanReleaseNotes,
+  clearPendingUpdateNotes,
+  compareSemver,
+  getBuiltinHighlightsForVersion,
+  readPendingUpdateNotes,
+  savePendingUpdateNotes,
+} from "../sync/releaseNotes.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -20,6 +28,7 @@ export interface DesktopUpdaterSnapshot {
   currentVersion: string;
   availableVersion: string | null;
   releaseNotes: string | null;
+  releaseHighlights?: string[];
   checking: boolean;
   downloading: boolean;
   downloadPercent: number;
@@ -161,7 +170,7 @@ function setSetting(db: DbClient, key: string, value: string): void {
   );
 }
 
-function createBackupFile(db: DbClient, dataDir: string, prefix = "pre-update"): string {
+export function createBackupFile(db: DbClient, dataDir: string, prefix = "pre-update"): string {
   const backupsDir = path.join(dataDir, "backups");
   fs.mkdirSync(backupsDir, { recursive: true });
   const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
@@ -491,12 +500,70 @@ export function registerUpdaterRoutes(
   rootDir: string,
   dataDir: string,
   hooks: UpdaterRestartHooks,
-  desktopUpdater?: DesktopUpdaterBridge
+  desktopUpdater?: DesktopUpdaterBridge,
+  appVersionOverride?: string
 ) {
+  const resolveCurrentVersion = () =>
+    desktopUpdater?.getSnapshot()?.currentVersion || appVersionOverride || getPackageVersion(rootDir);
+
+  const formatDesktopSnapshot = (rawDesktop: DesktopUpdaterSnapshot | null) => {
+    if (!rawDesktop) return null;
+    const cleaned = cleanReleaseNotes(rawDesktop.releaseNotes, rawDesktop.availableVersion);
+    const highlights =
+      Array.isArray(rawDesktop.releaseHighlights) && rawDesktop.releaseHighlights.length > 0
+        ? rawDesktop.releaseHighlights
+        : cleaned.highlights;
+    return {
+      ...rawDesktop,
+      releaseNotes: cleaned.summary || null,
+      releaseHighlights: highlights,
+    };
+  };
+
+  app.get("/api/updater/recent-update", (_req, res) => {
+    const currentVersion = resolveCurrentVersion();
+    const pending = readPendingUpdateNotes(dataDir);
+    const lastSeen = getSetting(db, "last_seen_app_version", "").trim();
+
+    if (pending && compareSemver(currentVersion, pending.targetVersion) >= 0) {
+      const highlights =
+        Array.isArray(pending.highlights) && pending.highlights.length > 0
+          ? pending.highlights
+          : getBuiltinHighlightsForVersion(currentVersion);
+      return res.json({
+        hasRecentUpdate: true,
+        version: currentVersion,
+        previousVersion: pending.previousVersion || lastSeen || null,
+        highlights,
+        summary: pending.summary || highlights.join(" · "),
+      });
+    }
+
+    if (!lastSeen || compareSemver(currentVersion, lastSeen) > 0) {
+      const highlights = getBuiltinHighlightsForVersion(currentVersion);
+      return res.json({
+        hasRecentUpdate: true,
+        version: currentVersion,
+        previousVersion: lastSeen || null,
+        highlights,
+        summary: highlights.join(" · "),
+      });
+    }
+
+    return res.json({ hasRecentUpdate: false, version: currentVersion, highlights: [] });
+  });
+
+  app.post("/api/updater/ack-release-notes", (_req, res) => {
+    const currentVersion = resolveCurrentVersion();
+    setSetting(db, "last_seen_app_version", currentVersion);
+    clearPendingUpdateNotes(dataDir);
+    res.json({ ok: true, version: currentVersion });
+  });
+
   app.get("/api/updater/status", requireAdmin, async (_req, res) => {
     const info = await getRepoInfo(rootDir);
     const hasReleaseToken = Boolean(getSetting(db, "github_release_token", "").trim());
-    const desktop = desktopUpdater ? desktopUpdater.getSnapshot() : null;
+    const desktop = formatDesktopSnapshot(desktopUpdater ? desktopUpdater.getSnapshot() : null);
     res.json({
       ...info,
       isElectron: Boolean(desktop?.isElectron),
@@ -587,7 +654,7 @@ export function registerUpdaterRoutes(
   app.post("/api/updater/check", requireAdmin, async (_req, res) => {
     if (desktopUpdater) {
       const token = getSetting(db, "github_release_token", "").trim();
-      const desktop = await desktopUpdater.checkForUpdates(token);
+      const desktop = formatDesktopSnapshot(await desktopUpdater.checkForUpdates(token))!;
       return res.json({
         isElectron: true,
         desktop,
@@ -599,7 +666,7 @@ export function registerUpdaterRoutes(
           localHash: desktop.currentVersion,
           remoteHash: desktop.availableVersion || desktop.currentVersion,
           latestCommits: desktop.availableVersion
-            ? [{ hash: "v" + desktop.availableVersion, message: (desktop.releaseNotes || "גרסת Desktop חדשה זמינה").replace(/<\/?(?:p|br|li|div)[^>]*>/gi, " ").replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim() || "גרסת Desktop חדשה זמינה", date: desktop.checkedAt || "" }]
+            ? [{ hash: "v" + desktop.availableVersion, message: desktop.releaseNotes || "גרסת Desktop חדשה זמינה", date: desktop.checkedAt || "" }]
             : [],
           error: desktop.error,
         },
@@ -637,9 +704,28 @@ export function registerUpdaterRoutes(
     if (!desktopUpdater) {
       return res.status(400).json({ error: "התקנת Setup זמינה רק בגרסת ה-Desktop" });
     }
+    const snap = formatDesktopSnapshot(desktopUpdater.getSnapshot());
+    const targetVersion = String(snap?.availableVersion || "").trim();
+    const themePreset = getSetting(db, "theme_preset", "default") || "default";
+    const darkMode = getSetting(db, "theme_mode", "light") === "dark";
+    if (targetVersion) {
+      const highlights =
+        snap?.releaseHighlights && snap.releaseHighlights.length > 0
+          ? snap.releaseHighlights
+          : getBuiltinHighlightsForVersion(targetVersion);
+      savePendingUpdateNotes(dataDir, {
+        targetVersion,
+        previousVersion: snap?.currentVersion || resolveCurrentVersion(),
+        summary: snap?.releaseNotes || highlights.join(" · "),
+        highlights,
+        themePreset,
+        darkMode,
+        savedAt: new Date().toISOString(),
+      });
+    }
     res.json({ ok: true, installing: true });
     setTimeout(() => {
       desktopUpdater.quitAndInstall();
-    }, 300);
+    }, 220);
   });
 }

@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>אוצר ספרים</title>
+  <style>
+    :root {
+      --otzar-bg: #ffffff;
+      --otzar-surface: #fff7ed;
+      --otzar-border: #fed7aa;
+      --otzar-border-muted: #e2e8f0;
+      --otzar-text: #1e293b;
+      --otzar-text-muted: #64748b;
+      --otzar-accent: #ea580c;
+      --otzar-accent-soft: #ffedd5;
+    }
+
+    :root[data-theme="classic-blue"] {
+      --otzar-surface: #eff6ff;
+      --otzar-border: #bfdbfe;
+      --otzar-accent: #1d4ed8;
+      --otzar-accent-soft: #dbeafe;
+    }
+
+    :root[data-theme="forest-green"] {
+      --otzar-surface: #ecfdf5;
+      --otzar-border: #a7f3d0;
+      --otzar-accent: #047857;
+      --otzar-accent-soft: #d1fae5;
+    }
+
+    .dark {
+      --otzar-bg: #0f172a;
+      --otzar-surface: #1e293b;
+      --otzar-border: #334155;
+      --otzar-border-muted: #334155;
+      --otzar-text: #f8fafc;
+      --otzar-text-muted: #94a3b8;
+      --otzar-accent: #f97316;
+      --otzar-accent-soft: #431407;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background-color: var(--otzar-bg);
+      color: var(--otzar-text);
+      font-family: "Heebo", "Segoe UI", "Arial", sans-serif;
+      user-select: none;
+      -webkit-app-region: drag;
+    }
+
+    .shell {
+      width: 100%;
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      padding: 28px 30px 22px;
+      border: 1px solid var(--otzar-border-muted);
+      background-color: var(--otzar-bg);
+    }
+
+    .brand-row {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .logo-mark {
+      width: 46px;
+      height: 46px;
+      border-radius: 12px;
+      background-color: var(--otzar-surface);
+      border: 1px solid var(--otzar-border);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--otzar-accent);
+      flex-shrink: 0;
+    }
+
+    .title-group {
+      min-width: 0;
+    }
+
+    .app-name {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--otzar-text-muted);
+      margin-bottom: 3px;
+    }
+
+    .headline {
+      font-size: 20px;
+      font-weight: 700;
+      line-height: 1.3;
+      color: var(--otzar-text);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .status-block {
+      margin-top: 20px;
+      padding: 14px 16px;
+      border-radius: 10px;
+      background-color: var(--otzar-surface);
+      border: 1px solid var(--otzar-border-muted);
+    }
+
+    .status-text {
+      font-size: 13.5px;
+      font-weight: 500;
+      color: var(--otzar-text);
+      line-height: 1.5;
+    }
+
+    .progress-track {
+      margin-top: 14px;
+      width: 100%;
+      height: 6px;
+      border-radius: 999px;
+      background-color: var(--otzar-border-muted);
+      overflow: hidden;
+      position: relative;
+    }
+
+    .progress-bar {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      width: 38%;
+      border-radius: 999px;
+      background-color: var(--otzar-accent);
+      animation: otzar-slide 1.25s cubic-bezier(0.16, 1, 0.3, 1) infinite;
+    }
+
+    @keyframes otzar-slide {
+      0% { right: -40%; }
+      100% { right: 105%; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .progress-bar {
+        animation: none;
+        right: 0;
+        width: 100%;
+        opacity: 0.85;
+      }
+    }
+
+    .footer-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding-top: 12px;
+      border-top: 1px solid var(--otzar-border-muted);
+      font-size: 12px;
+      color: var(--otzar-text-muted);
+    }
+
+    .version-num {
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+      font-variant-numeric: tabular-nums;
+      direction: ltr;
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div>
+      <div class="brand-row">
+        <div class="logo-mark" aria-hidden="true">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/>
+            <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/>
+          </svg>
+        </div>
+        <div class="title-group">
+          <div class="app-name" id="app-kicker">אוצר ספרים · ניהול ספרייה תורנית</div>
+          <h1 class="headline" id="headline">טוען את התוכנה...</h1>
+        </div>
+      </div>
+
+      <div class="status-block">
+        <div class="status-text" id="status-text">מאתחל את מסד הנתונים והחיבורים המקומיים...</div>
+        <div class="progress-track">
+          <div class="progress-bar" id="progress-bar"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="footer-row">
+      <span id="reassurance">מסד הנתונים, הברקודים וההגדרות שמורים בבטחה</span>
+      <span class="version-num" id="version-label"></span>
+    </div>
+  </div>
+
+  <script>
+    (function () {
+      const params = new URLSearchParams(window.location.search);
+      const mode = params.get("mode") || "boot";
+      const version = params.get("version") || "";
+      const theme = params.get("theme") || "default";
+      const dark = params.get("dark") === "1";
+      const upgraded = params.get("upgraded") === "1";
+
+      if (theme && theme !== "default") {
+        document.documentElement.setAttribute("data-theme", theme);
+      }
+      if (dark) {
+        document.documentElement.classList.add("dark");
+      }
+
+      const headline = document.getElementById("headline");
+      const statusText = document.getElementById("status-text");
+      const versionLabel = document.getElementById("version-label");
+      const kicker = document.getElementById("app-kicker");
+
+      if (version) {
+        versionLabel.textContent = "v" + version.replace(/^v/i, "");
+      }
+
+      if (mode === "updating") {
+        kicker.textContent = "עדכון מערכת · אוצר ספרים";
+        headline.textContent = version
+          ? "מעדכן את אוצר ספרים לגרסה v" + version.replace(/^v/i, "")
+          : "מעדכן את אוצר ספרים...";
+        statusText.textContent = "מבצע גיבוי וסגירה בטוחה של מסד הנתונים — התוכנה תיפתח מיד מחדש.";
+      } else if (upgraded) {
+        kicker.textContent = "העדכון הושלם · אוצר ספרים";
+        headline.textContent = version
+          ? "מפעיל את גרסה v" + version.replace(/^v/i, "") + "..."
+          : "מפעיל את הגרסה החדשה...";
+        statusText.textContent = "מכין את ממשק הספרייה וטוען את הנתונים שלך...";
+      }
+
+      window.__setSplashStatus = function (msg) {
+        if (typeof msg === "string" && msg.trim()) {
+          statusText.textContent = msg.trim();
+        }
+      };
+    })();
+  </script>
+</body>
+</html>

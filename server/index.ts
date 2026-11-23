@@ -13,11 +13,13 @@ import { registerSyncRoutes } from "./routes/sync.ts";
 import { OtzarFirebaseSyncService } from "./sync/firebaseSync.ts";
 import { loadWindowsRootCertificates } from "../electron/windowsCerts.ts";
 import {
+  createBackupFile,
   registerUpdaterRoutes,
   scheduleStartupAutoUpdateCheck,
   type DesktopUpdaterBridge,
   type UpdaterRestartHooks,
 } from "./routes/updater.ts";
+import { saveUiPrefs, type UiPrefsSnapshot } from "./sync/releaseNotes.ts";
 import { isAdminRequest, requireAdmin } from "./auth/adminAuth.ts";
 import { blobToFloat32, buildBookEmbeddingText, cosineSimilarity, float32ToBlob, generateTextEmbedding, getAiConfig, hasConfiguredAiKeys } from "./ai/geminiService.ts";
 
@@ -38,6 +40,8 @@ export interface StartedOtzarServer {
   url: string;
   dataDir: string;
   dbPath: string;
+  getThemeSnapshot: () => UiPrefsSnapshot;
+  prepareAndCloseForUpdate: () => { backupPath: string; themePreset: string; darkMode: boolean };
   close: () => void;
 }
 
@@ -99,8 +103,22 @@ export async function startOtzarServer(options: OtzarServerOptions = {}): Promis
     loadWindowsRootCertificates(DATA_DIR);
   }
 
+  const dbExistedBeforeOpen = fs.existsSync(DB_PATH) && fs.statSync(DB_PATH).size > 0;
   const db = await openDatabase(DB_PATH);
   initSchemaAndSeed(db);
+  if (!dbExistedBeforeOpen) {
+    db.run(
+      "INSERT OR IGNORE INTO settings (key, value) VALUES ('last_seen_app_version', ?)",
+      appVersion
+    );
+  }
+
+  const getThemeSnapshot = (): UiPrefsSnapshot => {
+    const preset = db.get<{ value: string }>("SELECT value FROM settings WHERE key = 'theme_preset'")?.value || "default";
+    const mode = db.get<{ value: string }>("SELECT value FROM settings WHERE key = 'theme_mode'")?.value || "light";
+    return { themePreset: preset, darkMode: mode === "dark" };
+  };
+  saveUiPrefs(DATA_DIR, getThemeSnapshot());
 
   const app = express();
   app.use(express.json({ limit: "25mb" }));
@@ -177,6 +195,9 @@ export async function startOtzarServer(options: OtzarServerOptions = {}): Promis
         db.run("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", key, str);
       }
     });
+    if ("theme_preset" in body || "theme_mode" in body) {
+      saveUiPrefs(DATA_DIR, getThemeSnapshot());
+    }
     res.json({ ok: true });
   });
 
@@ -605,7 +626,7 @@ export async function startOtzarServer(options: OtzarServerOptions = {}): Promis
 
   // Stage 6: Auto-Update & GitHub Sync
   const updaterHooks: UpdaterRestartHooks = {};
-  registerUpdaterRoutes(app, db, ROOT_DIR, DATA_DIR, updaterHooks, options.desktopUpdater);
+  registerUpdaterRoutes(app, db, ROOT_DIR, DATA_DIR, updaterHooks, options.desktopUpdater, appVersion);
 
   // Stage 7: Bidirectional Firebase Firestore Delta Sync & Mobile Relay Listener
   syncService = new OtzarFirebaseSyncService(db, DATA_DIR, () => aiHooks.triggerQueueProcessing());
@@ -641,25 +662,71 @@ export async function startOtzarServer(options: OtzarServerOptions = {}): Promis
     });
   });
 
+  let serverClosed = false;
+
   const close = () => {
-    try {
-      void syncService?.stop();
-    } catch {}
+    if (serverClosed) return;
+    serverClosed = true;
     try {
       updaterHooks.cancelStartupCheck?.();
     } catch {}
     try {
+      void syncService?.stop();
+    } catch {}
+    try {
+      (httpServer as unknown as { closeAllConnections?: () => void }).closeAllConnections?.();
       httpServer.close();
+    } catch {}
+    try {
+      db.checkpoint();
     } catch {}
     try {
       db.close();
     } catch {}
   };
 
+  const prepareAndCloseForUpdate = () => {
+    const themeSnap = getThemeSnapshot();
+    saveUiPrefs(DATA_DIR, themeSnap);
+    if (serverClosed) {
+      return { backupPath: "", ...themeSnap };
+    }
+    try {
+      updaterHooks.cancelStartupCheck?.();
+    } catch {}
+    try {
+      void syncService?.stop();
+    } catch {}
+    // 1. Synchronous WAL Checkpoint before backup
+    db.checkpoint();
+    // 2. Synchronous pre-update backup
+    const backupPath = createBackupFile(db, DATA_DIR, "pre-update");
+    if (!backupPath || !fs.existsSync(backupPath) || fs.statSync(backupPath).size === 0) {
+      throw new Error("גיבוי טרום-עדכון נכשל — העדכון נעצר לשמירה על מסד הנתונים");
+    }
+    // 3. Full synchronous teardown of Express & SQLite locks
+    serverClosed = true;
+    try {
+      (httpServer as unknown as { closeAllConnections?: () => void }).closeAllConnections?.();
+      httpServer.close();
+    } catch {}
+    db.close();
+    return { backupPath, ...themeSnap };
+  };
+
   updaterHooks.closeServer = close;
   scheduleStartupAutoUpdateCheck(db, ROOT_DIR, DATA_DIR, updaterHooks, options.desktopUpdater);
 
-  return { app, port, url, dataDir: DATA_DIR, dbPath: db.dbPath, close };
+  return {
+    app,
+    port,
+    url,
+    dataDir: DATA_DIR,
+    dbPath: db.dbPath,
+    getThemeSnapshot,
+    prepareAndCloseForUpdate,
+    close,
+  };
 }
 
 const entryArg = process.argv[1] ? path.resolve(process.argv[1]).toLowerCase() : "";

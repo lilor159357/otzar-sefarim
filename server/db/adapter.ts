@@ -15,6 +15,7 @@ export interface DbClient {
   get<T = Record<string, unknown>>(sql: string, ...params: unknown[]): T | undefined;
   all<T = Record<string, unknown>>(sql: string, ...params: unknown[]): T[];
   transaction<T>(fn: () => T): T;
+  checkpoint(): void;
   backupTo(destPath: string): void;
   close(): void;
 }
@@ -40,11 +41,15 @@ export async function openDatabase(dbPath: string): Promise<DbClient> {
       get: <T>(sql: string, ...params: unknown[]) => nativeDb.prepare(sql).get(...params) as T | undefined,
       all: <T>(sql: string, ...params: unknown[]) => nativeDb.prepare(sql).all(...params) as T[],
       transaction: <T>(fn: () => T) => nativeDb.transaction(fn)(),
+      checkpoint: () => {
+        try { nativeDb.pragma("wal_checkpoint(TRUNCATE)"); } catch {}
+      },
       backupTo: (destPath: string) => {
         nativeDb.pragma("wal_checkpoint(TRUNCATE)");
         fs.copyFileSync(dbPath, destPath);
       },
       close: () => {
+        try { nativeDb.pragma("wal_checkpoint(TRUNCATE)"); } catch {}
         try { nativeDb.close(); } catch {}
       },
     };
@@ -92,11 +97,15 @@ export async function openDatabase(dbPath: string): Promise<DbClient> {
             throw err;
           }
         },
+        checkpoint: () => {
+          try { nodeDb.exec("PRAGMA wal_checkpoint(TRUNCATE);"); } catch {}
+        },
         backupTo: (destPath: string) => {
           try { nodeDb.exec("PRAGMA wal_checkpoint(TRUNCATE);"); } catch {}
           fs.copyFileSync(dbPath, destPath);
         },
         close: () => {
+          try { nodeDb.exec("PRAGMA wal_checkpoint(TRUNCATE);"); } catch {}
           try { nodeDb.close(); } catch {}
         },
       };
@@ -188,6 +197,9 @@ export async function openDatabase(dbPath: string): Promise<DbClient> {
         }
         throw err;
       }
+    },
+    checkpoint: () => {
+      try { flush(); } catch {}
     },
     backupTo: (destPath: string) => {
       flush();

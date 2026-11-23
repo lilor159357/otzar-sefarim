@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Menu, shell } from "electron";
+import { app, BrowserWindow, dialog, Menu, shell } from "electron";
 import { autoUpdater } from "electron-updater";
 import fs from "fs";
 import path from "path";
@@ -6,9 +6,17 @@ import { migrateLegacyDataIfNeeded } from "./dataMigration.ts";
 import { loadWindowsRootCertificates } from "./windowsCerts.ts";
 import { startOtzarServer, type StartedOtzarServer } from "../server/index.ts";
 import type { DesktopUpdaterBridge, DesktopUpdaterSnapshot } from "../server/routes/updater.ts";
+import {
+  cleanReleaseNotes,
+  compareSemver,
+  readPendingUpdateNotes,
+  readUiPrefs,
+} from "../server/sync/releaseNotes.ts";
 
 let mainWindow: BrowserWindow | null = null;
+let splashWindow: BrowserWindow | null = null;
 let serverHandle: StartedOtzarServer | null = null;
+let isQuittingForUpdate = false;
 
 function createDesktopUpdaterBridge(): DesktopUpdaterBridge {
   const snapshot: DesktopUpdaterSnapshot = {
@@ -17,6 +25,7 @@ function createDesktopUpdaterBridge(): DesktopUpdaterBridge {
     currentVersion: app.getVersion(),
     availableVersion: null,
     releaseNotes: null,
+    releaseHighlights: [],
     checking: false,
     downloading: false,
     downloadPercent: 0,
@@ -42,8 +51,11 @@ function createDesktopUpdaterBridge(): DesktopUpdaterBridge {
   autoUpdater.on("update-available", (info) => {
     snapshot.checking = false;
     snapshot.hasUpdate = true;
-    snapshot.availableVersion = String(info?.version || "");
-    snapshot.releaseNotes = typeof info?.releaseNotes === "string" ? info.releaseNotes : null;
+    const ver = String(info?.version || "");
+    const cleaned = cleanReleaseNotes(info?.releaseNotes, ver);
+    snapshot.availableVersion = ver;
+    snapshot.releaseNotes = cleaned.summary || null;
+    snapshot.releaseHighlights = cleaned.highlights;
     snapshot.checkedAt = new Date().toISOString();
     snapshot.error = null;
   });
@@ -71,7 +83,13 @@ function createDesktopUpdaterBridge(): DesktopUpdaterBridge {
     snapshot.bytesPerSecond = 0;
     snapshot.downloaded = true;
     snapshot.hasUpdate = true;
-    snapshot.availableVersion = String(info?.version || snapshot.availableVersion || "");
+    const ver = String(info?.version || snapshot.availableVersion || "");
+    snapshot.availableVersion = ver;
+    if (info?.releaseNotes) {
+      const cleaned = cleanReleaseNotes(info.releaseNotes, ver);
+      if (cleaned.summary) snapshot.releaseNotes = cleaned.summary;
+      if (cleaned.highlights.length > 0) snapshot.releaseHighlights = cleaned.highlights;
+    }
     snapshot.error = null;
   });
 
@@ -165,7 +183,45 @@ function createDesktopUpdaterBridge(): DesktopUpdaterBridge {
       };
     },
     quitAndInstall() {
-      autoUpdater.quitAndInstall(false, true);
+      if (isQuittingForUpdate) return;
+      isQuittingForUpdate = true;
+      const appRoot = app.getAppPath();
+      const dataDir = serverHandle?.dataDir || path.join(app.getPath("appData"), "OtzarSefarim", "data");
+      const themeSnap = serverHandle?.getThemeSnapshot() || readUiPrefs(dataDir);
+      const targetVersion = snapshot.availableVersion || app.getVersion();
+
+      void (async () => {
+        try {
+          await createSplashWindow(appRoot, {
+            mode: "updating",
+            version: targetVersion,
+            themePreset: themeSnap.themePreset,
+            darkMode: themeSnap.darkMode,
+          });
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.destroy();
+            mainWindow = null;
+          }
+          // Allow splash frame to paint visibly before synchronous teardown
+          await new Promise((resolve) => setTimeout(resolve, 650));
+
+          // Mandatory synchronous sequence: WAL Checkpoint -> pre-update backup -> close Express & SQLite
+          serverHandle?.prepareAndCloseForUpdate();
+          serverHandle = null;
+
+          // Destroy splash so zero windows/listeners block process exit or lock files
+          destroySplashWindow();
+          autoUpdater.quitAndInstall(true, true);
+        } catch (err: any) {
+          isQuittingForUpdate = false;
+          destroySplashWindow();
+          dialog.showErrorBox(
+            "שגיאה בהחלת העדכון",
+            String(err?.message || "אירעה שגיאה לפני הפעלת המתקין השקט. הנתונים שלך נשמרו ובטוחים.")
+          );
+          app.quit();
+        }
+      })();
     },
   };
 }
@@ -182,7 +238,83 @@ function resolveAppIconPath(appRoot: string): string | undefined {
   return undefined;
 }
 
-async function createMainWindow(url: string, appRoot: string) {
+function resolveSplashHtmlPath(appRoot: string): string | undefined {
+  const candidates = [
+    path.join(appRoot, "build", "splash.html"),
+    path.join(path.resolve(__dirname, ".."), "build", "splash.html"),
+    path.join(process.resourcesPath || "", "splash.html"),
+  ];
+  for (const p of candidates) {
+    if (p && fs.existsSync(p)) return p;
+  }
+  return undefined;
+}
+
+function destroySplashWindow() {
+  if (splashWindow && !splashWindow.isDestroyed()) {
+    splashWindow.removeAllListeners("close");
+    splashWindow.destroy();
+  }
+  splashWindow = null;
+}
+
+async function createSplashWindow(
+  appRoot: string,
+  opts: {
+    mode: "boot" | "updating";
+    version?: string;
+    themePreset?: string;
+    darkMode?: boolean;
+    upgraded?: boolean;
+  }
+) {
+  const splashPath = resolveSplashHtmlPath(appRoot);
+  if (!splashPath) return;
+  destroySplashWindow();
+
+  const iconPath = resolveAppIconPath(appRoot);
+  splashWindow = new BrowserWindow({
+    width: 480,
+    height: 310,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    frame: false,
+    center: true,
+    alwaysOnTop: opts.mode === "updating",
+    skipTaskbar: opts.mode === "boot",
+    backgroundColor: opts.darkMode ? "#0f172a" : "#ffffff",
+    icon: iconPath,
+    show: false,
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+
+  splashWindow.once("ready-to-show", () => {
+    if (splashWindow && !splashWindow.isDestroyed()) {
+      splashWindow.show();
+    }
+  });
+
+  splashWindow.on("closed", () => {
+    splashWindow = null;
+  });
+
+  await splashWindow.loadFile(splashPath, {
+    query: {
+      mode: opts.mode,
+      version: opts.version || "",
+      theme: opts.themePreset || "default",
+      dark: opts.darkMode ? "1" : "0",
+      upgraded: opts.upgraded ? "1" : "0",
+    },
+  });
+}
+
+async function createMainWindow(url: string, appRoot: string, darkMode = false) {
   Menu.setApplicationMenu(null);
 
   const iconPath = resolveAppIconPath(appRoot);
@@ -193,7 +325,7 @@ async function createMainWindow(url: string, appRoot: string) {
     minHeight: 680,
     title: "אוצר ספרים - ניהול ספרייה תורנית",
     icon: iconPath,
-    backgroundColor: "#ffffff",
+    backgroundColor: darkMode ? "#0f172a" : "#ffffff",
     autoHideMenuBar: true,
     show: false,
     webPreferences: {
@@ -206,6 +338,7 @@ async function createMainWindow(url: string, appRoot: string) {
 
   mainWindow.once("ready-to-show", () => {
     mainWindow?.show();
+    destroySplashWindow();
   });
 
   // Allow local PDF/blob preview windows, send external https links to default browser
@@ -250,6 +383,18 @@ if (!gotSingleInstanceLock) {
     try {
       const appRoot = app.getAppPath();
       const targetDataDir = path.join(app.getPath("appData"), "OtzarSefarim", "data");
+      const bootPrefs = readUiPrefs(targetDataDir);
+      const pendingNotes = readPendingUpdateNotes(targetDataDir);
+      const bootUpgraded = Boolean(pendingNotes && compareSemver(app.getVersion(), pendingNotes.targetVersion) >= 0);
+
+      // Show instant branded boot splash from packaged local HTML while server & DB initialize
+      await createSplashWindow(appRoot, {
+        mode: "boot",
+        version: app.getVersion(),
+        themePreset: bootPrefs.themePreset,
+        darkMode: bootPrefs.darkMode,
+        upgraded: bootUpgraded,
+      });
 
       // 1. One-time safe copy-only migration from C:\OtzarSefarim\data -> %AppData%\OtzarSefarim\data
       const extraLegacyCandidates = app.isPackaged ? [] : [path.join(path.resolve(__dirname, ".."), "data")];
@@ -275,14 +420,16 @@ if (!gotSingleInstanceLock) {
       });
 
       // 4. Open normal desktop window
-      await createMainWindow(serverHandle.url, appRoot);
+      await createMainWindow(serverHandle.url, appRoot, bootPrefs.darkMode);
     } catch (err) {
+      destroySplashWindow();
       console.error("[OtzarDesktop] Fatal startup error:", err);
       app.quit();
     }
   });
 
   app.on("window-all-closed", () => {
+    if (isQuittingForUpdate) return;
     if (process.platform !== "darwin") {
       app.quit();
     }
