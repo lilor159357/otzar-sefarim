@@ -3,6 +3,7 @@ import fs from "fs";
 import path from "path";
 import * as XLSX from "xlsx";
 import type { DbClient } from "../db/adapter.ts";
+import { enqueueSyncOutbox, newSyncId } from "../db/schema.ts";
 import { extractTokenFromRequest, isAdminRequest, issueAdminToken, requireAdmin, revokeAdminToken } from "../auth/adminAuth.ts";
 import { generateLabelsPdfBuffer, type A4TemplateConfig, type LabelBookInput, type LabelDesignConfig } from "../pdf/labelsPdf.ts";
 
@@ -50,11 +51,11 @@ export function registerLabelsAndAdminRoutes(app: Express, db: DbClient, dataDir
   // --- Barcode Labels Queue & A4 PDF Engine ---
   app.get("/api/labels/queue", requireAdmin, (_req, res) => {
     const rows = db.all(
-      `SELECT b.barcode, b.title, b.author, b.volume, b.category, b.shelf_number, b.label_printed, b.created_at,
+      `SELECT b.barcode, b.title, b.author, b.volume, b.category, b.shelf_number, b.label_printed, b.barcode_status, b.created_at,
               c.code AS cabinet_code
        FROM books b
-       LEFT JOIN cabinets c ON b.cabinet_id = c.id
-       WHERE b.label_printed = 0
+       LEFT JOIN cabinets c ON b.cabinet_id = c.id AND c.deleted_at IS NULL
+       WHERE b.label_printed = 0 AND b.deleted_at IS NULL
        ORDER BY b.barcode ASC`
     );
     res.json(rows);
@@ -63,9 +64,15 @@ export function registerLabelsAndAdminRoutes(app: Express, db: DbClient, dataDir
   app.post("/api/labels/queue/add", requireAdmin, (req, res) => {
     const barcodes: string[] = Array.isArray(req.body?.barcodes) ? req.body.barcodes : [];
     if (barcodes.length === 0) return res.status(400).json({ error: "לא נבחרו ברקודים" });
+    const now = new Date().toISOString();
     db.transaction(() => {
       for (const bc of barcodes) {
-        db.run("UPDATE books SET label_printed = 0 WHERE barcode = ?", String(bc).trim());
+        const code = String(bc).trim();
+        db.run("UPDATE books SET label_printed = 0, updated_at = ? WHERE barcode = ? AND deleted_at IS NULL", now, code);
+        const row = db.get<{ sync_id?: string }>("SELECT sync_id FROM books WHERE barcode = ?", code);
+        if (row?.sync_id) {
+          enqueueSyncOutbox(db, "book", row.sync_id, "upsert", { sync_id: row.sync_id, barcode: code, label_printed: 0, updated_at: now });
+        }
       }
     });
     res.json({ ok: true, count: barcodes.length });
@@ -74,9 +81,26 @@ export function registerLabelsAndAdminRoutes(app: Express, db: DbClient, dataDir
   app.post("/api/labels/queue/mark-printed", requireAdmin, (req, res) => {
     const barcodes: string[] = Array.isArray(req.body?.barcodes) ? req.body.barcodes : [];
     if (barcodes.length === 0) return res.status(400).json({ error: "לא נבחרו ברקודים" });
+    const now = new Date().toISOString();
     db.transaction(() => {
       for (const bc of barcodes) {
-        db.run("UPDATE books SET label_printed = 1 WHERE barcode = ?", String(bc).trim());
+        const code = String(bc).trim();
+        db.run(
+          "UPDATE books SET label_printed = 1, barcode_status = 'assigned', updated_at = ? WHERE barcode = ? AND deleted_at IS NULL",
+          now,
+          code
+        );
+        const row = db.get<{ sync_id?: string }>("SELECT sync_id FROM books WHERE barcode = ?", code);
+        if (row) {
+          const syncId = row.sync_id || newSyncId();
+          enqueueSyncOutbox(db, "book", syncId, "upsert", {
+            sync_id: syncId,
+            barcode: code,
+            label_printed: 1,
+            barcode_status: "assigned",
+            updated_at: now,
+          });
+        }
       }
     });
     res.json({ ok: true, count: barcodes.length });
@@ -95,8 +119,8 @@ export function registerLabelsAndAdminRoutes(app: Express, db: DbClient, dataDir
         books = db.all<LabelBookInput>(
           `SELECT b.barcode, b.title, b.volume, b.shelf_number, c.code AS cabinet_code
            FROM books b
-           LEFT JOIN cabinets c ON b.cabinet_id = c.id
-           WHERE b.barcode IN (${placeholders})
+           LEFT JOIN cabinets c ON b.cabinet_id = c.id AND c.deleted_at IS NULL
+           WHERE b.barcode IN (${placeholders}) AND b.deleted_at IS NULL
            ORDER BY b.barcode ASC`,
           ...barcodes.map((b) => String(b).trim())
         );
@@ -104,8 +128,8 @@ export function registerLabelsAndAdminRoutes(app: Express, db: DbClient, dataDir
         books = db.all<LabelBookInput>(
           `SELECT b.barcode, b.title, b.volume, b.shelf_number, c.code AS cabinet_code
            FROM books b
-           LEFT JOIN cabinets c ON b.cabinet_id = c.id
-           WHERE b.label_printed = 0
+           LEFT JOIN cabinets c ON b.cabinet_id = c.id AND c.deleted_at IS NULL
+           WHERE b.label_printed = 0 AND b.deleted_at IS NULL
            ORDER BY b.barcode ASC`
         );
       }
@@ -144,9 +168,14 @@ export function registerLabelsAndAdminRoutes(app: Express, db: DbClient, dataDir
       });
 
       if (markAsPrinted) {
+        const now = new Date().toISOString();
         db.transaction(() => {
           for (const bk of books) {
-            db.run("UPDATE books SET label_printed = 1 WHERE barcode = ?", bk.barcode);
+            db.run(
+              "UPDATE books SET label_printed = 1, barcode_status = 'assigned', updated_at = ? WHERE barcode = ?",
+              now,
+              bk.barcode
+            );
           }
         });
       }
@@ -159,16 +188,225 @@ export function registerLabelsAndAdminRoutes(app: Express, db: DbClient, dataDir
     }
   });
 
+  // --- Shelving & Physical Space Report ---
+  app.get("/api/reports/shelving", requireAdmin, (_req, res) => {
+    const cabinets = db.all<{
+      id: number;
+      code: string;
+      main_subject: string;
+      shelves_count: number;
+    }>("SELECT id, code, main_subject, shelves_count FROM cabinets WHERE deleted_at IS NULL ORDER BY code ASC");
+
+    const books = db.all<{
+      barcode: string;
+      cabinet_id: number | null;
+      shelf_number: number | null;
+      format_size: string;
+      thickness_mm: number | null;
+      pages_count: number | null;
+      status: string;
+    }>(
+      "SELECT barcode, cabinet_id, shelf_number, format_size, thickness_mm, pages_count, status FROM books WHERE deleted_at IS NULL"
+    );
+
+    const formatBreakdown: Record<string, number> = {};
+    let totalThicknessMm = 0;
+    let knownThicknessCount = 0;
+    let missingThicknessCount = 0;
+    let assignedBooks = 0;
+    let unassignedBooks = 0;
+    let unassignedThicknessMm = 0;
+    let unassignedMissingThickness = 0;
+
+    type ShelfAcc = {
+      shelfNumber: number;
+      booksCount: number;
+      totalThicknessMm: number;
+      knownThicknessCount: number;
+      missingThicknessCount: number;
+      formatCounts: Record<string, number>;
+    };
+
+    const cabMap = new Map<
+      number,
+      {
+        id: number;
+        code: string;
+        main_subject: string;
+        shelves_count: number;
+        booksCount: number;
+        totalThicknessMm: number;
+        knownThicknessCount: number;
+        missingThicknessCount: number;
+        formatCounts: Record<string, number>;
+        shelves: Map<number, ShelfAcc>;
+      }
+    >();
+
+    for (const cab of cabinets) {
+      const shelves = new Map<number, ShelfAcc>();
+      const count = Math.max(1, Number(cab.shelves_count) || 5);
+      for (let s = 1; s <= count; s++) {
+        shelves.set(s, {
+          shelfNumber: s,
+          booksCount: 0,
+          totalThicknessMm: 0,
+          knownThicknessCount: 0,
+          missingThicknessCount: 0,
+          formatCounts: {},
+        });
+      }
+      cabMap.set(cab.id, {
+        id: cab.id,
+        code: cab.code,
+        main_subject: cab.main_subject,
+        shelves_count: count,
+        booksCount: 0,
+        totalThicknessMm: 0,
+        knownThicknessCount: 0,
+        missingThicknessCount: 0,
+        formatCounts: {},
+        shelves,
+      });
+    }
+
+    for (const b of books) {
+      const fmt = String(b.format_size || "").trim() || "לא הוגדר";
+      formatBreakdown[fmt] = (formatBreakdown[fmt] || 0) + 1;
+
+      const thick = b.thickness_mm != null && Number(b.thickness_mm) > 0 ? Number(b.thickness_mm) : null;
+      if (thick != null) {
+        totalThicknessMm += thick;
+        knownThicknessCount += 1;
+      } else {
+        missingThicknessCount += 1;
+      }
+
+      const cabEntry = b.cabinet_id != null ? cabMap.get(b.cabinet_id) : undefined;
+      if (!cabEntry) {
+        unassignedBooks += 1;
+        if (thick != null) unassignedThicknessMm += thick;
+        else unassignedMissingThickness += 1;
+        continue;
+      }
+
+      assignedBooks += 1;
+      cabEntry.booksCount += 1;
+      cabEntry.formatCounts[fmt] = (cabEntry.formatCounts[fmt] || 0) + 1;
+      if (thick != null) {
+        cabEntry.totalThicknessMm += thick;
+        cabEntry.knownThicknessCount += 1;
+      } else {
+        cabEntry.missingThicknessCount += 1;
+      }
+
+      const shelfNum = Number(b.shelf_number) > 0 ? Number(b.shelf_number) : 0;
+      let shelfAcc = cabEntry.shelves.get(shelfNum);
+      if (!shelfAcc) {
+        shelfAcc = {
+          shelfNumber: shelfNum,
+          booksCount: 0,
+          totalThicknessMm: 0,
+          knownThicknessCount: 0,
+          missingThicknessCount: 0,
+          formatCounts: {},
+        };
+        cabEntry.shelves.set(shelfNum, shelfAcc);
+      }
+      shelfAcc.booksCount += 1;
+      shelfAcc.formatCounts[fmt] = (shelfAcc.formatCounts[fmt] || 0) + 1;
+      if (thick != null) {
+        shelfAcc.totalThicknessMm += thick;
+        shelfAcc.knownThicknessCount += 1;
+      } else {
+        shelfAcc.missingThicknessCount += 1;
+      }
+    }
+
+    const round1 = (n: number) => Math.round(n * 10) / 10;
+
+    const cabinetReports = Array.from(cabMap.values()).map((cab) => {
+      const shelfRows = Array.from(cab.shelves.values())
+        .sort((a, b) => a.shelfNumber - b.shelfNumber)
+        .map((s) => ({
+          shelfNumber: s.shelfNumber,
+          booksCount: s.booksCount,
+          totalThicknessMm: round1(s.totalThicknessMm),
+          totalThicknessCm: round1(s.totalThicknessMm / 10),
+          avgThicknessMm: s.knownThicknessCount > 0 ? round1(s.totalThicknessMm / s.knownThicknessCount) : null,
+          knownThicknessCount: s.knownThicknessCount,
+          missingThicknessCount: s.missingThicknessCount,
+          formatCounts: s.formatCounts,
+        }));
+
+      return {
+        id: cab.id,
+        code: cab.code,
+        main_subject: cab.main_subject,
+        shelves_count: cab.shelves_count,
+        booksCount: cab.booksCount,
+        totalThicknessMm: round1(cab.totalThicknessMm),
+        totalThicknessCm: round1(cab.totalThicknessMm / 10),
+        avgThicknessMm: cab.knownThicknessCount > 0 ? round1(cab.totalThicknessMm / cab.knownThicknessCount) : null,
+        knownThicknessCount: cab.knownThicknessCount,
+        missingThicknessCount: cab.missingThicknessCount,
+        formatCounts: cab.formatCounts,
+        shelves: shelfRows,
+      };
+    });
+
+    res.json({
+      totals: {
+        totalBooks: books.length,
+        assignedBooks,
+        unassignedBooks,
+        totalThicknessMm: round1(totalThicknessMm),
+        totalThicknessCm: round1(totalThicknessMm / 10),
+        avgThicknessMm: knownThicknessCount > 0 ? round1(totalThicknessMm / knownThicknessCount) : null,
+        knownThicknessCount,
+        missingThicknessCount,
+        formatBreakdown,
+      },
+      unassigned: {
+        booksCount: unassignedBooks,
+        totalThicknessCm: round1(unassignedThicknessMm / 10),
+        missingThicknessCount: unassignedMissingThickness,
+      },
+      cabinets: cabinetReports,
+    });
+  });
+
   // --- Backup & Catalog Export (CSV BOM / Excel / SQLite .db) ---
   app.get("/api/export/books.csv", requireAdmin, (_req, res) => {
     const rows = db.all<Record<string, unknown>>(
       `SELECT b.barcode, b.title, b.author, b.volume, b.publisher, b.pub_year, b.edition, b.category, b.tags,
+              b.format_size, b.thickness_mm, b.pages_count, b.barcode_status,
               c.code AS cabinet_code, b.shelf_number, b.status, b.notes, b.created_at
        FROM books b
-       LEFT JOIN cabinets c ON b.cabinet_id = c.id
+       LEFT JOIN cabinets c ON b.cabinet_id = c.id AND c.deleted_at IS NULL
+       WHERE b.deleted_at IS NULL
        ORDER BY b.barcode ASC`
     );
-    const headers = ["ברקוד", "שם הספר", "מחבר", "כרך", "הוצאה", "שנת הוצאה", "מהדורה", "קטגוריה", "תגיות", "ארון", "מדף", "סטטוס", "הערות", "תאריך הוספה"];
+    const headers = [
+      "ברקוד",
+      "שם הספר",
+      "מחבר",
+      "כרך",
+      "הוצאה",
+      "שנת הוצאה",
+      "מהדורה",
+      "קטגוריה",
+      "תגיות",
+      "גודל/פורמט",
+      "עובי (מ״מ)",
+      "עמודים",
+      "סטטוס ברקוד",
+      "ארון",
+      "מדף",
+      "סטטוס",
+      "הערות",
+      "תאריך הוספה",
+    ];
     const esc = (v: unknown) => {
       const s = String(v ?? "").replace(/"/g, '""');
       return `"${s}"`;
@@ -191,6 +429,10 @@ export function registerLabelsAndAdminRoutes(app: Express, db: DbClient, dataDir
           r.edition || "",
           r.category,
           tagsReadable,
+          r.format_size || "",
+          r.thickness_mm ?? "",
+          r.pages_count ?? "",
+          r.barcode_status || "assigned",
           r.cabinet_code || "",
           r.shelf_number ?? "",
           r.status,
@@ -209,10 +451,13 @@ export function registerLabelsAndAdminRoutes(app: Express, db: DbClient, dataDir
   app.get("/api/export/books.xlsx", requireAdmin, (_req, res) => {
     const rows = db.all<Record<string, unknown>>(
       `SELECT b.barcode AS "ברקוד", b.title AS "שם הספר", b.author AS "מחבר", b.volume AS "כרך",
-              b.publisher AS "הוצאה", b.pub_year AS "שנת הוצאה", b.edition AS "מהדורה", b.category AS "קטגוריה", c.code AS "ארון",
+              b.publisher AS "הוצאה", b.pub_year AS "שנת הוצאה", b.edition AS "מהדורה", b.category AS "קטגוריה",
+              b.format_size AS "גודל/פורמט", b.thickness_mm AS "עובי (מ״מ)", b.pages_count AS "עמודים",
+              b.barcode_status AS "סטטוס ברקוד", c.code AS "ארון",
               b.shelf_number AS "מדף", b.status AS "סטטוס", b.notes AS "הערות"
        FROM books b
-       LEFT JOIN cabinets c ON b.cabinet_id = c.id
+       LEFT JOIN cabinets c ON b.cabinet_id = c.id AND c.deleted_at IS NULL
+       WHERE b.deleted_at IS NULL
        ORDER BY b.barcode ASC`
     );
     const wb = XLSX.utils.book_new();

@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import type { DbClient } from "./adapter.ts";
 
 export function normalizeHebrewText(input: string): string {
@@ -13,6 +14,55 @@ export function buildNormalizedBookSearch(parts: Array<string | undefined | null
   return normalizeHebrewText(parts.filter(Boolean).join(" "));
 }
 
+export function newSyncId(): string {
+  return crypto.randomUUID();
+}
+
+export function enqueueSyncOutbox(
+  db: DbClient,
+  entityType: "book" | "cabinet" | "borrower" | "loan",
+  syncId: string,
+  operation: "upsert" | "delete",
+  payload: Record<string, unknown> = {}
+): void {
+  if (!syncId) return;
+  const now = new Date().toISOString();
+  db.run(
+    "INSERT INTO sync_outbox (entity_type, sync_id, operation, payload_json, created_at, synced_at) VALUES (?, ?, ?, ?, ?, NULL)",
+    entityType,
+    syncId,
+    operation,
+    JSON.stringify(payload),
+    now
+  );
+}
+
+function ensureColumn(db: DbClient, table: string, col: string, ddl: string): void {
+  const cols = db.all<{ name: string }>(`PRAGMA table_info(${table})`).map((c) => c.name);
+  if (!cols.includes(col)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${ddl}`);
+  }
+}
+
+function backfillSyncColumns(db: DbClient, table: string, pkCol: string, timeFallbackCol?: string): void {
+  const now = new Date().toISOString();
+  const missingSync = db.all<Record<string, unknown>>(
+    `SELECT ${pkCol} AS pkVal FROM ${table} WHERE sync_id IS NULL OR sync_id = ''`
+  );
+  for (const row of missingSync) {
+    db.run(`UPDATE ${table} SET sync_id = ? WHERE ${pkCol} = ?`, newSyncId(), row.pkVal as any);
+  }
+  if (timeFallbackCol) {
+    db.run(
+      `UPDATE ${table} SET updated_at = COALESCE(NULLIF(${timeFallbackCol}, ''), ?) WHERE updated_at IS NULL OR updated_at = ''`,
+      now
+    );
+  } else {
+    db.run(`UPDATE ${table} SET updated_at = ? WHERE updated_at IS NULL OR updated_at = ''`, now);
+  }
+  db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_${table}_sync_id ON ${table}(sync_id)`);
+}
+
 export function initSchemaAndSeed(db: DbClient): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS cabinets (
@@ -24,7 +74,10 @@ export function initSchemaAndSeed(db: DbClient): void {
       y REAL NOT NULL DEFAULT 40,
       width REAL NOT NULL DEFAULT 150,
       height REAL NOT NULL DEFAULT 64,
-      rotation REAL NOT NULL DEFAULT 0
+      rotation REAL NOT NULL DEFAULT 0,
+      sync_id TEXT,
+      updated_at TEXT NOT NULL DEFAULT '',
+      deleted_at TEXT
     );
 
     CREATE TABLE IF NOT EXISTS books (
@@ -44,7 +97,14 @@ export function initSchemaAndSeed(db: DbClient): void {
       notes TEXT NOT NULL DEFAULT '',
       status TEXT NOT NULL DEFAULT 'available' CHECK (status IN ('available', 'borrowed', 'reference_only', 'lost')),
       label_printed INTEGER NOT NULL DEFAULT 0,
-      created_at TEXT NOT NULL
+      created_at TEXT NOT NULL,
+      format_size TEXT NOT NULL DEFAULT '',
+      thickness_mm REAL,
+      pages_count INTEGER,
+      barcode_status TEXT NOT NULL DEFAULT 'assigned',
+      sync_id TEXT,
+      updated_at TEXT NOT NULL DEFAULT '',
+      deleted_at TEXT
     );
 
     CREATE TABLE IF NOT EXISTS borrowers (
@@ -53,7 +113,10 @@ export function initSchemaAndSeed(db: DbClient): void {
       shiur_group TEXT NOT NULL DEFAULT '',
       phone TEXT NOT NULL DEFAULT '',
       notes TEXT NOT NULL DEFAULT '',
-      created_at TEXT NOT NULL
+      created_at TEXT NOT NULL,
+      sync_id TEXT,
+      updated_at TEXT NOT NULL DEFAULT '',
+      deleted_at TEXT
     );
 
     CREATE TABLE IF NOT EXISTS loans (
@@ -62,7 +125,10 @@ export function initSchemaAndSeed(db: DbClient): void {
       borrower_id INTEGER NOT NULL REFERENCES borrowers(id) ON DELETE CASCADE,
       loan_date TEXT NOT NULL,
       due_date TEXT NOT NULL,
-      return_date TEXT
+      return_date TEXT,
+      sync_id TEXT,
+      updated_at TEXT NOT NULL DEFAULT '',
+      deleted_at TEXT
     );
 
     CREATE TABLE IF NOT EXISTS ai_catalog_queue (
@@ -81,25 +147,52 @@ export function initSchemaAndSeed(db: DbClient): void {
       value TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS sync_outbox (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      entity_type TEXT NOT NULL,
+      sync_id TEXT NOT NULL,
+      operation TEXT NOT NULL CHECK (operation IN ('upsert', 'delete')),
+      payload_json TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL,
+      synced_at TEXT
+    );
+
     CREATE INDEX IF NOT EXISTS idx_books_status ON books(status);
     CREATE INDEX IF NOT EXISTS idx_books_cabinet ON books(cabinet_id);
     CREATE INDEX IF NOT EXISTS idx_books_norm ON books(normalized_search);
-    CREATE INDEX IF NOT EXISTS idx_loans_barcode ON loans(book_barcode);
-    CREATE INDEX IF NOT EXISTS idx_loans_open ON loans(return_date);
+    CREATE INDEX IF NOT EXISTS idx_loans_open ON loans(book_barcode, return_date);
+    CREATE INDEX IF NOT EXISTS idx_sync_outbox_pending ON sync_outbox(synced_at, id);
   `);
 
-  const existingBookCols = db.all<{ name: string }>("PRAGMA table_info(books)").map((c) => c.name);
-  if (!existingBookCols.includes("pub_year")) {
-    db.exec("ALTER TABLE books ADD COLUMN pub_year TEXT NOT NULL DEFAULT ''");
-  }
-  if (!existingBookCols.includes("edition")) {
-    db.exec("ALTER TABLE books ADD COLUMN edition TEXT NOT NULL DEFAULT ''");
-  }
+  // Safe idempotent migrations for existing databases
+  ensureColumn(db, "books", "pub_year", "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, "books", "edition", "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, "books", "format_size", "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, "books", "thickness_mm", "REAL");
+  ensureColumn(db, "books", "pages_count", "INTEGER");
+  ensureColumn(db, "books", "barcode_status", "TEXT NOT NULL DEFAULT 'assigned'");
+  ensureColumn(db, "books", "sync_id", "TEXT");
+  ensureColumn(db, "books", "updated_at", "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, "books", "deleted_at", "TEXT");
 
-  const existingQueueCols = db.all<{ name: string }>("PRAGMA table_info(ai_catalog_queue)").map((c) => c.name);
-  if (!existingQueueCols.includes("extra_images_json")) {
-    db.exec("ALTER TABLE ai_catalog_queue ADD COLUMN extra_images_json TEXT NOT NULL DEFAULT '[]'");
-  }
+  ensureColumn(db, "cabinets", "sync_id", "TEXT");
+  ensureColumn(db, "cabinets", "updated_at", "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, "cabinets", "deleted_at", "TEXT");
+
+  ensureColumn(db, "borrowers", "sync_id", "TEXT");
+  ensureColumn(db, "borrowers", "updated_at", "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, "borrowers", "deleted_at", "TEXT");
+
+  ensureColumn(db, "loans", "sync_id", "TEXT");
+  ensureColumn(db, "loans", "updated_at", "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, "loans", "deleted_at", "TEXT");
+
+  ensureColumn(db, "ai_catalog_queue", "extra_images_json", "TEXT NOT NULL DEFAULT '[]'");
+
+  backfillSyncColumns(db, "cabinets", "id");
+  backfillSyncColumns(db, "books", "barcode", "created_at");
+  backfillSyncColumns(db, "borrowers", "id", "created_at");
+  backfillSyncColumns(db, "loans", "id", "loan_date");
 
   const defaultSettings: Record<string, string> = {
     library_name: "אוצר הספרים - ישיבת אור התורה",
@@ -108,6 +201,7 @@ export function initSchemaAndSeed(db: DbClient): void {
     next_barcode: "100007",
     barcode_prefix: "",
     ai_api_key: "",
+    ai_keys_pool: "[]",
     ai_model: "gemini-4-hydrogen",
     embedding_model: "gemini-embedding-001",
     ai_delay_ms: "4200",
@@ -135,25 +229,36 @@ export function initSchemaAndSeed(db: DbClient): void {
     db.run("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", k, v);
   }
 
+  // Migrate legacy single ai_api_key into ai_keys_pool if pool is empty
+  const legacyKey = (db.get<{ value: string }>("SELECT value FROM settings WHERE key = 'ai_api_key'")?.value || "").trim();
+  const poolRaw = db.get<{ value: string }>("SELECT value FROM settings WHERE key = 'ai_keys_pool'")?.value || "[]";
+  try {
+    const parsedPool = JSON.parse(poolRaw);
+    if (legacyKey && Array.isArray(parsedPool) && parsedPool.length === 0) {
+      const migrated = [{ id: newSyncId(), label: "מפתח 1", apiKey: legacyKey, enabled: true }];
+      db.run("UPDATE settings SET value = ? WHERE key = 'ai_keys_pool'", JSON.stringify(migrated));
+    }
+  } catch {}
+
   const existingCabinets = db.get<{ c: number }>("SELECT COUNT(*) AS c FROM cabinets");
   if ((existingCabinets?.c ?? 0) === 0) {
     db.transaction(() => {
       const now = new Date().toISOString();
       const cab1 = db.run(
-        "INSERT INTO cabinets (code, main_subject, shelves_count, x, y, width, height, rotation) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        "א-1", "ש״ס תלמוד בבלי ומפרשים", 6, 40, 40, 180, 60, 0
+        "INSERT INTO cabinets (code, main_subject, shelves_count, x, y, width, height, rotation, sync_id, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "א-1", "ש״ס תלמוד בבלי ומפרשים", 6, 40, 40, 180, 60, 0, newSyncId(), now
       ).lastInsertRowid;
       const cab2 = db.run(
-        "INSERT INTO cabinets (code, main_subject, shelves_count, x, y, width, height, rotation) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        "ב-1", "הלכה, טור, שו״ע ופוסקים", 6, 250, 40, 180, 60, 0
+        "INSERT INTO cabinets (code, main_subject, shelves_count, x, y, width, height, rotation, sync_id, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "ב-1", "הלכה, טור, שו״ע ופוסקים", 6, 250, 40, 180, 60, 0, newSyncId(), now
       ).lastInsertRowid;
       const cab3 = db.run(
-        "INSERT INTO cabinets (code, main_subject, shelves_count, x, y, width, height, rotation) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        "ג-1", "תנ״ך ומפרשים", 5, 40, 160, 180, 60, 0
+        "INSERT INTO cabinets (code, main_subject, shelves_count, x, y, width, height, rotation, sync_id, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "ג-1", "תנ״ך ומפרשים", 5, 40, 160, 180, 60, 0, newSyncId(), now
       ).lastInsertRowid;
       const cab4 = db.run(
-        "INSERT INTO cabinets (code, main_subject, shelves_count, x, y, width, height, rotation) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        "ד-1", "מחשבה, חסידות ומוסר", 5, 250, 160, 180, 60, 0
+        "INSERT INTO cabinets (code, main_subject, shelves_count, x, y, width, height, rotation, sync_id, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "ד-1", "מחשבה, חסידות ומוסר", 5, 250, 160, 180, 60, 0, newSyncId(), now
       ).lastInsertRowid;
 
       const sampleBooks = [
@@ -246,15 +351,15 @@ export function initSchemaAndSeed(db: DbClient): void {
       for (const b of sampleBooks) {
         const norm = buildNormalizedBookSearch([b.barcode, b.title, b.author, b.volume, b.publisher, b.category, b.tags.join(" "), b.notes]);
         db.run(
-          `INSERT INTO books (barcode, title, author, volume, publisher, category, tags, normalized_search, cabinet_id, shelf_number, notes, status, label_printed, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          b.barcode, b.title, b.author, b.volume, b.publisher, b.category, JSON.stringify(b.tags), norm, b.cabinet_id, b.shelf_number, b.notes, b.status, b.label_printed, now
+          `INSERT INTO books (barcode, title, author, volume, publisher, category, tags, normalized_search, cabinet_id, shelf_number, notes, status, label_printed, created_at, barcode_status, sync_id, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'assigned', ?, ?)`,
+          b.barcode, b.title, b.author, b.volume, b.publisher, b.category, JSON.stringify(b.tags), norm, b.cabinet_id, b.shelf_number, b.notes, b.status, b.label_printed, now, newSyncId(), now
         );
       }
 
-      db.run("INSERT INTO borrowers (full_name, shiur_group, phone, notes, created_at) VALUES (?, ?, ?, ?, ?)", "דוד כהן", "שיעור ב׳", "050-1234567", "", now);
-      db.run("INSERT INTO borrowers (full_name, shiur_group, phone, notes, created_at) VALUES (?, ?, ?, ?, ?)", "יהודה לוי", "שיעור ג׳", "052-7654321", "", now);
-      db.run("INSERT INTO borrowers (full_name, shiur_group, phone, notes, created_at) VALUES (?, ?, ?, ?, ?)", "הרב אברהם גולדברג", "כולל אברכים", "054-9876543", "", now);
+      db.run("INSERT INTO borrowers (full_name, shiur_group, phone, notes, created_at, sync_id, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)", "דוד כהן", "שיעור ב׳", "050-1234567", "", now, newSyncId(), now);
+      db.run("INSERT INTO borrowers (full_name, shiur_group, phone, notes, created_at, sync_id, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)", "יהודה לוי", "שיעור ג׳", "052-7654321", "", now, newSyncId(), now);
+      db.run("INSERT INTO borrowers (full_name, shiur_group, phone, notes, created_at, sync_id, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)", "הרב אברהם גולדברג", "כולל אברכים", "054-9876543", "", now, newSyncId(), now);
     });
   }
 }

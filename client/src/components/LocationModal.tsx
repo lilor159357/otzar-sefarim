@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { X, MapPin, Layers, BookOpen, Pencil, Trash2, Save, CheckCircle2 } from "lucide-react";
 import type { BookRow, CabinetRow, MapEntrance } from "../types.ts";
-import { STATUS_LABELS } from "../types.ts";
+import { FORMAT_SIZE_OPTIONS, STATUS_LABELS } from "../types.ts";
 import { LibraryMap2D } from "./LibraryMap2D.tsx";
 
 interface LocationModalProps {
@@ -37,6 +37,9 @@ export const LocationModal: React.FC<LocationModalProps> = ({
   const [edition, setEdition] = useState(book.edition || "");
   const [category, setCategory] = useState(book.category || "");
   const [tagsText, setTagsText] = useState((book.tagsList || []).join(", "));
+  const [formatSize, setFormatSize] = useState(book.format_size || "");
+  const [thicknessMm, setThicknessMm] = useState(book.thickness_mm != null ? String(book.thickness_mm) : "");
+  const [pagesCount, setPagesCount] = useState(book.pages_count != null ? String(book.pages_count) : "");
   const [cabinetId, setCabinetId] = useState(book.cabinet_id ? String(book.cabinet_id) : "");
   const [shelfNumber, setShelfNumber] = useState(book.shelf_number ?? 1);
   const [status, setStatus] = useState<BookRow["status"]>(book.status);
@@ -51,6 +54,9 @@ export const LocationModal: React.FC<LocationModalProps> = ({
     setEdition(book.edition || "");
     setCategory(book.category || "");
     setTagsText((book.tagsList || []).join(", "));
+    setFormatSize(book.format_size || "");
+    setThicknessMm(book.thickness_mm != null ? String(book.thickness_mm) : "");
+    setPagesCount(book.pages_count != null ? String(book.pages_count) : "");
     setCabinetId(book.cabinet_id ? String(book.cabinet_id) : "");
     setShelfNumber(book.shelf_number ?? 1);
     setStatus(book.status);
@@ -91,6 +97,9 @@ export const LocationModal: React.FC<LocationModalProps> = ({
             .split(",")
             .map((t) => t.trim())
             .filter(Boolean),
+          format_size: formatSize.trim(),
+          thickness_mm: thicknessMm.trim() ? Number(thicknessMm) : null,
+          pages_count: pagesCount.trim() ? Number(pagesCount) : null,
           cabinet_id: cabinetId ? Number(cabinetId) : null,
           shelf_number: shelfNumber,
           status,
@@ -142,7 +151,7 @@ export const LocationModal: React.FC<LocationModalProps> = ({
         {/* Modal Header */}
         <div className="px-6 py-4 border-b border-[var(--otzar-border-muted)] flex items-start justify-between gap-4">
           <div className="space-y-1">
-            <div className="flex items-center gap-2 text-xs text-[var(--otzar-text-muted)]">
+            <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--otzar-text-muted)]">
               <span className="font-mono tabular-nums font-semibold text-[var(--otzar-accent)]">#{book.barcode}</span>
               <span aria-hidden="true">·</span>
               <span>{book.category || "כללי"}</span>
@@ -158,6 +167,24 @@ export const LocationModal: React.FC<LocationModalProps> = ({
               >
                 {STATUS_LABELS[book.status] || book.status}
               </span>
+              {book.format_size ? (
+                <>
+                  <span aria-hidden="true">·</span>
+                  <span>פורמט: {book.format_size}</span>
+                </>
+              ) : null}
+              {book.thickness_mm != null && book.thickness_mm > 0 ? (
+                <>
+                  <span aria-hidden="true">·</span>
+                  <span className="tabular-nums">עובי: {book.thickness_mm} מ״מ</span>
+                </>
+              ) : null}
+              {book.pages_count != null && book.pages_count > 0 ? (
+                <>
+                  <span aria-hidden="true">·</span>
+                  <span className="tabular-nums">{book.pages_count} עמ׳</span>
+                </>
+              ) : null}
             </div>
             <h2 className="text-xl font-bold">
               {book.title}
@@ -281,6 +308,51 @@ export const LocationModal: React.FC<LocationModalProps> = ({
                     className="w-full px-3 py-2 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)]"
                   />
                 </div>
+
+                {/* Shelving dimensions */}
+                <div className="md:col-span-2 grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div>
+                    <label className="block text-xs font-medium mb-1">גודל / פורמט (למידוף)</label>
+                    <input
+                      list="otzar-format-sizes-modal"
+                      value={formatSize}
+                      onChange={(e) => setFormatSize(e.target.value)}
+                      placeholder="רגיל / גדול / כיס"
+                      className="w-full px-3 py-2 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)]"
+                    />
+                    <datalist id="otzar-format-sizes-modal">
+                      {FORMAT_SIZE_OPTIONS.map((opt) => (
+                        <option key={opt} value={opt} />
+                      ))}
+                    </datalist>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium mb-1">עובי שדרה (מ״מ)</label>
+                    <input
+                      type="number"
+                      min={1}
+                      max={300}
+                      step="0.5"
+                      value={thicknessMm}
+                      onChange={(e) => setThicknessMm(e.target.value)}
+                      placeholder="למשל: 32"
+                      className="w-full px-3 py-2 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] tabular-nums"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium mb-1">מספר עמודים (אופציונלי)</label>
+                    <input
+                      type="number"
+                      min={1}
+                      max={10000}
+                      value={pagesCount}
+                      onChange={(e) => setPagesCount(e.target.value)}
+                      placeholder="למשל: 420"
+                      className="w-full px-3 py-2 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] tabular-nums"
+                    />
+                  </div>
+                </div>
+
                 <div className="md:col-span-2">
                   <label className="block text-xs font-medium mb-1">תגיות חיפוש וכינויים (מופרדות בפסיקים)</label>
                   <input

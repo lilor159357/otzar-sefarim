@@ -4,14 +4,14 @@ import net from "net";
 import path from "path";
 import { fileURLToPath } from "url";
 import { openDatabase } from "./db/adapter.ts";
-import { buildNormalizedBookSearch, initSchemaAndSeed } from "./db/schema.ts";
+import { buildNormalizedBookSearch, enqueueSyncOutbox, initSchemaAndSeed, newSyncId } from "./db/schema.ts";
 import { searchBooksOffline, type SearchableBook } from "./search/torahSearch.ts";
 import { registerCirculationRoutes } from "./routes/circulation.ts";
 import { registerCatalogAiRoutes } from "./routes/catalogAi.ts";
 import { registerLabelsAndAdminRoutes } from "./routes/labelsAndAdmin.ts";
 import { registerUpdaterRoutes, scheduleStartupAutoUpdateCheck, type UpdaterRestartHooks } from "./routes/updater.ts";
 import { isAdminRequest, requireAdmin } from "./auth/adminAuth.ts";
-import { blobToFloat32, buildBookEmbeddingText, cosineSimilarity, float32ToBlob, generateTextEmbedding, getAiConfig } from "./ai/geminiService.ts";
+import { blobToFloat32, buildBookEmbeddingText, cosineSimilarity, float32ToBlob, generateTextEmbedding, getAiConfig, hasConfiguredAiKeys } from "./ai/geminiService.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = path.resolve(__dirname, "..");
@@ -54,10 +54,10 @@ async function main() {
 
   // Health & DB verification
   app.get("/api/health", (_req, res) => {
-    const books = db.get<{ c: number }>("SELECT COUNT(*) AS c FROM books")?.c ?? 0;
-    const cabinets = db.get<{ c: number }>("SELECT COUNT(*) AS c FROM cabinets")?.c ?? 0;
-    const borrowers = db.get<{ c: number }>("SELECT COUNT(*) AS c FROM borrowers")?.c ?? 0;
-    const activeLoans = db.get<{ c: number }>("SELECT COUNT(*) AS c FROM loans WHERE return_date IS NULL")?.c ?? 0;
+    const books = db.get<{ c: number }>("SELECT COUNT(*) AS c FROM books WHERE deleted_at IS NULL")?.c ?? 0;
+    const cabinets = db.get<{ c: number }>("SELECT COUNT(*) AS c FROM cabinets WHERE deleted_at IS NULL")?.c ?? 0;
+    const borrowers = db.get<{ c: number }>("SELECT COUNT(*) AS c FROM borrowers WHERE deleted_at IS NULL")?.c ?? 0;
+    const activeLoans = db.get<{ c: number }>("SELECT COUNT(*) AS c FROM loans WHERE return_date IS NULL AND deleted_at IS NULL")?.c ?? 0;
     const printQueue = db.get<{ c: number }>("SELECT COUNT(*) AS c FROM books WHERE label_printed = 0")?.c ?? 0;
     const aiQueue = db.get<{ c: number }>("SELECT COUNT(*) AS c FROM ai_catalog_queue WHERE approval_status = 'pending'")?.c ?? 0;
     res.json({
@@ -74,12 +74,12 @@ async function main() {
     const rows = db.all<{ key: string; value: string }>("SELECT key, value FROM settings");
     const publicKeys = new Set(["library_name", "default_loan_days", "theme_preset", "theme_mode", "map_entrance"]);
     const out: Record<string, unknown> = {};
-    let hasApiKey = false;
+    const hasApiKey = hasConfiguredAiKeys(db);
     for (const r of rows) {
-      if (r.key === "ai_api_key") {
-        hasApiKey = Boolean(r.value && r.value.trim());
+      if (r.key === "ai_api_key" || r.key === "ai_keys_pool") {
         if (!admin) continue;
       }
+      if (r.key === "ai_keys_pool") continue;
       if (r.key === "admin_pin") continue;
       if (!admin && !publicKeys.has(r.key)) continue;
       try {
@@ -113,8 +113,9 @@ async function main() {
   // Cabinets API (Full CRUD + Batch Layout Save for 2D Editor)
   app.get("/api/cabinets", (_req, res) => {
     const rows = db.all(
-      `SELECT c.*, (SELECT COUNT(*) FROM books b WHERE b.cabinet_id = c.id) AS books_count
+      `SELECT c.*, (SELECT COUNT(*) FROM books b WHERE b.cabinet_id = c.id AND b.deleted_at IS NULL) AS books_count
        FROM cabinets c
+       WHERE c.deleted_at IS NULL
        ORDER BY c.code ASC`
     );
     res.json(rows);
@@ -126,9 +127,11 @@ async function main() {
       return res.status(400).json({ error: "יש להזין קוד ארון" });
     }
     try {
+      const now = new Date().toISOString();
+      const syncId = newSyncId();
       const info = db.run(
-        `INSERT INTO cabinets (code, main_subject, shelves_count, x, y, width, height, rotation)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO cabinets (code, main_subject, shelves_count, x, y, width, height, rotation, sync_id, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         String(code).trim(),
         String(main_subject).trim(),
         Math.max(1, Math.min(30, Number(shelves_count) || 5)),
@@ -136,8 +139,11 @@ async function main() {
         Number(y) || 60,
         Math.max(40, Number(width) || 160),
         Math.max(40, Number(height) || 64),
-        Number(rotation) || 0
+        Number(rotation) || 0,
+        syncId,
+        now
       );
+      enqueueSyncOutbox(db, "cabinet", syncId, "upsert", { id: info.lastInsertRowid });
       const created = db.get("SELECT * FROM cabinets WHERE id = ?", info.lastInsertRowid);
       res.status(201).json(created);
     } catch (err: any) {
@@ -150,11 +156,13 @@ async function main() {
 
   app.put("/api/cabinets/layout/batch", requireAdmin, (req, res) => {
     const items = Array.isArray(req.body?.cabinets) ? req.body.cabinets : [];
+    const now = new Date().toISOString();
     db.transaction(() => {
       for (const c of items) {
+        const cabId = Number(c.id);
         db.run(
           `UPDATE cabinets
-           SET code = ?, main_subject = ?, shelves_count = ?, x = ?, y = ?, width = ?, height = ?, rotation = ?
+           SET code = ?, main_subject = ?, shelves_count = ?, x = ?, y = ?, width = ?, height = ?, rotation = ?, updated_at = ?
            WHERE id = ?`,
           String(c.code || "").trim(),
           String(c.main_subject || "").trim(),
@@ -164,8 +172,11 @@ async function main() {
           Math.max(40, Number(c.width) || 140),
           Math.max(40, Number(c.height) || 60),
           Number(c.rotation) || 0,
-          Number(c.id)
+          now,
+          cabId
         );
+        const row = db.get<{ sync_id: string }>("SELECT sync_id FROM cabinets WHERE id = ?", cabId);
+        if (row?.sync_id) enqueueSyncOutbox(db, "cabinet", row.sync_id, "upsert", { id: cabId });
       }
     });
     res.json({ ok: true });
@@ -178,8 +189,9 @@ async function main() {
       return res.status(400).json({ error: "יש להזין קוד ארון" });
     }
     try {
+      const now = new Date().toISOString();
       db.run(
-        `UPDATE cabinets SET code = ?, main_subject = ?, shelves_count = ?, x = ?, y = ?, width = ?, height = ?, rotation = ? WHERE id = ?`,
+        `UPDATE cabinets SET code = ?, main_subject = ?, shelves_count = ?, x = ?, y = ?, width = ?, height = ?, rotation = ?, updated_at = ? WHERE id = ?`,
         String(code).trim(),
         String(main_subject).trim(),
         Math.max(1, Math.min(30, Number(shelves_count) || 5)),
@@ -188,9 +200,11 @@ async function main() {
         Math.max(40, Number(width) || 160),
         Math.max(40, Number(height) || 64),
         Number(rotation) || 0,
+        now,
         id
       );
-      const updated = db.get("SELECT * FROM cabinets WHERE id = ?", id);
+      const updated = db.get<Record<string, unknown>>("SELECT * FROM cabinets WHERE id = ?", id);
+      if (updated?.sync_id) enqueueSyncOutbox(db, "cabinet", String(updated.sync_id), "upsert", { id });
       res.json(updated);
     } catch (err: any) {
       res.status(400).json({ error: err?.message || "שגיאה בעדכון ארון" });
@@ -199,7 +213,13 @@ async function main() {
 
   app.delete("/api/cabinets/:id", requireAdmin, (req, res) => {
     const id = Number(req.params.id);
-    db.run("DELETE FROM cabinets WHERE id = ?", id);
+    const existing = db.get<{ sync_id: string }>("SELECT sync_id FROM cabinets WHERE id = ?", id);
+    db.transaction(() => {
+      if (existing?.sync_id) {
+        enqueueSyncOutbox(db, "cabinet", existing.sync_id, "delete", { id, deleted_at: new Date().toISOString() });
+      }
+      db.run("DELETE FROM cabinets WHERE id = ?", id);
+    });
     res.json({ ok: true });
   });
 
@@ -215,6 +235,7 @@ async function main() {
       `SELECT b.*, c.code AS cabinet_code, c.main_subject AS cabinet_subject, c.shelves_count AS cabinet_shelves_count
        FROM books b
        LEFT JOIN cabinets c ON b.cabinet_id = c.id
+       WHERE b.deleted_at IS NULL
        ORDER BY b.barcode DESC`
     ) as Array<SearchableBook & Record<string, unknown>>;
 
@@ -246,7 +267,7 @@ async function main() {
 
     const cfg = getAiConfig(db);
     const hasVectors = rows.some((r) => Boolean(r.embedding));
-    if (!cfg.apiKey) {
+    if (!cfg.hasAnyKey) {
       res.setHeader("X-Semantic-Status", "fallback:no_key");
     } else if (!hasVectors) {
       res.setHeader("X-Semantic-Status", "fallback:no_vectors");
@@ -319,6 +340,10 @@ async function main() {
       shelf_number = null,
       notes = "",
       status = "available",
+      format_size = "",
+      thickness_mm = null,
+      pages_count = null,
+      barcode_status = "assigned",
       copiesCount = 1,
       barcode: explicitBarcode,
     } = req.body || {};
@@ -326,6 +351,9 @@ async function main() {
     if (!title || typeof title !== "string" || !title.trim()) {
       return res.status(400).json({ error: "יש להזין שם ספר" });
     }
+
+    const parsedThickness = thickness_mm !== null && thickness_mm !== "" && Number(thickness_mm) > 0 ? Number(thickness_mm) : null;
+    const parsedPages = pages_count !== null && pages_count !== "" && Number(pages_count) > 0 ? Math.round(Number(pages_count)) : null;
 
     const count = Math.max(1, Math.min(200, Number(copiesCount) || 1));
     const prefix = db.get<{ value: string }>("SELECT value FROM settings WHERE key = 'barcode_prefix'")?.value ?? "";
@@ -344,22 +372,27 @@ async function main() {
           code = prefix + String(nextNum);
           nextNum++;
         }
+        const syncId = newSyncId();
         const norm = buildNormalizedBookSearch([code, title, author, volume, publisher, pub_year, edition, category, tagsArr.join(" "), notes]);
         db.run(
-          `INSERT INTO books (barcode, title, author, volume, publisher, pub_year, edition, category, tags, normalized_search, cabinet_id, shelf_number, notes, status, label_printed, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
+          `INSERT INTO books (barcode, title, author, volume, publisher, pub_year, edition, category, tags, normalized_search, cabinet_id, shelf_number, notes, status, label_printed, created_at, format_size, thickness_mm, pages_count, barcode_status, sync_id, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)`,
           code, title.trim(), String(author).trim(), String(volume).trim(), String(publisher).trim(),
           String(pub_year).trim(), String(edition).trim(),
           String(category).trim(), JSON.stringify(tagsArr), norm, cabinet_id ? Number(cabinet_id) : null,
-          shelf_number ? Number(shelf_number) : null, String(notes).trim(), status, now
+          shelf_number ? Number(shelf_number) : null, String(notes).trim(), status, now,
+          String(format_size || "").trim(), parsedThickness, parsedPages,
+          barcode_status === "pending_barcode" ? "pending_barcode" : "assigned",
+          syncId, now
         );
+        enqueueSyncOutbox(db, "book", syncId, "upsert", { barcode: code });
         createdBarcodes.push(code);
       }
       db.run("INSERT INTO settings (key, value) VALUES ('next_barcode', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", String(nextNum));
     });
 
     const cfg = getAiConfig(db);
-    if (cfg.apiKey && createdBarcodes.length > 0) {
+    if (cfg.hasAnyKey && createdBarcodes.length > 0) {
       const embText = buildBookEmbeddingText({ title, author, volume, publisher, pub_year, edition, category, tags: tagsArr, notes });
       void generateTextEmbedding(db, embText)
         .then((vec) => {
@@ -393,7 +426,15 @@ async function main() {
       shelf_number = existing.shelf_number,
       notes = existing.notes,
       status = existing.status,
+      format_size = existing.format_size || "",
+      thickness_mm = existing.thickness_mm ?? null,
+      pages_count = existing.pages_count ?? null,
+      barcode_status = existing.barcode_status || "assigned",
     } = req.body || {};
+
+    const parsedThickness = thickness_mm !== null && thickness_mm !== "" && Number(thickness_mm) > 0 ? Number(thickness_mm) : null;
+    const parsedPages = pages_count !== null && pages_count !== "" && Number(pages_count) > 0 ? Math.round(Number(pages_count)) : null;
+    const now = new Date().toISOString();
 
     const tagsArr = tags !== undefined ? parseTags(tags) : parseTags(existing.tags);
     const norm = buildNormalizedBookSearch([
@@ -411,7 +452,7 @@ async function main() {
 
     db.run(
       `UPDATE books
-       SET title = ?, author = ?, volume = ?, publisher = ?, pub_year = ?, edition = ?, category = ?, tags = ?, normalized_search = ?, cabinet_id = ?, shelf_number = ?, notes = ?, status = ?
+       SET title = ?, author = ?, volume = ?, publisher = ?, pub_year = ?, edition = ?, category = ?, tags = ?, normalized_search = ?, cabinet_id = ?, shelf_number = ?, notes = ?, status = ?, format_size = ?, thickness_mm = ?, pages_count = ?, barcode_status = ?, updated_at = ?
        WHERE barcode = ?`,
       String(title).trim(),
       String(author).trim(),
@@ -426,12 +467,21 @@ async function main() {
       shelf_number ? Number(shelf_number) : null,
       String(notes).trim(),
       String(status),
+      String(format_size || "").trim(),
+      parsedThickness,
+      parsedPages,
+      String(barcode_status || "assigned"),
+      now,
       barcode
     );
 
+    if (existing.sync_id) {
+      enqueueSyncOutbox(db, "book", String(existing.sync_id), "upsert", { barcode });
+    }
+
     db.run("UPDATE books SET embedding = NULL WHERE barcode = ?", barcode);
     const cfg = getAiConfig(db);
-    if (cfg.apiKey) {
+    if (cfg.hasAnyKey) {
       const embText = buildBookEmbeddingText({
         title: String(title),
         author: String(author),
@@ -455,7 +505,13 @@ async function main() {
 
   app.delete("/api/books/:barcode", requireAdmin, (req, res) => {
     const barcode = req.params.barcode;
-    db.run("DELETE FROM books WHERE barcode = ?", barcode);
+    const existing = db.get<{ sync_id: string }>("SELECT sync_id FROM books WHERE barcode = ?", barcode);
+    db.transaction(() => {
+      if (existing?.sync_id) {
+        enqueueSyncOutbox(db, "book", existing.sync_id, "delete", { barcode, deleted_at: new Date().toISOString() });
+      }
+      db.run("DELETE FROM books WHERE barcode = ?", barcode);
+    });
     res.json({ ok: true });
   });
 

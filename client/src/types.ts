@@ -30,6 +30,8 @@ export interface CabinetRow {
   height: number;
   rotation: number;
   books_count?: number;
+  sync_id?: string;
+  updated_at?: string;
 }
 
 export interface BookRow {
@@ -43,6 +45,10 @@ export interface BookRow {
   category: string;
   tags: string;
   tagsList: string[];
+  format_size?: string;
+  thickness_mm?: number | null;
+  pages_count?: number | null;
+  barcode_status?: "assigned" | "pending_barcode";
   cabinet_id: number | null;
   cabinet_code: string | null;
   cabinet_subject: string | null;
@@ -52,6 +58,8 @@ export interface BookRow {
   status: "available" | "borrowed" | "reference_only" | "lost";
   label_printed: number;
   created_at: string;
+  sync_id?: string;
+  updated_at?: string;
   matchHint?: string;
 }
 
@@ -64,6 +72,8 @@ export interface BorrowerRow {
   created_at: string;
   active_loans_count?: number;
   overdue_loans_count?: number;
+  sync_id?: string;
+  updated_at?: string;
 }
 
 export interface LoanRow {
@@ -83,6 +93,8 @@ export interface LoanRow {
   borrower_phone: string;
   is_overdue: boolean;
   days_overdue: number;
+  sync_id?: string;
+  updated_at?: string;
 }
 
 export interface AiQueueItem {
@@ -105,6 +117,68 @@ export interface AiQueueItem {
   approval_status: "pending" | "approved" | "rejected";
   created_at: string;
 }
+
+export interface AiPoolKeyStatus {
+  id: string;
+  label: string;
+  maskedKey: string;
+  enabled: boolean;
+  status: "ready" | "cooldown" | "invalid" | "disabled";
+  cooldownRemainingSec: number;
+  callsLast60s: number;
+  activeInFlight: number;
+  totalRequests: number;
+  lastUsedAt: string | null;
+  lastError: string | null;
+}
+
+export interface ShelvingShelfReport {
+  shelfNumber: number;
+  booksCount: number;
+  totalThicknessMm: number;
+  totalThicknessCm: number;
+  avgThicknessMm: number | null;
+  knownThicknessCount: number;
+  missingThicknessCount: number;
+  formatCounts: Record<string, number>;
+}
+
+export interface ShelvingCabinetReport {
+  id: number;
+  code: string;
+  main_subject: string;
+  shelves_count: number;
+  booksCount: number;
+  totalThicknessMm: number;
+  totalThicknessCm: number;
+  avgThicknessMm: number | null;
+  knownThicknessCount: number;
+  missingThicknessCount: number;
+  formatCounts: Record<string, number>;
+  shelves: ShelvingShelfReport[];
+}
+
+export interface ShelvingReport {
+  totals: {
+    totalBooks: number;
+    assignedBooks: number;
+    unassignedBooks: number;
+    totalThicknessMm: number;
+    totalThicknessCm: number;
+    avgThicknessMm: number | null;
+    knownThicknessCount: number;
+    missingThicknessCount: number;
+    formatBreakdown: Record<string, number>;
+  };
+  unassigned: {
+    booksCount: number;
+    totalThicknessCm: number;
+    missingThicknessCount: number;
+  };
+  cabinets: ShelvingCabinetReport[];
+}
+
+export const FORMAT_SIZE_OPTIONS = ["רגיל", "גדול (פוליו)", "בינוני", "קטן (כיס)"] as const;
 
 export const STATUS_LABELS: Record<string, string> = {
   available: "זמין על המדף",

@@ -3,7 +3,7 @@ import fs from "fs";
 import path from "path";
 import type { DbClient } from "../db/adapter.ts";
 import { requireAdmin } from "../auth/adminAuth.ts";
-import { buildNormalizedBookSearch } from "../db/schema.ts";
+import { buildNormalizedBookSearch, enqueueSyncOutbox, newSyncId } from "../db/schema.ts";
 import {
   analyzeBookCoverImage,
   buildBookEmbeddingText,
@@ -11,7 +11,10 @@ import {
   formatGeminiError,
   generateTextEmbedding,
   getAiConfig,
+  getAiKeyPoolPublicStatus,
+  saveAiKeyPool,
   testGeminiConnection,
+  testSinglePoolKey,
 } from "../ai/geminiService.ts";
 
 let isQueueWorkerRunning = false;
@@ -107,16 +110,33 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
     }
   }
 
-  // Test AI API connection
+  // AI Key Pool Roulette Management
+  app.get("/api/ai/keys", requireAdmin, (_req, res) => {
+    res.json({ keys: getAiKeyPoolPublicStatus(db) });
+  });
+
+  app.put("/api/ai/keys", requireAdmin, (req, res) => {
+    const incoming = Array.isArray(req.body?.keys) ? req.body.keys : [];
+    saveAiKeyPool(db, incoming);
+    res.json({ ok: true, keys: getAiKeyPoolPublicStatus(db) });
+  });
+
+  app.post("/api/ai/keys/:id/test", requireAdmin, async (req, res) => {
+    const id = String(req.params.id || "").trim();
+    const result = await testSinglePoolKey(db, id);
+    res.json({ ...result, keys: getAiKeyPoolPublicStatus(db) });
+  });
+
+  // Test AI API connection (via key roulette)
   app.post("/api/ai/test", requireAdmin, async (_req, res) => {
     const result = await testGeminiConnection(db);
-    res.json(result);
+    res.json({ ...result, keys: getAiKeyPoolPublicStatus(db) });
   });
 
   // Embeddings coverage stats
   app.get("/api/ai/embeddings-stats", requireAdmin, (_req, res) => {
-    const totalBooks = db.get<{ c: number }>("SELECT COUNT(*) AS c FROM books")?.c ?? 0;
-    const indexedBooks = db.get<{ c: number }>("SELECT COUNT(*) AS c FROM books WHERE embedding IS NOT NULL")?.c ?? 0;
+    const totalBooks = db.get<{ c: number }>("SELECT COUNT(*) AS c FROM books WHERE deleted_at IS NULL")?.c ?? 0;
+    const indexedBooks = db.get<{ c: number }>("SELECT COUNT(*) AS c FROM books WHERE deleted_at IS NULL AND embedding IS NOT NULL")?.c ?? 0;
     res.json({
       totalBooks,
       indexedBooks,
@@ -128,13 +148,13 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
   app.post("/api/ai/reindex-embeddings", requireAdmin, async (req, res) => {
     const forceAll = Boolean(req.body?.forceAll);
     const cfg = getAiConfig(db);
-    if (!cfg.apiKey) {
-      return res.status(400).json({ error: "לא הוגדר מפתח Gemini API בהגדרות" });
+    if (!cfg.hasAnyKey) {
+      return res.status(400).json({ error: "לא הוגדרו מפתחות Gemini API פעילים בהגדרות" });
     }
     const rows = db.all<Record<string, unknown>>(
       forceAll
-        ? "SELECT barcode, title, author, volume, publisher, pub_year, edition, category, tags, notes FROM books"
-        : "SELECT barcode, title, author, volume, publisher, pub_year, edition, category, tags, notes FROM books WHERE embedding IS NULL"
+        ? "SELECT barcode, sync_id, title, author, volume, publisher, pub_year, edition, category, tags, notes FROM books WHERE deleted_at IS NULL"
+        : "SELECT barcode, sync_id, title, author, volume, publisher, pub_year, edition, category, tags, notes FROM books WHERE deleted_at IS NULL AND embedding IS NULL"
     );
 
     let indexed = 0;
@@ -157,7 +177,9 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
         });
         const vec = await generateTextEmbedding(db, text);
         const blob = float32ToBlob(vec);
-        db.run("UPDATE books SET embedding = ? WHERE barcode = ?", blob, String(b.barcode));
+        const nowIso = new Date().toISOString();
+        db.run("UPDATE books SET embedding = ?, updated_at = ? WHERE barcode = ?", blob, nowIso, String(b.barcode));
+        if (b.sync_id) enqueueSyncOutbox(db, "book", String(b.sync_id), "upsert", { barcode: String(b.barcode) });
         indexed++;
       } catch (err) {
         failed++;
@@ -172,8 +194,8 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
       }
     }
 
-    const statsAfter = db.get<{ c: number }>("SELECT COUNT(*) AS c FROM books WHERE embedding IS NOT NULL")?.c ?? 0;
-    const totalBooks = db.get<{ c: number }>("SELECT COUNT(*) AS c FROM books")?.c ?? 0;
+    const statsAfter = db.get<{ c: number }>("SELECT COUNT(*) AS c FROM books WHERE deleted_at IS NULL AND embedding IS NOT NULL")?.c ?? 0;
+    const totalBooks = db.get<{ c: number }>("SELECT COUNT(*) AS c FROM books WHERE deleted_at IS NULL")?.c ?? 0;
 
     res.json({
       ok: failed === 0 || indexed > 0,
@@ -353,12 +375,18 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
       shelf_number = 1,
       notes = "",
       status = "available",
+      format_size = "",
+      thickness_mm = null,
+      pages_count = null,
       copiesCount = 1,
     } = req.body || {};
 
     if (!title || !String(title).trim()) {
       return res.status(400).json({ error: "יש להזין שם ספר לפני אישור" });
     }
+
+    const parsedThickness = thickness_mm !== null && thickness_mm !== "" && Number(thickness_mm) > 0 ? Number(thickness_mm) : null;
+    const parsedPages = pages_count !== null && pages_count !== "" && Number(pages_count) > 0 ? Math.round(Number(pages_count)) : null;
 
     const count = Math.max(1, Math.min(200, Number(copiesCount) || 1));
     const prefix = db.get<{ value: string }>("SELECT value FROM settings WHERE key = 'barcode_prefix'")?.value ?? "";
@@ -374,6 +402,7 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
         }
         const code = prefix + String(nextNum);
         nextNum++;
+        const syncId = newSyncId();
         const norm = buildNormalizedBookSearch([
           code,
           String(title),
@@ -387,8 +416,8 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
           String(notes),
         ]);
         db.run(
-          `INSERT INTO books (barcode, title, author, volume, publisher, pub_year, edition, category, tags, normalized_search, cabinet_id, shelf_number, notes, status, label_printed, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
+          `INSERT INTO books (barcode, title, author, volume, publisher, pub_year, edition, category, tags, normalized_search, cabinet_id, shelf_number, notes, status, label_printed, created_at, format_size, thickness_mm, pages_count, barcode_status, sync_id, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, 'assigned', ?, ?)`,
           code,
           String(title).trim(),
           String(author).trim(),
@@ -403,8 +432,14 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
           shelf_number ? Number(shelf_number) : 1,
           String(notes).trim(),
           String(status),
+          now,
+          String(format_size || "").trim(),
+          parsedThickness,
+          parsedPages,
+          syncId,
           now
         );
+        enqueueSyncOutbox(db, "book", syncId, "upsert", { barcode: code });
         createdBarcodes.push(code);
       }
       db.run("INSERT INTO settings (key, value) VALUES ('next_barcode', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", String(nextNum));
@@ -413,7 +448,7 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
 
     // Best-effort non-blocking 768d embedding generation when online & API key configured
     const cfg = getAiConfig(db);
-    if (cfg.apiKey) {
+    if (cfg.hasAnyKey) {
       const embText = buildBookEmbeddingText({ title, author, volume, publisher, pub_year, edition, category, tags: tagsArr, notes });
       void generateTextEmbedding(db, embText)
         .then((vec) => {

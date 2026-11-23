@@ -2,17 +2,18 @@ import type { Express } from "express";
 import * as XLSX from "xlsx";
 import type { DbClient } from "../db/adapter.ts";
 import { requireAdmin } from "../auth/adminAuth.ts";
+import { enqueueSyncOutbox, newSyncId } from "../db/schema.ts";
 
 function normalizeHeader(h: string): string {
   return String(h || "")
-    .replace(/[﻿"'`]/g, "")
+    .replace(/[\uFEFF"'`]/g, "")
     .trim()
     .toLowerCase();
 }
 
 function normalizeText(s: string): string {
   return String(s || "")
-    .replace(/[֑-ׇ"׳״'-]/g, "")
+    .replace(/[\u0591-\u05C7"'׳״-]/g, "")
     .trim()
     .toLowerCase();
 }
@@ -114,9 +115,10 @@ export function registerCirculationRoutes(app: Express, db: DbClient) {
     const nowIso = new Date().toISOString();
     let rows = db.all<Record<string, unknown>>(
       `SELECT b.*,
-        (SELECT COUNT(*) FROM loans l WHERE l.borrower_id = b.id AND l.return_date IS NULL) AS active_loans_count,
-        (SELECT COUNT(*) FROM loans l WHERE l.borrower_id = b.id AND l.return_date IS NULL AND l.due_date < ?) AS overdue_loans_count
+        (SELECT COUNT(*) FROM loans l WHERE l.borrower_id = b.id AND l.return_date IS NULL AND l.deleted_at IS NULL) AS active_loans_count,
+        (SELECT COUNT(*) FROM loans l WHERE l.borrower_id = b.id AND l.return_date IS NULL AND l.deleted_at IS NULL AND l.due_date < ?) AS overdue_loans_count
        FROM borrowers b
+       WHERE b.deleted_at IS NULL
        ORDER BY b.full_name ASC`,
       nowIso
     );
@@ -135,21 +137,28 @@ export function registerCirculationRoutes(app: Express, db: DbClient) {
       return res.status(400).json({ error: "יש להזין שם מלא לשואל" });
     }
     const now = new Date().toISOString();
+    const syncId = newSyncId();
     const info = db.run(
-      "INSERT INTO borrowers (full_name, shiur_group, phone, notes, created_at) VALUES (?, ?, ?, ?, ?)",
+      "INSERT INTO borrowers (full_name, shiur_group, phone, notes, created_at, sync_id, updated_at, deleted_at) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)",
       String(full_name).trim(),
       String(shiur_group).trim(),
       String(phone).trim(),
       String(notes).trim(),
+      now,
+      syncId,
       now
     );
-    const created = db.get("SELECT *, 0 AS active_loans_count, 0 AS overdue_loans_count FROM borrowers WHERE id = ?", info.lastInsertRowid);
+    const created = db.get<Record<string, unknown>>(
+      "SELECT *, 0 AS active_loans_count, 0 AS overdue_loans_count FROM borrowers WHERE id = ?",
+      info.lastInsertRowid
+    );
+    enqueueSyncOutbox(db, "borrower", syncId, "upsert", created || { sync_id: syncId, full_name: String(full_name).trim(), updated_at: now });
     res.status(201).json(created);
   });
 
   app.put("/api/borrowers/:id", requireAdmin, (req, res) => {
     const id = Number(req.params.id);
-    const existing = db.get<Record<string, unknown>>("SELECT * FROM borrowers WHERE id = ?", id);
+    const existing = db.get<Record<string, unknown>>("SELECT * FROM borrowers WHERE id = ? AND deleted_at IS NULL", id);
     if (!existing) return res.status(404).json({ error: "השואל לא נמצא" });
     const {
       full_name = existing.full_name,
@@ -160,25 +169,41 @@ export function registerCirculationRoutes(app: Express, db: DbClient) {
     if (!String(full_name).trim()) {
       return res.status(400).json({ error: "שם השואל אינו יכול להיות ריק" });
     }
+    const now = new Date().toISOString();
+    const syncId = String(existing.sync_id || "") || newSyncId();
     db.run(
-      "UPDATE borrowers SET full_name = ?, shiur_group = ?, phone = ?, notes = ? WHERE id = ?",
+      "UPDATE borrowers SET full_name = ?, shiur_group = ?, phone = ?, notes = ?, sync_id = ?, updated_at = ? WHERE id = ?",
       String(full_name).trim(),
       String(shiur_group).trim(),
       String(phone).trim(),
       String(notes).trim(),
+      syncId,
+      now,
       id
     );
-    const updated = db.get("SELECT * FROM borrowers WHERE id = ?", id);
+    const updated = db.get<Record<string, unknown>>("SELECT * FROM borrowers WHERE id = ?", id);
+    enqueueSyncOutbox(db, "borrower", syncId, "upsert", updated || { sync_id: syncId, updated_at: now });
     res.json(updated);
   });
 
   app.delete("/api/borrowers/:id", requireAdmin, (req, res) => {
     const id = Number(req.params.id);
-    const active = db.get<{ c: number }>("SELECT COUNT(*) AS c FROM loans WHERE borrower_id = ? AND return_date IS NULL", id);
+    const existing = db.get<{ id: number; sync_id?: string }>("SELECT id, sync_id FROM borrowers WHERE id = ? AND deleted_at IS NULL", id);
+    if (!existing) return res.status(404).json({ error: "השואל לא נמצא" });
+    const active = db.get<{ c: number }>(
+      "SELECT COUNT(*) AS c FROM loans WHERE borrower_id = ? AND return_date IS NULL AND deleted_at IS NULL",
+      id
+    );
     if ((active?.c ?? 0) > 0) {
       return res.status(400).json({ error: "לא ניתן למחוק שואל שברשותו ספרים מושאלים כעת. החזר את הספרים תחילה." });
     }
-    db.run("DELETE FROM borrowers WHERE id = ?", id);
+    const now = new Date().toISOString();
+    db.transaction(() => {
+      db.run("DELETE FROM borrowers WHERE id = ?", id);
+      if (existing.sync_id) {
+        enqueueSyncOutbox(db, "borrower", existing.sync_id, "delete", { sync_id: existing.sync_id, deleted_at: now });
+      }
+    });
     res.json({ ok: true });
   });
 
@@ -202,7 +227,9 @@ export function registerCirculationRoutes(app: Express, db: DbClient) {
       const sheet = workbook.Sheets[firstSheetName];
       const rawRows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: "" });
 
-      const existing = db.all<{ full_name: string; shiur_group: string }>("SELECT full_name, shiur_group FROM borrowers");
+      const existing = db.all<{ full_name: string; shiur_group: string }>(
+        "SELECT full_name, shiur_group FROM borrowers WHERE deleted_at IS NULL"
+      );
       const existingKeys = new Set(
         existing.map((e) => `${normalizeText(e.full_name)}||${normalizeText(e.shiur_group)}`)
       );
@@ -248,7 +275,9 @@ export function registerCirculationRoutes(app: Express, db: DbClient) {
       return res.status(400).json({ error: "אין שורות לייבוא" });
     }
     const now = new Date().toISOString();
-    const existing = db.all<{ full_name: string; shiur_group: string }>("SELECT full_name, shiur_group FROM borrowers");
+    const existing = db.all<{ full_name: string; shiur_group: string }>(
+      "SELECT full_name, shiur_group FROM borrowers WHERE deleted_at IS NULL"
+    );
     const existingKeys = new Set(
       existing.map((e) => `${normalizeText(e.full_name)}||${normalizeText(e.shiur_group)}`)
     );
@@ -272,14 +301,26 @@ export function registerCirculationRoutes(app: Express, db: DbClient) {
           continue;
         }
         existingKeys.add(key);
+        const syncId = newSyncId();
         db.run(
-          "INSERT INTO borrowers (full_name, shiur_group, phone, notes, created_at) VALUES (?, ?, ?, ?, ?)",
+          "INSERT INTO borrowers (full_name, shiur_group, phone, notes, created_at, sync_id, updated_at, deleted_at) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)",
           fullName,
           shiurGroup,
           phone,
           notes,
+          now,
+          syncId,
           now
         );
+        enqueueSyncOutbox(db, "borrower", syncId, "upsert", {
+          sync_id: syncId,
+          full_name: fullName,
+          shiur_group: shiurGroup,
+          phone,
+          notes,
+          created_at: now,
+          updated_at: now,
+        });
         inserted++;
       }
     });
@@ -293,8 +334,8 @@ export function registerCirculationRoutes(app: Express, db: DbClient) {
     const book = db.get<Record<string, unknown>>(
       `SELECT b.*, c.code AS cabinet_code, c.main_subject AS cabinet_subject
        FROM books b
-       LEFT JOIN cabinets c ON b.cabinet_id = c.id
-       WHERE b.barcode = ?`,
+       LEFT JOIN cabinets c ON b.cabinet_id = c.id AND c.deleted_at IS NULL
+       WHERE b.barcode = ? AND b.deleted_at IS NULL`,
       barcode
     );
     if (!book) {
@@ -304,7 +345,7 @@ export function registerCirculationRoutes(app: Express, db: DbClient) {
       `SELECT l.*, br.full_name AS borrower_name, br.shiur_group AS borrower_shiur
        FROM loans l
        JOIN borrowers br ON l.borrower_id = br.id
-       WHERE l.book_barcode = ? AND l.return_date IS NULL
+       WHERE l.book_barcode = ? AND l.return_date IS NULL AND l.deleted_at IS NULL AND br.deleted_at IS NULL
        ORDER BY l.id DESC LIMIT 1`,
       barcode
     );
@@ -325,8 +366,9 @@ export function registerCirculationRoutes(app: Express, db: DbClient) {
         br.full_name AS borrower_name, br.shiur_group AS borrower_shiur, br.phone AS borrower_phone
        FROM loans l
        JOIN books bk ON l.book_barcode = bk.barcode
-       LEFT JOIN cabinets c ON bk.cabinet_id = c.id
+       LEFT JOIN cabinets c ON bk.cabinet_id = c.id AND c.deleted_at IS NULL
        JOIN borrowers br ON l.borrower_id = br.id
+       WHERE l.deleted_at IS NULL AND bk.deleted_at IS NULL AND br.deleted_at IS NULL
        ORDER BY l.loan_date DESC, l.id DESC`
     );
 
@@ -375,7 +417,10 @@ export function registerCirculationRoutes(app: Express, db: DbClient) {
       return res.status(400).json({ error: "יש לסרוק או להזין לפחות ברקוד ספר אחד" });
     }
 
-    const borrower = db.get<{ id: number; full_name: string }>("SELECT id, full_name FROM borrowers WHERE id = ?", borrowerId);
+    const borrower = db.get<{ id: number; full_name: string; sync_id?: string }>(
+      "SELECT id, full_name, sync_id FROM borrowers WHERE id = ? AND deleted_at IS NULL",
+      borrowerId
+    );
     if (!borrower) {
       return res.status(404).json({ error: "השואל הנבחר לא נמצא במערכת" });
     }
@@ -384,10 +429,11 @@ export function registerCirculationRoutes(app: Express, db: DbClient) {
     const loanDays = Math.max(1, Math.min(365, Number(req.body?.loan_days) || parseInt(defaultDaysSetting, 10) || 14));
 
     const referenceBooks: Array<{ barcode: string; title: string }> = [];
+    const checkedBooks: Array<{ barcode: string; title: string; status: string; sync_id?: string }> = [];
 
     for (const code of barcodes) {
-      const book = db.get<{ barcode: string; title: string; status: string }>(
-        "SELECT barcode, title, status FROM books WHERE barcode = ?",
+      const book = db.get<{ barcode: string; title: string; status: string; sync_id?: string }>(
+        "SELECT barcode, title, status, sync_id FROM books WHERE barcode = ? AND deleted_at IS NULL",
         code
       );
       if (!book) {
@@ -396,7 +442,7 @@ export function registerCirculationRoutes(app: Express, db: DbClient) {
       const openLoan = db.get<{ borrower_name: string }>(
         `SELECT br.full_name AS borrower_name
          FROM loans l JOIN borrowers br ON l.borrower_id = br.id
-         WHERE l.book_barcode = ? AND l.return_date IS NULL LIMIT 1`,
+         WHERE l.book_barcode = ? AND l.return_date IS NULL AND l.deleted_at IS NULL LIMIT 1`,
         code
       );
       if (openLoan || book.status === "borrowed") {
@@ -409,6 +455,7 @@ export function registerCirculationRoutes(app: Express, db: DbClient) {
       if (book.status === "reference_only" && !forceReferenceOverride) {
         referenceBooks.push({ barcode: book.barcode, title: book.title });
       }
+      checkedBooks.push(book);
     }
 
     if (referenceBooks.length > 0) {
@@ -423,15 +470,41 @@ export function registerCirculationRoutes(app: Express, db: DbClient) {
     const dueIso = new Date(Date.now() + loanDays * 86400000).toISOString();
 
     db.transaction(() => {
-      for (const code of barcodes) {
+      for (const bk of checkedBooks) {
+        const loanSyncId = newSyncId();
         db.run(
-          "INSERT INTO loans (book_barcode, borrower_id, loan_date, due_date, return_date) VALUES (?, ?, ?, ?, NULL)",
-          code,
+          "INSERT INTO loans (book_barcode, borrower_id, loan_date, due_date, return_date, sync_id, updated_at, deleted_at) VALUES (?, ?, ?, ?, NULL, ?, ?, NULL)",
+          bk.barcode,
           borrowerId,
           nowIso,
-          dueIso
+          dueIso,
+          loanSyncId,
+          nowIso
         );
-        db.run("UPDATE books SET status = 'borrowed' WHERE barcode = ?", code);
+        const bookSyncId = bk.sync_id || newSyncId();
+        db.run(
+          "UPDATE books SET status = 'borrowed', sync_id = COALESCE(sync_id, ?), updated_at = ? WHERE barcode = ?",
+          bookSyncId,
+          nowIso,
+          bk.barcode
+        );
+        enqueueSyncOutbox(db, "loan", loanSyncId, "upsert", {
+          sync_id: loanSyncId,
+          book_barcode: bk.barcode,
+          book_sync_id: bookSyncId,
+          borrower_id: borrowerId,
+          borrower_sync_id: borrower.sync_id || null,
+          loan_date: nowIso,
+          due_date: dueIso,
+          return_date: null,
+          updated_at: nowIso,
+        });
+        enqueueSyncOutbox(db, "book", bookSyncId, "upsert", {
+          sync_id: bookSyncId,
+          barcode: bk.barcode,
+          status: "borrowed",
+          updated_at: nowIso,
+        });
       }
     });
 
@@ -453,32 +526,68 @@ export function registerCirculationRoutes(app: Express, db: DbClient) {
     }
 
     const book = db.get<Record<string, unknown>>(
-      `SELECT b.barcode, b.title, b.author, b.volume, b.status, b.shelf_number, c.code AS cabinet_code, c.main_subject AS cabinet_subject
+      `SELECT b.barcode, b.title, b.author, b.volume, b.status, b.shelf_number, b.sync_id, c.code AS cabinet_code, c.main_subject AS cabinet_subject
        FROM books b
-       LEFT JOIN cabinets c ON b.cabinet_id = c.id
-       WHERE b.barcode = ?`,
+       LEFT JOIN cabinets c ON b.cabinet_id = c.id AND c.deleted_at IS NULL
+       WHERE b.barcode = ? AND b.deleted_at IS NULL`,
       barcode
     );
     if (!book) {
       return res.status(404).json({ error: `ברקוד "${barcode}" לא נמצא במאגר הספרים` });
     }
 
-    const openLoan = db.get<{ id: number; borrower_id: number; loan_date: string; due_date: string; borrower_name: string; borrower_shiur: string }>(
-      `SELECT l.id, l.borrower_id, l.loan_date, l.due_date, br.full_name AS borrower_name, br.shiur_group AS borrower_shiur
+    const openLoan = db.get<{
+      id: number;
+      borrower_id: number;
+      loan_date: string;
+      due_date: string;
+      sync_id?: string;
+      borrower_name: string;
+      borrower_shiur: string;
+    }>(
+      `SELECT l.id, l.borrower_id, l.loan_date, l.due_date, l.sync_id, br.full_name AS borrower_name, br.shiur_group AS borrower_shiur
        FROM loans l
        JOIN borrowers br ON l.borrower_id = br.id
-       WHERE l.book_barcode = ? AND l.return_date IS NULL
+       WHERE l.book_barcode = ? AND l.return_date IS NULL AND l.deleted_at IS NULL
        ORDER BY l.id DESC LIMIT 1`,
       barcode
     );
 
     const nowIso = new Date().toISOString();
+    const bookSyncId = String(book.sync_id || "") || newSyncId();
 
     if (openLoan) {
       const wasOverdue = new Date(openLoan.due_date).getTime() < Date.now();
+      const loanSyncId = openLoan.sync_id || newSyncId();
       db.transaction(() => {
-        db.run("UPDATE loans SET return_date = ? WHERE id = ?", nowIso, openLoan.id);
-        db.run("UPDATE books SET status = 'available' WHERE barcode = ?", barcode);
+        db.run(
+          "UPDATE loans SET return_date = ?, sync_id = COALESCE(sync_id, ?), updated_at = ? WHERE id = ?",
+          nowIso,
+          loanSyncId,
+          nowIso,
+          openLoan.id
+        );
+        db.run(
+          "UPDATE books SET status = 'available', sync_id = COALESCE(sync_id, ?), updated_at = ? WHERE barcode = ?",
+          bookSyncId,
+          nowIso,
+          barcode
+        );
+        enqueueSyncOutbox(db, "loan", loanSyncId, "upsert", {
+          sync_id: loanSyncId,
+          book_barcode: barcode,
+          borrower_id: openLoan.borrower_id,
+          loan_date: openLoan.loan_date,
+          due_date: openLoan.due_date,
+          return_date: nowIso,
+          updated_at: nowIso,
+        });
+        enqueueSyncOutbox(db, "book", bookSyncId, "upsert", {
+          sync_id: bookSyncId,
+          barcode,
+          status: "available",
+          updated_at: nowIso,
+        });
       });
       return res.json({
         ok: true,
@@ -493,7 +602,20 @@ export function registerCirculationRoutes(app: Express, db: DbClient) {
     }
 
     if (book.status === "borrowed") {
-      db.run("UPDATE books SET status = 'available' WHERE barcode = ?", barcode);
+      db.transaction(() => {
+        db.run(
+          "UPDATE books SET status = 'available', sync_id = COALESCE(sync_id, ?), updated_at = ? WHERE barcode = ?",
+          bookSyncId,
+          nowIso,
+          barcode
+        );
+        enqueueSyncOutbox(db, "book", bookSyncId, "upsert", {
+          sync_id: bookSyncId,
+          barcode,
+          status: "available",
+          updated_at: nowIso,
+        });
+      });
       return res.json({
         ok: true,
         book,
@@ -512,16 +634,38 @@ export function registerCirculationRoutes(app: Express, db: DbClient) {
   app.put("/api/loans/:id/extend", (req, res) => {
     const id = Number(req.params.id);
     const days = Math.max(1, Math.min(90, Number(req.body?.days) || 7));
-    const loan = db.get<{ id: number; due_date: string; return_date: string | null }>(
-      "SELECT id, due_date, return_date FROM loans WHERE id = ?",
-      id
-    );
+    const loan = db.get<{
+      id: number;
+      book_barcode: string;
+      borrower_id: number;
+      loan_date: string;
+      due_date: string;
+      return_date: string | null;
+      sync_id?: string;
+    }>("SELECT id, book_barcode, borrower_id, loan_date, due_date, return_date, sync_id FROM loans WHERE id = ? AND deleted_at IS NULL", id);
     if (!loan || loan.return_date) {
       return res.status(404).json({ error: "השאלה פתוחה לא נמצאה" });
     }
     const baseMs = Math.max(Date.now(), new Date(loan.due_date).getTime());
     const newDue = new Date(baseMs + days * 86400000).toISOString();
-    db.run("UPDATE loans SET due_date = ? WHERE id = ?", newDue, id);
+    const nowIso = new Date().toISOString();
+    const loanSyncId = loan.sync_id || newSyncId();
+    db.run(
+      "UPDATE loans SET due_date = ?, sync_id = COALESCE(sync_id, ?), updated_at = ? WHERE id = ?",
+      newDue,
+      loanSyncId,
+      nowIso,
+      id
+    );
+    enqueueSyncOutbox(db, "loan", loanSyncId, "upsert", {
+      sync_id: loanSyncId,
+      book_barcode: loan.book_barcode,
+      borrower_id: loan.borrower_id,
+      loan_date: loan.loan_date,
+      due_date: newDue,
+      return_date: null,
+      updated_at: nowIso,
+    });
     res.json({ ok: true, due_date: newDue });
   });
 }

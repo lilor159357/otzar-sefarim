@@ -18,7 +18,7 @@ import {
   ZoomOut,
   AlertTriangle,
 } from "lucide-react";
-import type { AiQueueItem, CabinetRow } from "../types.ts";
+import { FORMAT_SIZE_OPTIONS, type AiQueueItem, type CabinetRow } from "../types.ts";
 import { getAdminToken } from "../lib/adminSession.ts";
 
 interface CatalogModuleProps {
@@ -133,6 +133,9 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
   const [edition, setEdition] = useState("");
   const [category, setCategory] = useState("הלכה");
   const [tagsText, setTagsText] = useState("");
+  const [formatSize, setFormatSize] = useState("");
+  const [thicknessMm, setThicknessMm] = useState("");
+  const [pagesCount, setPagesCount] = useState("");
   const [cabinetId, setCabinetId] = useState<string>(() => (cabinets[0] ? String(cabinets[0].id) : ""));
   const [shelfNumber, setShelfNumber] = useState<number>(1);
   const [status, setStatus] = useState<"available" | "reference_only">("available");
@@ -173,6 +176,9 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
   const [revEdition, setRevEdition] = useState("");
   const [revCategory, setRevCategory] = useState("הלכה");
   const [revTags, setRevTags] = useState("");
+  const [revFormatSize, setRevFormatSize] = useState("");
+  const [revThicknessMm, setRevThicknessMm] = useState("");
+  const [revPagesCount, setRevPagesCount] = useState("");
   const [revCabinetId, setRevCabinetId] = useState<string>(() => (cabinets[0] ? String(cabinets[0].id) : ""));
   const [revShelf, setRevShelf] = useState<number>(1);
   const [revStatus, setRevStatus] = useState<"available" | "reference_only">("available");
@@ -239,6 +245,9 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
     setRevEdition(ex?.edition || "");
     setRevCategory(ex?.category || "הלכה");
     setRevTags(Array.isArray(ex?.tags) ? ex.tags.join(", ") : "");
+    setRevFormatSize("");
+    setRevThicknessMm("");
+    setRevPagesCount("");
     setRevNotes(ex?.notes || "");
     setRevCopies(1);
     setRevStatus("available");
@@ -282,6 +291,9 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
             .split(",")
             .map((t) => t.trim())
             .filter(Boolean),
+          format_size: formatSize.trim(),
+          thickness_mm: thicknessMm.trim() ? Number(thicknessMm) : null,
+          pages_count: pagesCount.trim() ? Number(pagesCount) : null,
           cabinet_id: cabinetId ? Number(cabinetId) : null,
           shelf_number: shelfNumber,
           notes: notes.trim(),
@@ -307,6 +319,9 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
         setPubYear("");
         setEdition("");
         setTagsText("");
+        setFormatSize("");
+        setThicknessMm("");
+        setPagesCount("");
         setNotes("");
         setTimeout(() => titleRef.current?.focus(), 40);
       }
@@ -481,6 +496,9 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
             .split(",")
             .map((t) => t.trim())
             .filter(Boolean),
+          format_size: revFormatSize.trim(),
+          thickness_mm: revThicknessMm.trim() ? Number(revThicknessMm) : null,
+          pages_count: revPagesCount.trim() ? Number(revPagesCount) : null,
           cabinet_id: revCabinetId ? Number(revCabinetId) : null,
           shelf_number: revShelf,
           status: revStatus,
@@ -657,6 +675,49 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
                 onChange={(e) => setTagsText(e.target.value)}
                 placeholder="למשל: חושן משפט, קצוה״ח, ממון, פוסקים"
                 className="w-full px-3 py-2 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)]"
+              />
+            </div>
+
+            <div className="md:col-span-4">
+              <label className="block text-xs font-medium mb-1">גודל / פורמט (אופציונלי — למידוף)</label>
+              <input
+                list="otzar-format-sizes-cat"
+                value={formatSize}
+                onChange={(e) => setFormatSize(e.target.value)}
+                placeholder="רגיל / גדול (פוליו) / כיס"
+                className="w-full px-3 py-2 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)]"
+              />
+              <datalist id="otzar-format-sizes-cat">
+                {FORMAT_SIZE_OPTIONS.map((opt) => (
+                  <option key={opt} value={opt} />
+                ))}
+              </datalist>
+            </div>
+
+            <div className="md:col-span-4">
+              <label className="block text-xs font-medium mb-1">עובי שדרה במ״מ (אופציונלי)</label>
+              <input
+                type="number"
+                min={1}
+                max={300}
+                step="0.5"
+                value={thicknessMm}
+                onChange={(e) => setThicknessMm(e.target.value)}
+                placeholder="למשל: 35"
+                className="w-full px-3 py-2 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] tabular-nums"
+              />
+            </div>
+
+            <div className="md:col-span-4">
+              <label className="block text-xs font-medium mb-1">מספר עמודים (אופציונלי)</label>
+              <input
+                type="number"
+                min={1}
+                max={10000}
+                value={pagesCount}
+                onChange={(e) => setPagesCount(e.target.value)}
+                placeholder="למשל: 420"
+                className="w-full px-3 py-2 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] tabular-nums"
               />
             </div>
 
@@ -1293,6 +1354,48 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
                         placeholder="למשל: תשפ״ד / 2024"
                         className="w-full px-3 py-2 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)]"
                       />
+                    </div>
+                    <div className="md:col-span-2 grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                      <div>
+                        <label className="block text-xs font-medium mb-1">גודל / פורמט</label>
+                        <input
+                          list="otzar-format-sizes-rev"
+                          value={revFormatSize}
+                          onChange={(e) => setRevFormatSize(e.target.value)}
+                          placeholder="רגיל / גדול / כיס"
+                          className="w-full px-3 py-2 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)]"
+                        />
+                        <datalist id="otzar-format-sizes-rev">
+                          {FORMAT_SIZE_OPTIONS.map((opt) => (
+                            <option key={opt} value={opt} />
+                          ))}
+                        </datalist>
+                      </div>
+                      <div>
+                        <label className="block text-xs font-medium mb-1">עובי (מ״מ)</label>
+                        <input
+                          type="number"
+                          min={1}
+                          max={300}
+                          step="0.5"
+                          value={revThicknessMm}
+                          onChange={(e) => setRevThicknessMm(e.target.value)}
+                          placeholder="35"
+                          className="w-full px-3 py-2 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] tabular-nums"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-medium mb-1">עמודים</label>
+                        <input
+                          type="number"
+                          min={1}
+                          max={10000}
+                          value={revPagesCount}
+                          onChange={(e) => setRevPagesCount(e.target.value)}
+                          placeholder="420"
+                          className="w-full px-3 py-2 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] tabular-nums"
+                        />
+                      </div>
                     </div>
                     <div className="md:col-span-2">
                       <label className="block text-xs font-medium mb-1">תגיות חיפוש ונושאים (ניתנות לעריכה)</label>

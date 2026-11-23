@@ -332,10 +332,12 @@ export const SearchModule: React.FC<SearchModuleProps> = ({
                       {b.title}
                       {b.volume ? <span className="text-[var(--otzar-text-muted)] font-normal"> · {b.volume}</span> : null}
                     </div>
-                    <div className="text-xs text-[var(--otzar-text-muted)] mt-0.5">
+                    <div className="text-xs text-[var(--otzar-text-muted)] mt-0.5 tabular-nums">
                       {b.category || "כללי"}
                       {b.edition ? ` · מהדורה: ${b.edition}` : ""}
                       {b.pub_year ? ` · שנת הוצאה: ${b.pub_year}` : ""}
+                      {b.format_size ? ` · ${b.format_size}` : ""}
+                      {b.thickness_mm != null && b.thickness_mm > 0 ? ` · ${b.thickness_mm} מ״מ` : ""}
                       {b.matchHint ? ` · התאמה: ${b.matchHint}` : ""}
                     </div>
                   </td>

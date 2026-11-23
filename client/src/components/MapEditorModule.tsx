@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
-import { Plus, Save, RotateCw, Trash2, CheckCircle2 } from "lucide-react";
-import type { CabinetRow, MapEntrance } from "../types.ts";
+import { Plus, Save, RotateCw, Trash2, CheckCircle2, BarChart3, X, RefreshCw } from "lucide-react";
+import type { CabinetRow, MapEntrance, ShelvingReport } from "../types.ts";
 import { DEFAULT_ENTRANCE, EntranceMarker, MAP_HEIGHT, MAP_WIDTH } from "./LibraryMap2D.tsx";
 
 interface MapEditorModuleProps {
@@ -57,6 +57,26 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
   const [newCode, setNewCode] = useState("");
   const [newSubject, setNewSubject] = useState("");
   const [newShelves, setNewShelves] = useState("5");
+
+  const [reportOpen, setReportOpen] = useState(false);
+  const [reportLoading, setReportLoading] = useState(false);
+  const [reportError, setReportError] = useState<string | null>(null);
+  const [shelvingReport, setShelvingReport] = useState<ShelvingReport | null>(null);
+
+  const loadShelvingReport = async () => {
+    setReportLoading(true);
+    setReportError(null);
+    try {
+      const res = await fetch("/api/reports/shelving");
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "שגיאה בטעינת דוח מידוף");
+      setShelvingReport(data);
+    } catch (err: any) {
+      setReportError(err?.message || "שגיאה בטעינת דוח מידוף");
+    } finally {
+      setReportLoading(false);
+    }
+  };
 
   const svgRef = useRef<SVGSVGElement>(null);
   const dragRef = useRef<
@@ -316,15 +336,28 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
           </p>
         </div>
 
-        <button
-          type="button"
-          onClick={handleSaveLayout}
-          disabled={saving}
-          className="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold text-white bg-[var(--otzar-accent)] hover:bg-[var(--otzar-accent-hover)] cursor-pointer disabled:opacity-50"
-        >
-          <Save className="w-4 h-4" />
-          {saving ? "שומר..." : "שמור סידור מפה"}
-        </button>
+        <div className="flex flex-wrap items-center gap-2.5">
+          <button
+            type="button"
+            onClick={() => {
+              setReportOpen(true);
+              loadShelvingReport();
+            }}
+            className="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold border border-[var(--otzar-border)] bg-[var(--otzar-surface)] hover:bg-[var(--otzar-surface-alt)] cursor-pointer whitespace-nowrap"
+          >
+            <BarChart3 className="w-4 h-4 text-[var(--otzar-accent)]" />
+            דוח מידוף ותפוסה
+          </button>
+          <button
+            type="button"
+            onClick={handleSaveLayout}
+            disabled={saving}
+            className="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold text-white bg-[var(--otzar-accent)] hover:bg-[var(--otzar-accent-hover)] cursor-pointer disabled:opacity-50 whitespace-nowrap"
+          >
+            <Save className="w-4 h-4" />
+            {saving ? "שומר..." : "שמור סידור מפה"}
+          </button>
+        </div>
       </div>
 
       {notice && (
@@ -626,6 +659,164 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
           </div>
         </div>
       </div>
+
+      {reportOpen && (
+        <div
+          className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4"
+          onClick={() => setReportOpen(false)}
+          role="dialog"
+          aria-modal="true"
+        >
+          <div
+            className="w-full max-w-5xl rounded-xl border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] text-[var(--otzar-text)] overflow-hidden max-h-[90vh] flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-6 py-4 border-b border-[var(--otzar-border-muted)] flex items-center justify-between gap-4">
+              <div>
+                <h3 className="text-lg font-bold flex items-center gap-2">
+                  <BarChart3 className="w-5 h-5 text-[var(--otzar-accent)]" />
+                  דוח מידוף ותפוסת ארונות
+                </h3>
+                <p className="text-xs text-[var(--otzar-text-muted)] mt-0.5">
+                  סיכום כמות ספרים, רוחב מדף מצטבר (לפי עובי שדרה במ״מ) והתפלגות גדלים בכל ארון ומדף.
+                </p>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={loadShelvingReport}
+                  disabled={reportLoading}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-[var(--otzar-border-muted)] hover:bg-[var(--otzar-surface-alt)] cursor-pointer"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${reportLoading ? "animate-spin" : ""}`} />
+                  רענן
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setReportOpen(false)}
+                  className="p-2 rounded-lg hover:bg-[var(--otzar-surface-alt)] text-[var(--otzar-text-muted)] cursor-pointer"
+                  aria-label="סגור דוח"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+            </div>
+
+            <div className="p-6 overflow-y-auto space-y-5 text-sm">
+              {reportError && (
+                <div className="p-3 rounded-lg border border-red-300 bg-red-50 text-red-800 text-xs">{reportError}</div>
+              )}
+
+              {reportLoading && !shelvingReport ? (
+                <div className="py-12 text-center text-[var(--otzar-text-muted)]">מחשב נתוני מידוף...</div>
+              ) : shelvingReport ? (
+                <>
+                  {/* Totals strip */}
+                  <div className="grid grid-cols-2 md:grid-cols-5 divide-x divide-x-reverse divide-[var(--otzar-border-muted)] rounded-xl border border-[var(--otzar-border-muted)] bg-[var(--otzar-surface-alt)]">
+                    <div className="p-3.5">
+                      <div className="text-xs text-[var(--otzar-text-muted)]">סה״כ ספרים</div>
+                      <div className="text-xl font-bold tabular-nums mt-0.5">{shelvingReport.totals.totalBooks}</div>
+                    </div>
+                    <div className="p-3.5">
+                      <div className="text-xs text-[var(--otzar-text-muted)]">משויכים לארונות</div>
+                      <div className="text-xl font-bold tabular-nums mt-0.5">{shelvingReport.totals.assignedBooks}</div>
+                    </div>
+                    <div className="p-3.5">
+                      <div className="text-xs text-[var(--otzar-text-muted)]">ללא שיוך לארון</div>
+                      <div className="text-xl font-bold tabular-nums mt-0.5">{shelvingReport.totals.unassignedBooks}</div>
+                    </div>
+                    <div className="p-3.5">
+                      <div className="text-xs text-[var(--otzar-text-muted)]">רוחב מדף מתועד</div>
+                      <div className="text-xl font-bold tabular-nums mt-0.5">{shelvingReport.totals.totalThicknessCm} ס״מ</div>
+                    </div>
+                    <div className="p-3.5">
+                      <div className="text-xs text-[var(--otzar-text-muted)]">ללא מידת עובי</div>
+                      <div className="text-xl font-bold tabular-nums mt-0.5">{shelvingReport.totals.missingThicknessCount}</div>
+                    </div>
+                  </div>
+
+                  {/* Format breakdown */}
+                  <div className="text-xs text-[var(--otzar-text-muted)] flex flex-wrap items-center gap-2 border-b border-[var(--otzar-border-muted)] pb-3">
+                    <span className="font-semibold text-[var(--otzar-text)]">התפלגות גדלים:</span>
+                    {Object.entries(shelvingReport.totals.formatBreakdown).map(([fmt, cnt], idx) => (
+                      <React.Fragment key={fmt}>
+                        {idx > 0 && <span aria-hidden="true">·</span>}
+                        <span className="tabular-nums">
+                          {fmt}: <strong className="text-[var(--otzar-text)]">{cnt}</strong>
+                        </span>
+                      </React.Fragment>
+                    ))}
+                  </div>
+
+                  {/* Per-Cabinet Tables */}
+                  {shelvingReport.cabinets.length === 0 ? (
+                    <div className="py-8 text-center text-[var(--otzar-text-muted)]">אין ארונות מוגדרים במפה עדיין.</div>
+                  ) : (
+                    <div className="space-y-4">
+                      {shelvingReport.cabinets.map((cab) => (
+                        <div key={cab.id} className="rounded-xl border border-[var(--otzar-border-muted)] overflow-hidden">
+                          <div className="px-4 py-2.5 bg-[var(--otzar-surface)] border-b border-[var(--otzar-border-muted)] flex flex-wrap items-center justify-between gap-2">
+                            <div className="font-semibold flex flex-wrap items-center gap-2">
+                              <span>ארון {cab.code}</span>
+                              {cab.main_subject && (
+                                <>
+                                  <span aria-hidden="true" className="text-[var(--otzar-text-muted)]">·</span>
+                                  <span className="text-[var(--otzar-text-muted)] font-normal">{cab.main_subject}</span>
+                                </>
+                              )}
+                            </div>
+                            <div className="text-xs text-[var(--otzar-text-muted)] tabular-nums flex flex-wrap items-center gap-2">
+                              <span>{cab.booksCount} ספרים</span>
+                              <span aria-hidden="true">·</span>
+                              <span>{cab.totalThicknessCm} ס״מ מתועדים</span>
+                              <span aria-hidden="true">·</span>
+                              <span>חסר עובי: {cab.missingThicknessCount}</span>
+                            </div>
+                          </div>
+
+                          <table className="w-full text-xs text-right border-collapse">
+                            <thead className="bg-[var(--otzar-surface-alt)] text-[var(--otzar-text-muted)] border-b border-[var(--otzar-border-muted)]">
+                              <tr>
+                                <th className="py-2 px-3 font-medium">מדף</th>
+                                <th className="py-2 px-3 font-medium">ספרים</th>
+                                <th className="py-2 px-3 font-medium">רוחב מצטבר</th>
+                                <th className="py-2 px-3 font-medium">עובי ממוצע</th>
+                                <th className="py-2 px-3 font-medium">חסר עובי</th>
+                                <th className="py-2 px-3 font-medium">גדלים</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-[var(--otzar-border-muted)]">
+                              {cab.shelves.map((sh) => {
+                                const fmtSummary = Object.entries(sh.formatCounts)
+                                  .map(([f, c]) => `${f} (${c})`)
+                                  .join(" · ");
+                                return (
+                                  <tr key={sh.shelfNumber} className="hover:bg-[var(--otzar-surface-alt)]/50">
+                                    <td className="py-2 px-3 font-semibold tabular-nums">
+                                      {sh.shelfNumber > 0 ? `מדף ${sh.shelfNumber}` : "ללא מדף"}
+                                    </td>
+                                    <td className="py-2 px-3 tabular-nums">{sh.booksCount}</td>
+                                    <td className="py-2 px-3 tabular-nums">{sh.totalThicknessCm} ס״מ</td>
+                                    <td className="py-2 px-3 tabular-nums">
+                                      {sh.avgThicknessMm != null ? `${sh.avgThicknessMm} מ״מ` : "—"}
+                                    </td>
+                                    <td className="py-2 px-3 tabular-nums">{sh.missingThicknessCount}</td>
+                                    <td className="py-2 px-3 text-[var(--otzar-text-muted)] tabular-nums">{fmtSummary || "—"}</td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
