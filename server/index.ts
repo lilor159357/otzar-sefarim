@@ -9,6 +9,9 @@ import { searchBooksOffline, type SearchableBook } from "./search/torahSearch.ts
 import { registerCirculationRoutes } from "./routes/circulation.ts";
 import { registerCatalogAiRoutes } from "./routes/catalogAi.ts";
 import { registerLabelsAndAdminRoutes } from "./routes/labelsAndAdmin.ts";
+import { registerSyncRoutes } from "./routes/sync.ts";
+import { OtzarFirebaseSyncService } from "./sync/firebaseSync.ts";
+import { loadWindowsRootCertificates } from "../electron/windowsCerts.ts";
 import {
   registerUpdaterRoutes,
   scheduleStartupAutoUpdateCheck,
@@ -92,12 +95,26 @@ export async function startOtzarServer(options: OtzarServerOptions = {}): Promis
   fs.mkdirSync(DATA_DIR, { recursive: true });
   fs.mkdirSync(path.join(DATA_DIR, "ai_images"), { recursive: true });
   fs.mkdirSync(path.join(DATA_DIR, "backups"), { recursive: true });
+  if (!options.isElectron && process.platform === "win32") {
+    loadWindowsRootCertificates(DATA_DIR);
+  }
 
   const db = await openDatabase(DB_PATH);
   initSchemaAndSeed(db);
 
   const app = express();
   app.use(express.json({ limit: "25mb" }));
+  let syncService: OtzarFirebaseSyncService | null = null;
+  app.use((req, res, next) => {
+    if (req.method !== "GET" && /^\/api\/(books|cabinets|borrowers|loans|labels|ai-queue|ai\/reindex-embeddings|settings)/.test(req.path)) {
+      res.on("finish", () => {
+        if (res.statusCode < 400) {
+          syncService?.notifyLocalMutation();
+        }
+      });
+    }
+    next();
+  });
 
   // Health & DB verification
   app.get("/api/health", (_req, res) => {
@@ -133,6 +150,7 @@ export async function startOtzarServer(options: OtzarServerOptions = {}): Promis
       }
       if (r.key === "ai_keys_pool") continue;
       if (r.key === "admin_pin") continue;
+      if (r.key === "firebase_password") continue;
       if (!admin && !publicKeys.has(r.key)) continue;
       try {
         if (r.value.startsWith("{") || r.value.startsWith("[")) {
@@ -449,9 +467,13 @@ export async function startOtzarServer(options: OtzarServerOptions = {}): Promis
       void generateTextEmbedding(db, embText)
         .then((vec) => {
           const blob = float32ToBlob(vec);
+          const embNow = new Date().toISOString();
           for (const bc of createdBarcodes) {
-            db.run("UPDATE books SET embedding = ? WHERE barcode = ?", blob, bc);
+            db.run("UPDATE books SET embedding = ?, updated_at = ? WHERE barcode = ?", blob, embNow, bc);
+            const row = db.get<{ sync_id: string }>("SELECT sync_id FROM books WHERE barcode = ?", bc);
+            if (row?.sync_id) enqueueSyncOutbox(db, "book", row.sync_id, "upsert", { barcode: bc });
           }
+          syncService?.notifyLocalMutation();
         })
         .catch(() => {});
     }
@@ -547,7 +569,12 @@ export async function startOtzarServer(options: OtzarServerOptions = {}): Promis
       });
       void generateTextEmbedding(db, embText)
         .then((vec) => {
-          db.run("UPDATE books SET embedding = ? WHERE barcode = ?", float32ToBlob(vec), barcode);
+          const embNow = new Date().toISOString();
+          db.run("UPDATE books SET embedding = ?, updated_at = ? WHERE barcode = ?", float32ToBlob(vec), embNow, barcode);
+          if (existing.sync_id) {
+            enqueueSyncOutbox(db, "book", String(existing.sync_id), "upsert", { barcode });
+            syncService?.notifyLocalMutation();
+          }
         })
         .catch(() => {});
     }
@@ -571,7 +598,7 @@ export async function startOtzarServer(options: OtzarServerOptions = {}): Promis
   registerCirculationRoutes(app, db);
 
   // Stage 4: Catalog AI Queue, Image Compression & 768d Embeddings
-  registerCatalogAiRoutes(app, db, DATA_DIR);
+  const aiHooks = registerCatalogAiRoutes(app, db, DATA_DIR, () => syncService?.notifyLocalMutation());
 
   // Stage 5: A4 Barcode PDF Labels, Backup/Export & Admin PIN Auth
   registerLabelsAndAdminRoutes(app, db, DATA_DIR);
@@ -579,6 +606,11 @@ export async function startOtzarServer(options: OtzarServerOptions = {}): Promis
   // Stage 6: Auto-Update & GitHub Sync
   const updaterHooks: UpdaterRestartHooks = {};
   registerUpdaterRoutes(app, db, ROOT_DIR, DATA_DIR, updaterHooks, options.desktopUpdater);
+
+  // Stage 7: Bidirectional Firebase Firestore Delta Sync & Mobile Relay Listener
+  syncService = new OtzarFirebaseSyncService(db, DATA_DIR, () => aiHooks.triggerQueueProcessing());
+  registerSyncRoutes(app, db, syncService);
+  void syncService.connect().catch(() => {});
 
   const distDir = path.join(ROOT_DIR, "dist", "client");
   if (fs.existsSync(path.join(distDir, "index.html")) && process.env.VITE_DEV !== "1") {
@@ -610,6 +642,9 @@ export async function startOtzarServer(options: OtzarServerOptions = {}): Promis
   });
 
   const close = () => {
+    try {
+      void syncService?.stop();
+    } catch {}
     try {
       updaterHooks.cancelStartupCheck?.();
     } catch {}

@@ -1,5 +1,5 @@
 import React, { useMemo, useRef, useState } from "react";
-import { Search, MapPin, Plus, CheckCircle2, X, BookOpen, Pencil } from "lucide-react";
+import { Search, MapPin, Plus, CheckCircle2, X, BookOpen, Pencil, Barcode } from "lucide-react";
 import type { BookRow, CabinetRow, MapEntrance } from "../types.ts";
 import { STATUS_LABELS } from "../types.ts";
 import { LocationModal } from "./LocationModal.tsx";
@@ -54,6 +54,18 @@ export const SearchModule: React.FC<SearchModuleProps> = ({
   const [newCopies, setNewCopies] = useState("1");
   const [savingBook, setSavingBook] = useState(false);
   const [saveNotice, setSaveNotice] = useState<string | null>(null);
+
+  const handleAssignOfficialBarcode = async (oldBarcode: string) => {
+    setSaveNotice(null);
+    const res = await fetch(`/api/books/${encodeURIComponent(oldBarcode)}/assign-official-barcode`, { method: "POST" });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok) {
+      setSaveNotice(`הוקצה ברקוד רשמי ${data.newBarcode} והספר נוסף לתור הדפסת המדבקות.`);
+      await onReload();
+    } else {
+      setSaveNotice(data.error || "שגיאה בהקצאת ברקוד רשמי");
+    }
+  };
 
   const categories = useMemo(() => {
     const set = new Set<string>();
@@ -326,7 +338,12 @@ export const SearchModule: React.FC<SearchModuleProps> = ({
                   onClick={() => { setOpenInEditMode(false); setSelectedBarcode(b.barcode); }}
                   className="hover:bg-[var(--otzar-surface)] transition-colors cursor-pointer"
                 >
-                  <td className="py-3 px-4 font-mono tabular-nums font-medium">{b.barcode}</td>
+                  <td className="py-3 px-4 font-mono tabular-nums font-medium">
+                    <div>{b.barcode}</div>
+                    {b.barcode_status === "pending_barcode" && (
+                      <div className="text-[11px] font-sans text-amber-700 dark:text-amber-400 font-medium">ממתין לברקוד רשמי</div>
+                    )}
+                  </td>
                   <td className="py-3 px-4">
                     <div className="font-semibold">
                       {b.title}
@@ -372,6 +389,20 @@ export const SearchModule: React.FC<SearchModuleProps> = ({
                         <MapPin className="w-3.5 h-3.5" />
                         אתר במפה
                       </button>
+                      {isAdmin && b.barcode_status === "pending_barcode" && (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void handleAssignOfficialBarcode(b.barcode);
+                          }}
+                          className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium border border-amber-400 text-amber-800 dark:text-amber-300 hover:bg-amber-50 dark:hover:bg-amber-950/30 cursor-pointer whitespace-nowrap"
+                          title="הקצה ברקוד סדרתי רשמי ושלח להדפסת מדבקות"
+                        >
+                          <Barcode className="w-3.5 h-3.5" />
+                          הקצה ברקוד
+                        </button>
+                      )}
                       {isAdmin && (
                         <button
                           type="button"

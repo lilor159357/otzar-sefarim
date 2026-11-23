@@ -251,6 +251,12 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
     setRevNotes(ex?.notes || "");
     setRevCopies(1);
     setRevStatus("available");
+    if (activeReviewItem.default_cabinet_id) {
+      setRevCabinetId(String(activeReviewItem.default_cabinet_id));
+    }
+    if (activeReviewItem.default_shelf_number) {
+      setRevShelf(activeReviewItem.default_shelf_number);
+    }
   }, [activeReviewItem?.id, activeReviewItem?.processing_status]);
 
   // Cleanup webcam when leaving tab or closing
@@ -1203,6 +1209,7 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
                     <span className="font-semibold">
                       צילום שער הספר (#{activeReviewItem.id})
                       {(activeReviewItem.image_count ?? 1) > 1 ? ` · דף ${activeImageIndex + 1} מתוך ${activeReviewItem.image_count}` : ""}
+                      {activeReviewItem.source_relay_id ? " · נשלח מהנייד" : ""}
                     </span>
                     <div className="flex items-center gap-1">
                       <button

@@ -109,6 +109,9 @@ export interface AiQueueItem {
   id: number;
   has_image: boolean;
   image_count?: number;
+  default_cabinet_id?: number | null;
+  default_shelf_number?: number | null;
+  source_relay_id?: string | null;
   processing_status: "pending" | "processing" | "done" | "error";
   extracted: {
     title?: string;
@@ -187,6 +190,46 @@ export interface ShelvingReport {
 }
 
 export const FORMAT_SIZE_OPTIONS = ["רגיל", "גדול (פוליו)", "בינוני", "קטן (כיס)"] as const;
+
+export interface FirebaseSyncStatus {
+  enabled: boolean;
+  configured: boolean;
+  connected: boolean;
+  syncing: boolean;
+  offline: boolean;
+  projectId: string | null;
+  email: string | null;
+  uid: string | null;
+  lastSyncAt: string | null;
+  lastError: string | null;
+  pendingOutboxCount: number;
+  pendingRelayLocalCount: number;
+  pendingBarcodeBooksCount: number;
+  syncEmbeddings: boolean;
+  initialSeedDone: boolean;
+  deviceId: string;
+  config?: {
+    apiKey: string;
+    authDomain?: string;
+    projectId: string;
+    storageBucket?: string;
+    messagingSenderId?: string;
+    appId: string;
+  } | null;
+  hasPassword?: boolean;
+  spark: {
+    date: string;
+    reads: number;
+    writes: number;
+    deletes: number;
+    relayProcessed: number;
+    limits: {
+      reads: number;
+      writes: number;
+      deletes: number;
+    };
+  };
+}
 
 export const STATUS_LABELS: Record<string, string> = {
   available: "זמין על המדף",

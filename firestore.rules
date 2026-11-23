@@ -1,0 +1,59 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isSignedIn() {
+      return request.auth != null && request.auth.token.email != null;
+    }
+
+    function isValidSyncDoc() {
+      return request.resource.data.sync_id is string
+        && request.resource.data.sync_id.size() > 0
+        && request.resource.data.updated_at is string
+        && request.resource.data.updated_at.size() > 0;
+    }
+
+    match /cabinets/{syncId} {
+      allow read: if isSignedIn();
+      allow create, update: if isSignedIn() && isValidSyncDoc();
+      allow delete: if isSignedIn();
+    }
+
+    match /books/{syncId} {
+      allow read: if isSignedIn();
+      allow create, update: if isSignedIn() && isValidSyncDoc();
+      allow delete: if isSignedIn();
+    }
+
+    match /borrowers/{syncId} {
+      allow read: if isSignedIn();
+      allow create, update: if isSignedIn() && isValidSyncDoc();
+      allow delete: if isSignedIn();
+    }
+
+    match /loans/{syncId} {
+      allow read: if isSignedIn();
+      allow create, update: if isSignedIn() && isValidSyncDoc();
+      allow delete: if isSignedIn();
+    }
+
+    match /library_meta/{docId} {
+      allow read, write: if isSignedIn();
+    }
+
+    // Temporary relay queue for compressed cover images from Android APK -> Desktop
+    // Desktop immediately downloads locally and deletes the Firestore document
+    match /ai_relay_queue/{relayId} {
+      allow read, delete: if isSignedIn();
+      allow create, update: if isSignedIn()
+        && request.resource.data.relay_id is string
+        && request.resource.data.image_base64 is string
+        && request.resource.data.image_base64.size() > 0
+        && request.resource.data.image_base64.size() <= 900000
+        && request.resource.data.created_at is string;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

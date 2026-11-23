@@ -135,6 +135,9 @@ export function initSchemaAndSeed(db: DbClient): void {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       image_path TEXT NOT NULL,
       extra_images_json TEXT NOT NULL DEFAULT '[]',
+      default_cabinet_id INTEGER,
+      default_shelf_number INTEGER,
+      source_relay_id TEXT,
       processing_status TEXT NOT NULL DEFAULT 'pending' CHECK (processing_status IN ('pending', 'processing', 'done', 'error')),
       extracted_json TEXT,
       error_message TEXT,
@@ -143,6 +146,11 @@ export function initSchemaAndSeed(db: DbClient): void {
     );
 
     CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS sync_state (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
     );
@@ -188,6 +196,10 @@ export function initSchemaAndSeed(db: DbClient): void {
   ensureColumn(db, "loans", "deleted_at", "TEXT");
 
   ensureColumn(db, "ai_catalog_queue", "extra_images_json", "TEXT NOT NULL DEFAULT '[]'");
+  ensureColumn(db, "ai_catalog_queue", "default_cabinet_id", "INTEGER");
+  ensureColumn(db, "ai_catalog_queue", "default_shelf_number", "INTEGER");
+  ensureColumn(db, "ai_catalog_queue", "source_relay_id", "TEXT");
+  db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_queue_relay_id ON ai_catalog_queue(source_relay_id)");
 
   backfillSyncColumns(db, "cabinets", "id");
   backfillSyncColumns(db, "books", "barcode", "created_at");
@@ -205,6 +217,11 @@ export function initSchemaAndSeed(db: DbClient): void {
     ai_model: "gemini-4-hydrogen",
     embedding_model: "gemini-embedding-001",
     ai_delay_ms: "4200",
+    firebase_enabled: "0",
+    firebase_sync_embeddings: "1",
+    firebase_config: "{}",
+    firebase_email: "",
+    firebase_password: "",
     theme_preset: "otzar-orange",
     theme_mode: "light",
     map_entrance: JSON.stringify({ wall: "bottom", offset: 50 }),

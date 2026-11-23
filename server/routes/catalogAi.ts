@@ -58,7 +58,7 @@ function getItemImagePaths(row: { image_path?: unknown; extra_images_json?: unkn
   return [first, ...extras].filter(Boolean);
 }
 
-export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: string) {
+export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: string, onSyncTrigger?: () => void) {
   const aiImagesDir = path.join(dataDir, "ai_images");
   fs.mkdirSync(aiImagesDir, { recursive: true });
 
@@ -257,6 +257,9 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
         id: r.id,
         has_image: existingPaths.length > 0,
         image_count: existingPaths.length,
+        default_cabinet_id: r.default_cabinet_id ?? null,
+        default_shelf_number: r.default_shelf_number ?? null,
+        source_relay_id: r.source_relay_id || null,
         processing_status: r.processing_status,
         extracted,
         error_message: r.error_message || null,
@@ -453,9 +456,13 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
       void generateTextEmbedding(db, embText)
         .then((vec) => {
           const blob = float32ToBlob(vec);
+          const embNow = new Date().toISOString();
           for (const bc of createdBarcodes) {
-            db.run("UPDATE books SET embedding = ? WHERE barcode = ?", blob, bc);
+            db.run("UPDATE books SET embedding = ?, updated_at = ? WHERE barcode = ?", blob, embNow, bc);
+            const row = db.get<{ sync_id: string }>("SELECT sync_id FROM books WHERE barcode = ?", bc);
+            if (row?.sync_id) enqueueSyncOutbox(db, "book", row.sync_id, "upsert", { barcode: bc });
           }
+          onSyncTrigger?.();
         })
         .catch(() => {
           // Silently skip if offline/blocked; can be indexed later from Settings
@@ -486,4 +493,10 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
     db.run("DELETE FROM ai_catalog_queue WHERE id = ?", id);
     res.json({ ok: true });
   });
+
+  return {
+    triggerQueueProcessing: () => {
+      void processPendingQueue();
+    },
+  };
 }
