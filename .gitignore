@@ -1,0 +1,22 @@
+# Dependencies & build outputs
+node_modules/
+dist/
+
+# Local runtime database, backups, AI images & Edge profile (NEVER commit)
+data/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+
+# Logs, OS & editor artifacts
+*.log
+logs/
+*.bak
+.DS_Store
+Thumbs.db
