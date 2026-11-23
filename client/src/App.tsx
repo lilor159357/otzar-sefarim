@@ -36,12 +36,12 @@ const NAV_ITEMS: Array<{ key: ModuleKey; label: string; icon: React.ComponentTyp
   { key: "circulation", label: "השאלה והחזרה", icon: ArrowLeftRight },
   { key: "catalog", label: "קטלוג ו-AI", icon: PlusSquare },
   { key: "labels", label: "הדפסת מדבקות", icon: Printer },
-  { key: "admin", label: "מפה והגדרות", icon: Settings },
+  { key: "admin", label: "הגדרות ומפה", icon: Settings },
 ];
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<ModuleKey>("search");
-  const [adminSubTab, setAdminSubTab] = useState<"map" | "settings">("map");
+  const [adminSubTab, setAdminSubTab] = useState<"settings" | "map">("settings");
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [health, setHealth] = useState<HealthData | null>(null);
   const [settings, setSettings] = useState<Record<string, any>>({});
@@ -287,7 +287,10 @@ export default function App() {
                 <button
                   key={item.key}
                   type="button"
-                  onClick={() => setActiveTab(item.key)}
+                  onClick={() => {
+                    setActiveTab(item.key);
+                    if (item.key === "admin") setAdminSubTab("settings");
+                  }}
                   className={`w-full flex items-center gap-3 px-3.5 py-2.5 rounded-lg text-sm font-medium transition-colors whitespace-nowrap cursor-pointer ${
                     isActive
                       ? "bg-[var(--otzar-accent)] text-white"
@@ -416,21 +419,21 @@ export default function App() {
               <div className="flex items-center gap-1 p-1 rounded-lg bg-[var(--otzar-surface-alt)] border border-[var(--otzar-border-muted)] w-fit">
                 <button
                   type="button"
-                  onClick={() => setAdminSubTab("map")}
-                  className={`px-4 py-1.5 rounded-md text-sm font-medium cursor-pointer ${
-                    adminSubTab === "map" ? "bg-[var(--otzar-accent)] text-white" : "text-[var(--otzar-text-muted)]"
-                  }`}
-                >
-                  עורך מפה דו-ממדית
-                </button>
-                <button
-                  type="button"
                   onClick={() => setAdminSubTab("settings")}
                   className={`px-4 py-1.5 rounded-md text-sm font-medium cursor-pointer ${
                     adminSubTab === "settings" ? "bg-[var(--otzar-accent)] text-white" : "text-[var(--otzar-text-muted)]"
                   }`}
                 >
                   הגדרות תצוגה ומערכת
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAdminSubTab("map")}
+                  className={`px-4 py-1.5 rounded-md text-sm font-medium cursor-pointer ${
+                    adminSubTab === "map" ? "bg-[var(--otzar-accent)] text-white" : "text-[var(--otzar-text-muted)]"
+                  }`}
+                >
+                  עורך מפה דו-ממדית
                 </button>
               </div>
 

@@ -835,7 +835,7 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
             <div className="flex items-center gap-2 p-3.5 rounded-xl border border-amber-300 bg-amber-50 text-amber-900 text-sm">
               <AlertTriangle className="w-4 h-4 shrink-0" />
               <span>
-                שירות פענוח השערים האוטומטי עדיין לא הוגדר (במסך מפה והגדרות &rarr; הגדרות תצוגה ומערכת). ניתן עדיין לצלם או להעלות תמונות ולבצע פענוח לאחר ההגדרה.
+                שירות פענוח השערים האוטומטי עדיין לא הוגדר (במסך הגדרות ומפה). ניתן עדיין לצלם או להעלות תמונות ולבצע פענוח לאחר ההגדרה.
               </span>
             </div>
           )}
