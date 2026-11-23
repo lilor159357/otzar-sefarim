@@ -20,6 +20,9 @@ function createDesktopUpdaterBridge(): DesktopUpdaterBridge {
     checking: false,
     downloading: false,
     downloadPercent: 0,
+    transferredBytes: 0,
+    totalBytes: 0,
+    bytesPerSecond: 0,
     downloaded: false,
     hasUpdate: false,
     checkedAt: null,
@@ -56,11 +59,16 @@ function createDesktopUpdaterBridge(): DesktopUpdaterBridge {
   autoUpdater.on("download-progress", (p) => {
     snapshot.downloading = true;
     snapshot.downloadPercent = Math.round(p?.percent || 0);
+    snapshot.transferredBytes = Number(p?.transferred || 0);
+    snapshot.totalBytes = Number(p?.total || 0);
+    snapshot.bytesPerSecond = Number(p?.bytesPerSecond || 0);
   });
 
   autoUpdater.on("update-downloaded", (info) => {
     snapshot.downloading = false;
     snapshot.downloadPercent = 100;
+    if (snapshot.totalBytes > 0) snapshot.transferredBytes = snapshot.totalBytes;
+    snapshot.bytesPerSecond = 0;
     snapshot.downloaded = true;
     snapshot.hasUpdate = true;
     snapshot.availableVersion = String(info?.version || snapshot.availableVersion || "");
@@ -82,6 +90,7 @@ function createDesktopUpdaterBridge(): DesktopUpdaterBridge {
   autoUpdater.on("error", (err) => {
     snapshot.checking = false;
     snapshot.downloading = false;
+    snapshot.bytesPerSecond = 0;
     snapshot.error = formatUpdaterError(err);
   });
 
@@ -136,6 +145,9 @@ function createDesktopUpdaterBridge(): DesktopUpdaterBridge {
       applyFeedConfig(token);
       snapshot.downloading = true;
       snapshot.downloadPercent = 0;
+      snapshot.transferredBytes = 0;
+      snapshot.totalBytes = 0;
+      snapshot.bytesPerSecond = 0;
       if (!snapshot.hasUpdate) {
         await autoUpdater.checkForUpdates();
       }

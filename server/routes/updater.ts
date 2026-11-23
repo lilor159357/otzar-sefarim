@@ -23,6 +23,9 @@ export interface DesktopUpdaterSnapshot {
   checking: boolean;
   downloading: boolean;
   downloadPercent: number;
+  transferredBytes: number;
+  totalBytes: number;
+  bytesPerSecond: number;
   downloaded: boolean;
   hasUpdate: boolean;
   checkedAt: string | null;
@@ -596,7 +599,7 @@ export function registerUpdaterRoutes(
           localHash: desktop.currentVersion,
           remoteHash: desktop.availableVersion || desktop.currentVersion,
           latestCommits: desktop.availableVersion
-            ? [{ hash: "v" + desktop.availableVersion, message: desktop.releaseNotes || "גרסת Desktop חדשה זמינה", date: desktop.checkedAt || "" }]
+            ? [{ hash: "v" + desktop.availableVersion, message: (desktop.releaseNotes || "גרסת Desktop חדשה זמינה").replace(/<\/?(?:p|br|li|div)[^>]*>/gi, " ").replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim() || "גרסת Desktop חדשה זמינה", date: desktop.checkedAt || "" }]
             : [],
           error: desktop.error,
         },

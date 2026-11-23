@@ -16,6 +16,9 @@ interface DesktopUpdaterSnapshot {
   checking: boolean;
   downloading: boolean;
   downloadPercent: number;
+  transferredBytes?: number;
+  totalBytes?: number;
+  bytesPerSecond?: number;
   downloaded: boolean;
   hasUpdate: boolean;
   checkedAt: string | null;
@@ -52,6 +55,18 @@ interface UpdaterStatus {
 
 interface UpdaterPanelProps {
   onUpdateStatusChange?: (behindCount: number) => void;
+}
+
+function formatSizeMb(bytes: number): string {
+  if (!bytes || bytes <= 0) return "0 MB";
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatSpeed(bytesPerSec: number): string {
+  if (!bytesPerSec || bytesPerSec <= 0) return "";
+  if (bytesPerSec < 1024 * 1024) return `${Math.round(bytesPerSec / 1024)} KB/s`;
+  return `${(bytesPerSec / (1024 * 1024)).toFixed(1)} MB/s`;
 }
 
 export const UpdaterPanel: React.FC<UpdaterPanelProps> = ({ onUpdateStatusChange }) => {
@@ -426,9 +441,21 @@ export const UpdaterPanel: React.FC<UpdaterPanelProps> = ({ onUpdateStatusChange
 
       {isElectron && isDownloadingDesktop && (
         <div className="space-y-1.5">
-          <div className="flex items-center justify-between text-xs text-[var(--otzar-text-muted)]">
+          <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-[var(--otzar-text-muted)]">
             <span>מוריד גרסה v{desktop?.availableVersion || ""}...</span>
-            <span className="font-mono tabular-nums">{desktop?.downloadPercent ?? 0}%</span>
+            <span className="font-mono tabular-nums text-[var(--otzar-text)]" dir="ltr">
+              {[
+                (desktop?.totalBytes || 0) > 0
+                  ? `${formatSizeMb(desktop?.transferredBytes || 0)} / ${formatSizeMb(desktop?.totalBytes || 0)}`
+                  : (desktop?.transferredBytes || 0) > 0
+                  ? formatSizeMb(desktop?.transferredBytes || 0)
+                  : null,
+                (desktop?.bytesPerSecond || 0) > 0 ? formatSpeed(desktop?.bytesPerSecond || 0) : null,
+                `${desktop?.downloadPercent ?? 0}%`,
+              ]
+                .filter(Boolean)
+                .join(" · ")}
+            </span>
           </div>
           <div className="h-2 rounded-full bg-[var(--otzar-surface)] border border-[var(--otzar-border-muted)] overflow-hidden">
             <div
