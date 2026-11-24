@@ -560,6 +560,20 @@ export function registerUpdaterRoutes(
     return res.json({ hasRecentUpdate: false, version: currentVersion, highlights: [] });
   });
 
+  app.post("/api/updater/fake-update-modal", (_req, res) => {
+    const currentVersion = resolveCurrentVersion();
+    const highlights = getBuiltinHighlightsForVersion(currentVersion);
+    savePendingUpdateNotes(dataDir, {
+      targetVersion: currentVersion,
+      previousVersion: "1.0.10",
+      summary: highlights.join(" · "),
+      highlights,
+      savedAt: new Date().toISOString(),
+    });
+    setSetting(db, "last_seen_app_version", "1.0.10");
+    res.json({ ok: true, version: currentVersion, highlights });
+  });
+
   app.post("/api/updater/ack-release-notes", (_req, res) => {
     const currentVersion = resolveCurrentVersion();
     setSetting(db, "last_seen_app_version", currentVersion);
@@ -692,6 +706,23 @@ export function registerUpdaterRoutes(
     if (desktopUpdater) {
       try {
         const token = getSetting(db, "github_release_token", "").trim();
+        const snap = formatDesktopSnapshot(desktopUpdater.getSnapshot());
+        const targetVersion = String(snap?.availableVersion || "").trim();
+        if (targetVersion) {
+          const highlights =
+            snap?.releaseHighlights && snap.releaseHighlights.length > 0
+              ? snap.releaseHighlights
+              : getBuiltinHighlightsForVersion(targetVersion);
+          savePendingUpdateNotes(dataDir, {
+            targetVersion,
+            previousVersion: snap?.currentVersion || resolveCurrentVersion(),
+            summary: snap?.releaseNotes || highlights.join(" · "),
+            highlights,
+            themePreset: getSetting(db, "theme_preset", "default") || "default",
+            darkMode: getSetting(db, "theme_mode", "light") === "dark",
+            savedAt: new Date().toISOString(),
+          });
+        }
         const result = await desktopUpdater.downloadAndInstall(() => createBackupFile(db, dataDir, "pre-update"), token);
         return res.json({ ...result, isElectron: true, desktop: desktopUpdater.getSnapshot() });
       } catch (err: any) {
