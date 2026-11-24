@@ -16,6 +16,7 @@ import {
   ShieldCheck,
 } from "lucide-react";
 import type { FirebaseSyncStatus } from "../types.ts";
+import { MobileQrPairingBox } from "./MobileQrPairingBox.tsx";
 
 interface FirebaseSyncPanelProps {
   onReload: () => Promise<void>;
@@ -586,6 +587,8 @@ export const FirebaseSyncPanel: React.FC<FirebaseSyncPanelProps> = ({ onReload }
           {saving ? "מאמת ומתחבר..." : "שמור הגדרות, אמת והתחבר לענן"}
         </button>
       </form>
+
+      <MobileQrPairingBox />
     </div>
   );
 };

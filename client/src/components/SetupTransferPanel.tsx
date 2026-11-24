@@ -13,6 +13,7 @@ import {
   Upload,
   X,
 } from "lucide-react";
+import { MobileQrPairingBox } from "./MobileQrPairingBox.tsx";
 
 interface SetupTransferPanelProps {
   onReload: () => void;
@@ -261,6 +262,7 @@ export const SetupTransferPanel: React.FC<SetupTransferPanelProps> = ({ onReload
 
       {mode === "export" ? (
         <div className="space-y-4">
+          <MobileQrPairingBox />
           {summary && (
             <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--otzar-text-muted)] tabular-nums">
               <span>

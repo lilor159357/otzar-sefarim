@@ -6,6 +6,7 @@ import { FIRESTORE_RULES_TEMPLATE, type OtzarFirebaseSyncService } from "../sync
 import {
   cleanStartCatalogReset,
   exportEncryptedSetupBundle,
+  exportMobilePairingQr,
   getSetupBundleSummary,
   importEncryptedSetupBundle,
 } from "../sync/setupBundle.ts";
@@ -169,6 +170,15 @@ export function registerSyncRoutes(app: Express, db: DbClient, syncService: Otza
 
   app.get("/api/sync/setup-bundle/summary", requireAdmin, (_req, res) => {
     res.json(getSetupBundleSummary(db));
+  });
+
+  app.post("/api/sync/mobile-qr", requireAdmin, async (_req, res) => {
+    try {
+      const result = await exportMobilePairingQr(db);
+      res.json(result);
+    } catch (err: any) {
+      res.status(400).json({ error: err?.message || "שגיאה ביצירת ברקוד לחיבור הטלפון" });
+    }
   });
 
   app.post("/api/sync/setup-bundle/export", requireAdmin, (req, res) => {

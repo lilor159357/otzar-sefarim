@@ -2,6 +2,7 @@ import crypto from "crypto";
 import fs from "fs";
 import path from "path";
 import zlib from "zlib";
+import bwipjs from "bwip-js";
 import type { DbClient } from "../db/adapter.ts";
 import { enqueueSyncOutbox } from "../db/schema.ts";
 import { reconcileNextBarcodeFromBooks, type OtzarFirebaseSyncService } from "./firebaseSync.ts";
@@ -120,6 +121,70 @@ export function getSetupBundleSummary(db: DbClient): SetupBundleSummary {
     libraryName: settingsMap.library_name || "אוצר ספרים",
     hasReleaseToken: Boolean(String(settingsMap.github_release_token || "").trim()),
     hasAdminPin: Boolean(String(settingsMap.admin_pin || "").trim()),
+  };
+}
+
+export async function exportMobilePairingQr(db: DbClient) {
+  const fbConfigRaw = getSetting(db, "firebase_config", "").trim();
+  const email = getSetting(db, "firebase_email", "").trim();
+  const password = getSetting(db, "firebase_password", "");
+
+  let parsedFb: Record<string, unknown> | null = null;
+  try {
+    parsedFb = JSON.parse(fbConfigRaw || "{}") as Record<string, unknown>;
+  } catch {
+    parsedFb = null;
+  }
+
+  const apiKey = String(parsedFb?.apiKey || "").trim();
+  const projectId = String(parsedFb?.projectId || "").trim();
+  const appId = String(parsedFb?.appId || "").trim();
+  if (!apiKey || !projectId || !appId || !email || !password) {
+    throw new Error("יש להגדיר חיבור Firebase פעיל (Config, אימייל וסיסמה) לפני יצירת ברקוד לחיבור הטלפון.");
+  }
+
+  const libraryName = getSetting(db, "library_name", "אוצר ספרים").trim() || "אוצר ספרים";
+  const themePreset = getSetting(db, "theme_preset", "default").trim() || "default";
+  const themeMode = getSetting(db, "theme_mode", "light").trim() === "dark" ? "dark" : "light";
+
+  const fbPayload: Record<string, string> = {
+    apiKey,
+    projectId,
+    appId,
+    authDomain: String(parsedFb?.authDomain || `${projectId}.firebaseapp.com`).trim(),
+  };
+  if (parsedFb?.storageBucket) fbPayload.storageBucket = String(parsedFb.storageBucket).trim();
+  if (parsedFb?.messagingSenderId) fbPayload.messagingSenderId = String(parsedFb.messagingSenderId).trim();
+
+  const compactPayload = {
+    v: 1,
+    f: fbPayload,
+    e: email,
+    w: password,
+    n: libraryName,
+    tp: themePreset,
+    tm: themeMode,
+  };
+
+  const compressed = zlib.deflateRawSync(Buffer.from(JSON.stringify(compactPayload), "utf8"));
+  const pairingCode = `OTZAR-QR1:${compressed.toString("base64url")}`;
+
+  const pngBuffer = await bwipjs.toBuffer({
+    bcid: "qrcode",
+    text: pairingCode,
+    eclevel: "M",
+    scale: 6,
+    padding: 6,
+    backgroundcolor: "FFFFFF",
+  });
+
+  return {
+    ok: true,
+    qrDataUrl: `data:image/png;base64,${pngBuffer.toString("base64")}`,
+    pairingCode,
+    libraryName,
+    projectId,
+    expiresInSec: 120,
   };
 }
 
