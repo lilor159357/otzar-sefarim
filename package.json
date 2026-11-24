@@ -11,7 +11,8 @@
     "electron:dev": "npm run build && npm run build:electron && electron .",
     "dist:win": "npm run build && npm run build:electron && electron-builder --win nsis --publish never",
     "dist:dir": "npm run build && npm run build:electron && electron-builder --win --dir",
-    "start": "tsx server/index.ts"
+    "start": "tsx server/index.ts",
+    "check:strings": "node scripts/check-strings-parity.mjs"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

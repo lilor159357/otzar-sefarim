@@ -1,8 +1,16 @@
-
 import fs from "fs";
 import os from "os";
 import path from "path";
 import { spawn } from "child_process";
+import { escapeXmlText, formatTemplate, getDefaultString } from "../shared/strings/engine.ts";
+
+export interface UpdaterSplashStrings {
+  windowTitle?: string;
+  brandLine?: string;
+  headline?: string;
+  extractingMessage?: string;
+  footerSafety?: string;
+}
 
 export interface UpdaterSplashOptions {
   targetVersion: string;
@@ -10,6 +18,11 @@ export interface UpdaterSplashOptions {
   themePreset?: string;
   serverPort?: number;
   oldProcessId?: number;
+  strings?: UpdaterSplashStrings;
+}
+
+function safePsXamlText(value: string): string {
+  return escapeXmlText(value).replace(/`/g, "``").replace(/\$/g, "`$");
 }
 
 export function launchStandaloneUpdaterSplash(opts: UpdaterSplashOptions): string {
@@ -38,15 +51,29 @@ export function launchStandaloneUpdaterSplash(opts: UpdaterSplashOptions): strin
   const textMuted = isDark ? "#94A3B8" : "#64748B";
   const progressBg = isDark ? "#334155" : "#E2E8F0";
 
-  const headlineText = version ? `מעדכן את התוכנה לגרסה v${version}` : "מעדכן את התוכנה לגרסה חדשה";
+  const windowTitle = safePsXamlText(
+    opts.strings?.windowTitle || getDefaultString("updater.splashWindowTitle")
+  );
+  const brandLine = safePsXamlText(
+    opts.strings?.brandLine || getDefaultString("updater.splashBrandLine")
+  );
+  const defaultHeadline = version
+    ? formatTemplate(getDefaultString("updater.splashHeadline"), { version })
+    : getDefaultString("updater.splashHeadlineFallback");
+  const headlineText = safePsXamlText(opts.strings?.headline || defaultHeadline);
+  const extractingText = safePsXamlText(
+    opts.strings?.extractingMessage || getDefaultString("updater.splashExtractingMessage")
+  );
+  const footerSafety = safePsXamlText(
+    opts.strings?.footerSafety || getDefaultString("updater.splashFooterSafety")
+  );
+  const versionBadge = safePsXamlText(version ? `v${version}` : "");
 
-  const ps1 = `
-Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
-
+  const ps1 = `Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 $xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="אוצר ספרים - עדכון מערכת"
+        Title="${windowTitle}"
         Width="500" Height="320"
         WindowStartupLocation="CenterScreen"
         WindowStyle="None"
@@ -73,7 +100,7 @@ $xaml = @"
                           Stroke="${accent}" StrokeThickness="2.2" Stretch="Uniform" Width="24" Height="24" HorizontalAlignment="Center" VerticalAlignment="Center"/>
                 </Border>
                 <StackPanel VerticalAlignment="Center">
-                    <TextBlock Text="עדכון מערכת · אוצר ספרים" FontSize="12.5" FontWeight="SemiBold" Foreground="${textMuted}" Margin="0,0,0,2"/>
+                    <TextBlock Text="${brandLine}" FontSize="12.5" FontWeight="SemiBold" Foreground="${textMuted}" Margin="0,0,0,2"/>
                     <TextBlock Text="${headlineText}" FontSize="18" FontWeight="Bold" Foreground="${text}"/>
                 </StackPanel>
             </StackPanel>
@@ -81,7 +108,7 @@ $xaml = @"
             <!-- Status block -->
             <Border Grid.Row="1" Margin="0,18,0,0" CornerRadius="10" Background="${surface}" BorderBrush="${border}" BorderThickness="1" Padding="16,14">
                 <StackPanel VerticalAlignment="Center">
-                    <TextBlock Text="מחלץ ומתקין את קובצי העדכון — התוכנה תיפתח מיד מחדש..."
+                    <TextBlock Text="${extractingText}"
                                FontSize="13" Foreground="${text}" TextWrapping="Wrap"/>
                     <ProgressBar Margin="0,14,0,0" Height="6" IsIndeterminate="True" Foreground="${accent}" Background="${progressBg}" BorderThickness="0"/>
                 </StackPanel>
@@ -89,8 +116,8 @@ $xaml = @"
 
             <!-- Footer row -->
             <Grid Grid.Row="2" Margin="0,14,0,0">
-                <TextBlock Text="מסד הנתונים, הברקודים וההגדרות שמורים בבטחה" FontSize="11.5" Foreground="${textMuted}" HorizontalAlignment="Left" VerticalAlignment="Center"/>
-                <TextBlock Text="v${version}" FontSize="11.5" Foreground="${textMuted}" HorizontalAlignment="Right" VerticalAlignment="Center"/>
+                <TextBlock Text="${footerSafety}" FontSize="11.5" Foreground="${textMuted}" HorizontalAlignment="Left" VerticalAlignment="Center"/>
+                <TextBlock Text="${versionBadge}" FontSize="11.5" Foreground="${textMuted}" HorizontalAlignment="Right" VerticalAlignment="Center"/>
             </Grid>
         </Grid>
     </Border>
@@ -108,14 +135,12 @@ $timer = New-Object System.Windows.Threading.DispatcherTimer
 $timer.Interval = [TimeSpan]::FromMilliseconds(600)
 $timer.Add_Tick({
     $elapsed = ([DateTime]::UtcNow - $startTime).TotalSeconds
-
     # Safety timeout after 90 seconds
     if ($elapsed -ge 90) {
         $timer.Stop()
         $win.Close()
         return
     }
-
     # Ensure the old Electron process has exited (or 12s elapsed) before probing port
     $oldExited = $false
     try {
@@ -142,7 +167,6 @@ $timer.Add_Tick({
     }
 })
 $timer.Start()
-
 $win.ShowDialog() | Out-Null
 `;
 
@@ -165,6 +189,5 @@ $win.ShowDialog() | Out-Null
   } catch (err) {
     console.error("[UpdaterSplash] Failed to spawn splash:", err);
   }
-
   return scriptPath;
 }

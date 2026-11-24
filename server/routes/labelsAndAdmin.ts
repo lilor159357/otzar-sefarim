@@ -6,6 +6,7 @@ import type { DbClient } from "../db/adapter.ts";
 import { enqueueSyncOutbox, newSyncId } from "../db/schema.ts";
 import { extractTokenFromRequest, isAdminRequest, issueAdminToken, requireAdmin, revokeAdminToken } from "../auth/adminAuth.ts";
 import { generateLabelsPdfBuffer, type A4TemplateConfig, type LabelBookInput, type LabelDesignConfig } from "../pdf/labelsPdf.ts";
+import { fallbackT, type StringsTranslateFn } from "../../shared/strings/engine.ts";
 
 function getJsonSetting<T>(db: DbClient, key: string, fallback: T): T {
   const row = db.get<{ value: string }>("SELECT value FROM settings WHERE key = ?", key);
@@ -17,7 +18,7 @@ function getJsonSetting<T>(db: DbClient, key: string, fallback: T): T {
   }
 }
 
-export function registerLabelsAndAdminRoutes(app: Express, db: DbClient, dataDir: string) {
+export function registerLabelsAndAdminRoutes(app: Express, db: DbClient, dataDir: string, t: StringsTranslateFn = fallbackT) {
   // --- Admin PIN Authentication ---
   app.get("/api/admin/status", (req, res) => {
     res.json({ isAdmin: isAdminRequest(req) });
@@ -27,7 +28,7 @@ export function registerLabelsAndAdminRoutes(app: Express, db: DbClient, dataDir
     const pin = String(req.body?.pin || "").trim();
     const storedPin = db.get<{ value: string }>("SELECT value FROM settings WHERE key = 'admin_pin'")?.value ?? "1234";
     if (!pin || pin !== storedPin) {
-      return res.status(401).json({ error: "קוד PIN שגוי" });
+      return res.status(401).json({ error: t("errors.adminPinInvalid") });
     }
     const token = issueAdminToken();
     res.json({ ok: true, token });
@@ -42,7 +43,7 @@ export function registerLabelsAndAdminRoutes(app: Express, db: DbClient, dataDir
   app.put("/api/admin/pin", requireAdmin, (req, res) => {
     const newPin = String(req.body?.newPin || "").trim();
     if (newPin.length < 4) {
-      return res.status(400).json({ error: "קוד PIN חייב להכיל לפחות 4 תווים" });
+      return res.status(400).json({ error: t("errors.pinMinLength") });
     }
     db.run("INSERT INTO settings (key, value) VALUES ('admin_pin', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", newPin);
     res.json({ ok: true });
@@ -63,7 +64,7 @@ export function registerLabelsAndAdminRoutes(app: Express, db: DbClient, dataDir
 
   app.post("/api/labels/queue/add", requireAdmin, (req, res) => {
     const barcodes: string[] = Array.isArray(req.body?.barcodes) ? req.body.barcodes : [];
-    if (barcodes.length === 0) return res.status(400).json({ error: "לא נבחרו ברקודים" });
+    if (barcodes.length === 0) return res.status(400).json({ error: t("errors.noBarcodesSelected") });
     const now = new Date().toISOString();
     db.transaction(() => {
       for (const bc of barcodes) {
@@ -80,7 +81,7 @@ export function registerLabelsAndAdminRoutes(app: Express, db: DbClient, dataDir
 
   app.post("/api/labels/queue/mark-printed", requireAdmin, (req, res) => {
     const barcodes: string[] = Array.isArray(req.body?.barcodes) ? req.body.barcodes : [];
-    if (barcodes.length === 0) return res.status(400).json({ error: "לא נבחרו ברקודים" });
+    if (barcodes.length === 0) return res.status(400).json({ error: t("errors.noBarcodesSelected") });
     const now = new Date().toISOString();
     db.transaction(() => {
       for (const bc of barcodes) {
@@ -135,7 +136,7 @@ export function registerLabelsAndAdminRoutes(app: Express, db: DbClient, dataDir
       }
 
       if (books.length === 0) {
-        return res.status(400).json({ error: "אין ספרים להפקה במדבקות" });
+        return res.status(400).json({ error: t("errors.noBooksForLabels") });
       }
 
       const libraryName = db.get<{ value: string }>("SELECT value FROM settings WHERE key = 'library_name'")?.value ?? "אוצר ספרים";
@@ -184,7 +185,7 @@ export function registerLabelsAndAdminRoutes(app: Express, db: DbClient, dataDir
       res.setHeader("Content-Disposition", 'inline; filename="otzar-labels.pdf"');
       res.send(Buffer.from(pdfBytes));
     } catch (err: any) {
-      res.status(400).json({ error: err?.message || "שגיאה ביצירת קובץ ה-PDF" });
+      res.status(400).json({ error: err?.message || t("errors.pdfGenerateFailed") });
     }
   });
 

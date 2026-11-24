@@ -40,6 +40,21 @@ service cloud.firestore {
       allow read, write: if isSignedIn();
     }
 
+    // Live UI/Server/Updater string overrides queue (promoted automatically by GitHub Actions)
+    match /ui_strings/{stringKey} {
+      allow read: if isSignedIn();
+      allow create, update: if isSignedIn()
+        && request.resource.data.key is string
+        && request.resource.data.key == stringKey
+        && request.resource.data.value is string
+        && request.resource.data.value.size() > 0
+        && request.resource.data.value.size() <= 1000
+        && request.resource.data.updatedAt is string
+        && request.resource.data.promoted_desktop is bool
+        && request.resource.data.promoted_mobile is bool;
+      allow delete: if isSignedIn();
+    }
+
     // Temporary relay queue for compressed cover images from Android APK -> Desktop
     // Desktop immediately downloads locally and deletes the Firestore document
     match /ai_relay_queue/{relayId} {

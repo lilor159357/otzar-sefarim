@@ -27,6 +27,8 @@ import {
   type Unsubscribe,
 } from "firebase/firestore";
 import type { DbClient } from "../db/adapter.ts";
+import type { DesktopStringsStore } from "../strings/stringsStore.ts";
+import type { StringOverrideRecord } from "../../shared/strings/engine.ts";
 import {
   buildNormalizedBookSearch,
   DEMO_BOOK_BARCODES,
@@ -205,6 +207,20 @@ service cloud.firestore {
 
     match /library_meta/{docId} {
       allow read, write: if isSignedIn();
+    }
+
+    match /ui_strings/{stringKey} {
+      allow read: if isSignedIn();
+      allow create, update: if isSignedIn()
+        && request.resource.data.key is string
+        && request.resource.data.key == stringKey
+        && request.resource.data.value is string
+        && request.resource.data.value.size() > 0
+        && request.resource.data.value.size() <= 1000
+        && request.resource.data.updatedAt is string
+        && request.resource.data.promoted_desktop is bool
+        && request.resource.data.promoted_mobile is bool;
+      allow delete: if isSignedIn();
     }
 
     match /ai_relay_queue/{relayId} {
@@ -386,6 +402,7 @@ export class OtzarFirebaseSyncService {
   private db: DbClient;
   private dataDir: string;
   private onRelayArrived: () => void;
+  private stringsStore: DesktopStringsStore | null = null;
   private app: FirebaseApp | null = null;
   private auth: Auth | null = null;
   private firestore: Firestore | null = null;
@@ -403,10 +420,11 @@ export class OtzarFirebaseSyncService {
   private deviceId: string;
   private stopped = false;
 
-  constructor(db: DbClient, dataDir: string, onRelayArrived: () => void) {
+  constructor(db: DbClient, dataDir: string, onRelayArrived: () => void, stringsStore?: DesktopStringsStore) {
     this.db = db;
     this.dataDir = dataDir;
     this.onRelayArrived = onRelayArrived;
+    this.stringsStore = stringsStore ?? null;
     let devId = getSyncStateVal(db, "device_id", "");
     if (!devId) {
       devId = `desktop-${crypto.randomUUID().slice(0, 8)}`;
@@ -634,6 +652,7 @@ export class OtzarFirebaseSyncService {
       this.lastError = null;
 
       this.startRealtimeListeners();
+      void this.syncUiStrings().catch(() => {});
       // Background periodic delta sync + outbox safety sweep every 45s
       this.periodicTimer = setInterval(() => {
         if (this.connected && !this.syncInFlight) {
@@ -855,6 +874,37 @@ export class OtzarFirebaseSyncService {
       );
       this.unsubscribers.push(unsub);
     }
+
+    // 3. Non-blocking live UI/Updater strings queue listener
+    let isFirstStringsSnap = true;
+    const unsubStrings = onSnapshot(
+      query(collection(fsClient, "ui_strings"), limit(500)),
+      (snap) => {
+        if (isFirstStringsSnap) {
+          isFirstStringsSnap = false;
+          return;
+        }
+        if (!this.stringsStore) return;
+        const nextMap: Record<string, StringOverrideRecord> = {};
+        for (const d of snap.docs) {
+          const data = d.data();
+          if (typeof data.value === "string") {
+            nextMap[d.id] = {
+              value: data.value,
+              defaultValueSnapshot: typeof data.defaultValueSnapshot === "string" ? data.defaultValueSnapshot : undefined,
+              updatedAt: typeof data.updatedAt === "string" ? data.updatedAt : undefined,
+              promoted_desktop: Boolean(data.promoted_desktop),
+              promoted_mobile: Boolean(data.promoted_mobile),
+            };
+          }
+        }
+        this.stringsStore.replaceCloudCacheOverrides(nextMap);
+      },
+      () => {
+        // Non-fatal; cached strings remain active offline
+      }
+    );
+    this.unsubscribers.push(unsubStrings);
   }
 
   private async processRelayDocument(relayId: string, data: Record<string, unknown>): Promise<void> {
@@ -1995,6 +2045,82 @@ export class OtzarFirebaseSyncService {
       aiModel: parsed.settings.ai_model || "gemini-4-hydrogen",
       updatedAt: docData.updated_at ? String(docData.updated_at) : null,
     };
+  }
+
+  public isCloudConnected(): boolean {
+    return this.connected && Boolean(this.firestore);
+  }
+
+  public async syncUiStrings(): Promise<void> {
+    if (!this.firestore || !this.stringsStore) return;
+    const fsClient = this.firestore;
+    const snap = await getDocs(query(collection(fsClient, "ui_strings"), limit(500)));
+    const cloudMap: Record<string, StringOverrideRecord> = {};
+    for (const d of snap.docs) {
+      const data = d.data();
+      if (typeof data.value === "string") {
+        cloudMap[d.id] = {
+          value: data.value,
+          defaultValueSnapshot: typeof data.defaultValueSnapshot === "string" ? data.defaultValueSnapshot : undefined,
+          updatedAt: typeof data.updatedAt === "string" ? data.updatedAt : undefined,
+          promoted_desktop: Boolean(data.promoted_desktop),
+          promoted_mobile: Boolean(data.promoted_mobile),
+        };
+      }
+    }
+    const localMap = this.stringsStore.getLocalOverrides();
+    for (const [key, localRec] of Object.entries(localMap)) {
+      const cloudRec = cloudMap[key];
+      const localTs = localRec.updatedAt || "";
+      const cloudTs = cloudRec?.updatedAt || "";
+      if (!cloudRec || (localTs && localTs > cloudTs)) {
+        const payload = {
+          key,
+          value: localRec.value,
+          defaultValueSnapshot: localRec.defaultValueSnapshot || "",
+          updatedAt: localRec.updatedAt || new Date().toISOString(),
+          promoted_desktop: false,
+          promoted_mobile: false,
+        };
+        await setDoc(doc(fsClient, "ui_strings", key), payload);
+        cloudMap[key] = payload;
+      }
+    }
+    this.stringsStore.replaceCloudCacheOverrides(cloudMap);
+  }
+
+  public async pushUiStringOverride(key: string, record: StringOverrideRecord): Promise<{ synced: boolean; error?: string }> {
+    if (!this.firestore || !this.connected) {
+      return { synced: false, error: "offline" };
+    }
+    try {
+      const payload = {
+        key,
+        value: record.value,
+        defaultValueSnapshot: record.defaultValueSnapshot || "",
+        updatedAt: record.updatedAt || new Date().toISOString(),
+        promoted_desktop: false,
+        promoted_mobile: false,
+      };
+      await setDoc(doc(this.firestore, "ui_strings", key), payload);
+      this.stringsStore?.upsertCloudCacheEntry(key, payload);
+      return { synced: true };
+    } catch (err) {
+      return { synced: false, error: formatFirebaseErrorHe(err) };
+    }
+  }
+
+  public async deleteUiStringOverride(key: string): Promise<{ synced: boolean; error?: string }> {
+    if (!this.firestore || !this.connected) {
+      return { synced: false, error: "offline" };
+    }
+    try {
+      await deleteDoc(doc(this.firestore, "ui_strings", key));
+      this.stringsStore?.removeCloudCacheEntry(key);
+      return { synced: true };
+    } catch (err) {
+      return { synced: false, error: formatFirebaseErrorHe(err) };
+    }
   }
 
   public async stop(): Promise<void> {

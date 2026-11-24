@@ -193,6 +193,7 @@ function createDesktopUpdaterBridge(): DesktopUpdaterBridge {
 
       void (async () => {
         try {
+          const splashStrings = serverHandle?.getSplashStrings(targetVersion);
           // Launch detached native WPF updater splash from %TEMP% before tearing down
           // This persists on-screen throughout NSIS extraction/install with zero file locks
           launchStandaloneUpdaterSplash({
@@ -201,6 +202,7 @@ function createDesktopUpdaterBridge(): DesktopUpdaterBridge {
             themePreset: themeSnap.themePreset,
             serverPort: Number(process.env.PORT || 4747),
             oldProcessId: process.pid,
+            strings: splashStrings,
           });
 
           // Allow splash window to render visibly before closing main window
@@ -223,8 +225,8 @@ function createDesktopUpdaterBridge(): DesktopUpdaterBridge {
           isQuittingForUpdate = false;
           destroySplashWindow();
           dialog.showErrorBox(
-            "שגיאה בהחלת העדכון",
-            String(err?.message || "אירעה שגיאה לפני הפעלת המתקין השקט. הנתונים שלך נשמרו ובטוחים.")
+            serverHandle?.t("updater.applyErrorDialogTitle") || "שגיאה בהחלת העדכון",
+            String(err?.message || serverHandle?.t("updater.applyErrorDialogFallback") || "אירעה שגיאה לפני הפעלת המתקין השקט. הנתונים שלך נשמרו ובטוחים.")
           );
           app.quit();
         }

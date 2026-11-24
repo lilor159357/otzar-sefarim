@@ -4,6 +4,7 @@ import path from "path";
 import type { DbClient } from "../db/adapter.ts";
 import { requireAdmin } from "../auth/adminAuth.ts";
 import { buildNormalizedBookSearch, enqueueSyncOutbox, newSyncId } from "../db/schema.ts";
+import { fallbackT, type StringsTranslateFn } from "../../shared/strings/engine.ts";
 import {
   analyzeBookCoverImage,
   analyzeShelfSetImages,
@@ -100,7 +101,7 @@ function lookupExistingSetContext(db: DbClient, setName: string): ExistingSetCon
   };
 }
 
-export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: string, onSyncTrigger?: () => void) {
+export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: string, onSyncTrigger?: () => void, t: StringsTranslateFn = fallbackT) {
   const aiImagesDir = path.join(dataDir, "ai_images");
   fs.mkdirSync(aiImagesDir, { recursive: true });
 
@@ -337,7 +338,7 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
     const forceAll = Boolean(req.body?.forceAll);
     const cfg = getAiConfig(db);
     if (!cfg.hasAnyKey) {
-      return res.status(400).json({ error: "לא הוגדרו מפתחות Gemini API פעילים בהגדרות" });
+      return res.status(400).json({ error: t("errors.aiNoActiveKeys") });
     }
 
     const rows = db.all<Record<string, unknown>>(
@@ -503,7 +504,7 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
     const globalPresetSetName = req.body?.preset_set_name ? String(req.body.preset_set_name).trim() : "";
 
     if (items.length === 0) {
-      return res.status(400).json({ error: "לא התקבלו תמונות להעלאה" });
+      return res.status(400).json({ error: t("errors.aiNoImagesUploaded") });
     }
 
     const now = new Date().toISOString();
@@ -581,10 +582,10 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
     }
 
     if (titlePaths.length === 0 && !cleanPreset) {
-      return res.status(400).json({ error: "נדרשת לפחות תמונת שער אחת, או הזנת שם סט קיים להמשך" });
+      return res.status(400).json({ error: t("errors.aiCoverOrSetRequired") });
     }
     if (titlePaths.length === 0 && spinePaths.length === 0) {
-      return res.status(400).json({ error: "יש לצרף לפחות תמונת שדרות אחת להמשך הסט" });
+      return res.status(400).json({ error: t("errors.aiSpineRequired") });
     }
 
     const allPaths = [...titlePaths, ...spinePaths];
@@ -625,7 +626,7 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
       format_size,
       edition,
     } = req.body || {};
-    if (!batchId) return res.status(400).json({ error: "נדרש מזהה מקבץ batchId" });
+    if (!batchId) return res.status(400).json({ error: t("errors.aiBatchIdRequired") });
 
     const pendingInBatch = db.all<{ id: number; extracted_json: string }>(
       "SELECT id, extracted_json FROM ai_catalog_queue WHERE set_batch_id = ? AND approval_status = 'pending'",
@@ -696,7 +697,7 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
     const id = Number(req.params.id);
     const existing = db.get<{ id: number }>("SELECT id FROM ai_catalog_queue WHERE id = ?", id);
     if (!existing) {
-      return res.status(404).json({ error: "הפריט לא נמצא בתור" });
+      return res.status(404).json({ error: t("errors.aiQueueItemNotFound") });
     }
 
     const {
@@ -802,7 +803,7 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
     } else {
       // Standard single queue item approval
       if (!title || !String(title).trim()) {
-        return res.status(400).json({ error: "יש להזין שם ספר לפני אישור" });
+        return res.status(400).json({ error: t("errors.aiTitleRequiredBeforeApprove") });
       }
 
       const count = Math.max(1, Math.min(200, Number(copiesCount) || 1));

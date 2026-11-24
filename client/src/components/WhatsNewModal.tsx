@@ -1,5 +1,6 @@
 import React, { useState } from "react";
 import { BookOpen, CheckCircle2, X } from "lucide-react";
+import { useStrings } from "../lib/stringsContext.tsx";
 
 export interface RecentUpdateInfo {
   hasRecentUpdate: boolean;
@@ -15,6 +16,7 @@ interface WhatsNewModalProps {
 }
 
 export const WhatsNewModal: React.FC<WhatsNewModalProps> = ({ info, onAcknowledge }) => {
+  const { t } = useStrings();
   const [submitting, setSubmitting] = useState(false);
 
   const handleDone = async () => {
@@ -42,13 +44,10 @@ export const WhatsNewModal: React.FC<WhatsNewModalProps> = ({ info, onAcknowledg
             </div>
             <div className="min-w-0">
               <h2 id="whats-new-title" className="text-lg font-bold leading-snug text-balance">
-                אוצר ספרים עודכן לגרסה{" "}
-                <span className="font-mono tabular-nums" dir="ltr">
-                  v{info.version}
-                </span>
+                {t("updater.whatsNewTitle", { version: info.version })}
               </h2>
               <div className="flex flex-wrap items-center gap-1.5 text-xs text-[var(--otzar-text-muted)] mt-0.5">
-                <span>העדכון הושלם בהצלחה</span>
+                <span>{t("updater.whatsNewSubtitleDone")}</span>
                 {info.previousVersion && (
                   <>
                     <span aria-hidden="true">·</span>
@@ -58,7 +57,7 @@ export const WhatsNewModal: React.FC<WhatsNewModalProps> = ({ info, onAcknowledg
                   </>
                 )}
                 <span aria-hidden="true">·</span>
-                <span>הספרים וההגדרות שמורים</span>
+                <span>{t("updater.whatsNewDataSafe")}</span>
               </div>
             </div>
           </div>
@@ -66,7 +65,7 @@ export const WhatsNewModal: React.FC<WhatsNewModalProps> = ({ info, onAcknowledg
             type="button"
             onClick={handleDone}
             disabled={submitting}
-            aria-label="סגור חלון חידושים"
+            aria-label={t("updater.whatsNewAriaClose")}
             className="p-1.5 rounded-lg text-[var(--otzar-text-muted)] hover:bg-[var(--otzar-surface)] hover:text-[var(--otzar-text)] transition-colors cursor-pointer disabled:opacity-50 shrink-0"
           >
             <X className="w-4 h-4" />
@@ -75,11 +74,13 @@ export const WhatsNewModal: React.FC<WhatsNewModalProps> = ({ info, onAcknowledg
 
         <div className="flex-1 min-h-0 overflow-y-auto px-5 sm:px-6 py-4">
           <div className="p-4 rounded-xl bg-[var(--otzar-surface)] border border-[var(--otzar-border-muted)] space-y-2.5">
-            <div className="text-xs font-semibold text-[var(--otzar-text)]">מה התחדש בגרסה זו:</div>
+            <div className="text-xs font-semibold text-[var(--otzar-text)]">
+              {t("updater.whatsNewSectionTitle")}
+            </div>
             <ul className="space-y-2 text-sm text-[var(--otzar-text)] leading-relaxed">
               {(info.highlights && info.highlights.length > 0
                 ? info.highlights
-                : ["שיפורי יציבות, ביצועים וחוויית שימוש במערכת."]
+                : [t("updater.whatsNewFallbackItem")]
               ).map((item, idx) => (
                 <li key={idx} className="flex items-start gap-2">
                   <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0 mt-0.5" />
@@ -97,7 +98,7 @@ export const WhatsNewModal: React.FC<WhatsNewModalProps> = ({ info, onAcknowledg
             disabled={submitting}
             className="px-5 py-2.5 rounded-lg text-sm font-semibold text-white bg-[var(--otzar-accent)] hover:bg-[var(--otzar-accent-hover)] transition-colors cursor-pointer disabled:opacity-60 whitespace-nowrap shrink-0"
           >
-            {submitting ? "סוגר..." : "הבנתי, המשך לעבודה"}
+            {submitting ? t("updater.whatsNewClosing") : t("updater.whatsNewCloseButton")}
           </button>
         </div>
       </div>

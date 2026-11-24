@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Lock, ShieldCheck, X } from "lucide-react";
+import { useStrings } from "../lib/stringsContext.tsx";
 
 interface AdminPinModalProps {
   onSuccess: (token: string) => void;
@@ -7,6 +8,7 @@ interface AdminPinModalProps {
 }
 
 export const AdminPinModal: React.FC<AdminPinModalProps> = ({ onSuccess, onClose }) => {
+  const { t } = useStrings();
   const [pin, setPin] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -29,14 +31,14 @@ export const AdminPinModal: React.FC<AdminPinModalProps> = ({ onSuccess, onClose
       });
       const data = await res.json();
       if (!res.ok) {
-        setError(data.error || "קוד שגוי");
+        setError(data.error || t("errors.adminPinInvalid"));
         setPin("");
         inputRef.current?.focus();
         return;
       }
       onSuccess(data.token);
     } catch {
-      setError("שגיאה בתקשורת עם השרת");
+      setError(t("errors.networkTimeout"));
     } finally {
       setLoading(false);
     }
@@ -56,7 +58,7 @@ export const AdminPinModal: React.FC<AdminPinModalProps> = ({ onSuccess, onClose
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2 font-bold text-base">
             <Lock className="w-4 h-4 text-[var(--otzar-accent)]" />
-            <span>כניסת מנהל (Admin)</span>
+            <span>{t("nav.adminModalTitle")}</span>
           </div>
           <button
             type="button"
@@ -68,7 +70,7 @@ export const AdminPinModal: React.FC<AdminPinModalProps> = ({ onSuccess, onClose
         </div>
 
         <p className="text-xs text-[var(--otzar-text-muted)]">
-          הזן קוד PIN לפתיחת קטלוג, עריכת ספרים, הדפסת מדבקות, עורך מפה והגדרות. (ברירת מחדל ראשונית: <span className="font-mono">1234</span>)
+          {t("nav.adminModalSubtitle")}
         </p>
 
         <form onSubmit={handleSubmit} className="space-y-3">
@@ -93,7 +95,7 @@ export const AdminPinModal: React.FC<AdminPinModalProps> = ({ onSuccess, onClose
               onClick={onClose}
               className="flex-1 py-2 rounded-lg text-sm border border-[var(--otzar-border-muted)] cursor-pointer"
             >
-              ביטול
+              {t("common.cancel")}
             </button>
             <button
               type="submit"
@@ -101,7 +103,7 @@ export const AdminPinModal: React.FC<AdminPinModalProps> = ({ onSuccess, onClose
               className="flex-1 inline-flex items-center justify-center gap-1.5 py-2 rounded-lg text-sm font-bold text-white bg-[var(--otzar-accent)] hover:bg-[var(--otzar-accent-hover)] cursor-pointer disabled:opacity-40"
             >
               <ShieldCheck className="w-4 h-4" />
-              {loading ? "מאמת..." : "פתח מצב מנהל"}
+              {loading ? t("nav.adminModalSubmitting") : t("nav.adminModalSubmit")}
             </button>
           </div>
         </form>

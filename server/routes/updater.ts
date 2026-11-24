@@ -6,6 +6,7 @@ import path from "path";
 import { promisify } from "util";
 import type { DbClient } from "../db/adapter.ts";
 import { requireAdmin } from "../auth/adminAuth.ts";
+import { fallbackT, type StringsTranslateFn } from "../../shared/strings/engine.ts";
 import {
   cleanReleaseNotes,
   clearPendingUpdateNotes,
@@ -237,7 +238,7 @@ async function getRepoInfo(rootDir: string) {
   };
 }
 
-export async function checkForUpdates(rootDir: string): Promise<UpdateCheckState> {
+export async function checkForUpdates(rootDir: string, t: StringsTranslateFn = fallbackT): Promise<UpdateCheckState> {
   const info = await getRepoInfo(rootDir);
   if (!info.gitAvailable) {
     Object.assign(lastCheckState, {
@@ -245,7 +246,7 @@ export async function checkForUpdates(rootDir: string): Promise<UpdateCheckState
       hasUpdate: false,
       behindCount: 0,
       aheadCount: 0,
-      error: "Git אינו מותקן במחשב",
+      error: t("errors.gitNotInstalled"),
     });
     return { ...lastCheckState };
   }
@@ -255,7 +256,7 @@ export async function checkForUpdates(rootDir: string): Promise<UpdateCheckState
       hasUpdate: false,
       behindCount: 0,
       aheadCount: 0,
-      error: "תיקיית הפרויקט עדיין אינה מחוברת ל-Git",
+      error: t("errors.gitRepoNotConnected"),
     });
     return { ...lastCheckState };
   }
@@ -268,7 +269,7 @@ export async function checkForUpdates(rootDir: string): Promise<UpdateCheckState
       localHash: info.localHash,
       remoteHash: "",
       latestCommits: [],
-      error: "לא הוגדרה כתובת מאגר GitHub (origin)",
+      error: t("errors.gitOriginMissing"),
     });
     return { ...lastCheckState };
   }
@@ -288,7 +289,7 @@ export async function checkForUpdates(rootDir: string): Promise<UpdateCheckState
         localHash: info.localHash,
         remoteHash: "",
         latestCommits: [],
-        error: `הענף ${info.branch} עדיין לא קיים במאגר המרוחק`,
+        error: t("errors.gitBranchNotOnRemote", { branch: info.branch }),
       });
       return { ...lastCheckState };
     }
@@ -334,7 +335,7 @@ export async function checkForUpdates(rootDir: string): Promise<UpdateCheckState
       behindCount: 0,
       aheadCount: 0,
       localHash: info.localHash,
-      error: friendlyGitError(String(err?.message || "שגיאה בבדיקת עדכונים")),
+      error: friendlyGitError(String(err?.message || t("errors.updaterCheckFailed"))),
     });
     return { ...lastCheckState };
   }
@@ -502,7 +503,8 @@ export function registerUpdaterRoutes(
   dataDir: string,
   hooks: UpdaterRestartHooks,
   desktopUpdater?: DesktopUpdaterBridge,
-  appVersionOverride?: string
+  appVersionOverride?: string,
+  t: StringsTranslateFn = fallbackT
 ) {
   const resolveCurrentVersion = () =>
     desktopUpdater?.getSnapshot()?.currentVersion || appVersionOverride || getPackageVersion(rootDir);
@@ -609,7 +611,7 @@ export function registerUpdaterRoutes(
     try {
       if (remoteUrlRaw !== undefined && !desktopUpdater) {
         if (remoteUrlRaw && !/^(https:\/\/github\.com\/|git@github\.com:).+/i.test(remoteUrlRaw)) {
-          return res.status(400).json({ error: "יש להזין כתובת תקינה של מאגר GitHub (למשל https://github.com/user/repo.git)" });
+          return res.status(400).json({ error: t("errors.updaterRepoUrlInvalid") });
         }
         if (!fs.existsSync(path.join(rootDir, ".git"))) {
           await runGit(rootDir, ["init", "-b", "main"]);
@@ -652,7 +654,7 @@ export function registerUpdaterRoutes(
         autoInstall: getSetting(db, "auto_update_install", "0") === "1",
       });
     } catch (err: any) {
-      res.status(400).json({ error: err?.message || "שגיאה בשמירת הגדרות עדכון" });
+      res.status(400).json({ error: err?.message || t("errors.updaterSettingsSaveFailed") });
     }
   });
 
@@ -693,7 +695,7 @@ export function registerUpdaterRoutes(
         const result = await desktopUpdater.downloadAndInstall(() => createBackupFile(db, dataDir, "pre-update"), token);
         return res.json({ ...result, isElectron: true, desktop: desktopUpdater.getSnapshot() });
       } catch (err: any) {
-        return res.status(400).json({ error: err?.message || "שגיאה בהורדת העדכון" });
+        return res.status(400).json({ error: err?.message || t("errors.updaterDownloadFailed") });
       }
     }
 
@@ -701,13 +703,13 @@ export function registerUpdaterRoutes(
       const result = await applyUpdateAndRestart(db, rootDir, dataDir, hooks, false);
       res.json(result);
     } catch (err: any) {
-      res.status(400).json({ error: err?.message || "שגיאה בהחלת העדכון" });
+      res.status(400).json({ error: err?.message || t("errors.updaterApplyFailed") });
     }
   });
 
   app.post("/api/updater/install-now", requireAdmin, (_req, res) => {
     if (!desktopUpdater) {
-      return res.status(400).json({ error: "התקנת Setup זמינה רק בגרסת ה-Desktop" });
+      return res.status(400).json({ error: t("errors.updaterDesktopOnly") });
     }
     const snap = formatDesktopSnapshot(desktopUpdater.getSnapshot());
     const targetVersion = String(snap?.availableVersion || "").trim();

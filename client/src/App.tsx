@@ -20,6 +20,7 @@ import {
   Cloud,
   Smartphone,
   SlidersHorizontal,
+  Type,
 } from "lucide-react";
 import type { BookRow, CabinetRow, HealthData, ModuleKey } from "./types.ts";
 import { SearchModule } from "./components/SearchModule.tsx";
@@ -30,6 +31,8 @@ import { AiSettingsPanel } from "./components/AiSettingsPanel.tsx";
 import { FirebaseSyncPanel } from "./components/FirebaseSyncPanel.tsx";
 import { SetupTransferPanel } from "./components/SetupTransferPanel.tsx";
 import { UpdaterPanel } from "./components/UpdaterPanel.tsx";
+import { StringsEditorPanel } from "./components/StringsEditorPanel.tsx";
+import { useStrings } from "./lib/stringsContext.tsx";
 import { WhatsNewModal, type RecentUpdateInfo } from "./components/WhatsNewModal.tsx";
 import { LabelsModule } from "./components/LabelsModule.tsx";
 import { AdminPinModal } from "./components/AdminPinModal.tsx";
@@ -37,18 +40,19 @@ import { installFetchAdminInterceptor, setAdminToken } from "./lib/adminSession.
 
 installFetchAdminInterceptor();
 
-const NAV_ITEMS: Array<{ key: ModuleKey; label: string; icon: React.ComponentType<{ className?: string }> }> = [
-  { key: "search", label: "חיפוש ואיתור", icon: Search },
-  { key: "circulation", label: "השאלה והחזרה", icon: ArrowLeftRight },
-  { key: "catalog", label: "קטלוג ו-AI", icon: PlusSquare },
-  { key: "labels", label: "הדפסת מדבקות", icon: Printer },
-  { key: "admin", label: "הגדרות ומפה", icon: Settings },
+const NAV_ITEMS: Array<{ key: ModuleKey; labelKey: "nav.searchTab" | "nav.circulationTab" | "nav.catalogAiTab" | "nav.labelsTab" | "nav.adminAndMapTab"; icon: React.ComponentType<{ className?: string }> }> = [
+  { key: "search", labelKey: "nav.searchTab", icon: Search },
+  { key: "circulation", labelKey: "nav.circulationTab", icon: ArrowLeftRight },
+  { key: "catalog", labelKey: "nav.catalogAiTab", icon: PlusSquare },
+  { key: "labels", labelKey: "nav.labelsTab", icon: Printer },
+  { key: "admin", labelKey: "nav.adminAndMapTab", icon: Settings },
 ];
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<ModuleKey>("search");
   const [adminSubTab, setAdminSubTab] = useState<"settings" | "map">("settings");
-  const [settingsTab, setSettingsTab] = useState<"general" | "ai" | "cloud" | "updates" | "transfer" | "maintenance">("general");
+  const [settingsTab, setSettingsTab] = useState<"general" | "ai" | "cloud" | "updates" | "strings" | "transfer" | "maintenance">("general");
+  const { overrides: activeStringOverrides, t } = useStrings();
   const [generalSaveMsg, setGeneralSaveMsg] = useState<string | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [health, setHealth] = useState<HealthData | null>(null);
@@ -226,7 +230,8 @@ export default function App() {
       ? "search"
       : activeTab;
 
-  const activeNavLabel = visibleNavItems.find((n) => n.key === effectiveTab)?.label || "";
+  const activeNavItem = visibleNavItems.find((n) => n.key === effectiveTab);
+  const activeNavLabel = activeNavItem ? t(activeNavItem.labelKey) : "";
 
   const handleAdminLogout = async () => {
     try {
@@ -267,7 +272,7 @@ export default function App() {
         <div className="flex items-center gap-2.5 whitespace-nowrap shrink-0">
           <BookOpen className="w-5 h-5 text-[var(--otzar-accent)]" />
           <span className="font-bold text-lg tracking-tight">
-            {settings.library_name || "אוצר ספרים"}
+            {settings.library_name || t("common.appName")}
           </span>
         </div>
 
@@ -280,7 +285,7 @@ export default function App() {
             <>
               <span className="hidden sm:inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium bg-[var(--otzar-surface)] text-[var(--otzar-accent)] border border-[var(--otzar-border)] whitespace-nowrap">
                 <ShieldCheck className="w-3.5 h-3.5" />
-                מצב מנהל
+                {t("nav.adminBadge")}
               </span>
               <button
                 type="button"
@@ -288,7 +293,7 @@ export default function App() {
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-[var(--otzar-border-muted)] hover:bg-[var(--otzar-surface)] text-[var(--otzar-text)] whitespace-nowrap shrink-0 cursor-pointer"
               >
                 <Lock className="w-3.5 h-3.5" />
-                נעל לעמדת משתמש
+                {t("nav.adminLogoutButton")}
               </button>
             </>
           )}
@@ -298,7 +303,7 @@ export default function App() {
             className="inline-flex items-center gap-2 px-4 py-1.5 rounded-lg text-xs font-semibold text-white bg-[var(--otzar-accent)] hover:bg-[var(--otzar-accent-hover)] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             {isFullscreen ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}
-            {isFullscreen ? "יציאה ממסך מלא" : "מצב עמדה (מסך מלא)"}
+            {isFullscreen ? t("nav.exitFullscreen") : t("nav.enterFullscreen")}
           </button>
         </div>
       </header>
@@ -325,7 +330,7 @@ export default function App() {
                   }`}
                 >
                   <Icon className="w-4 h-4 shrink-0" />
-                  <span>{item.label}</span>
+                  <span>{t(item.labelKey)}</span>
                 </button>
               );
             })}
@@ -337,24 +342,24 @@ export default function App() {
               <div className="flex items-center justify-between">
                 <span className="flex items-center gap-1.5 font-medium text-[var(--otzar-text)]">
                   <Database className="w-3.5 h-3.5 text-[var(--otzar-accent)]" />
-                  מאגר הספרייה
+                  {t("nav.dbSummaryTitle")}
                 </span>
-                <span className="tabular-nums font-medium text-emerald-700 dark:text-emerald-400">{health?.ok ? "פעיל" : "..."}</span>
+                <span className="tabular-nums font-medium text-emerald-700 dark:text-emerald-400">{health?.ok ? t("nav.dbSummaryActive") : "..."}</span>
               </div>
               <div className="flex justify-between tabular-nums">
-                <span>ספרים במאגר:</span>
+                <span>{t("nav.dbSummaryBooks")}</span>
                 <span className="font-semibold text-[var(--otzar-text)]">{health?.counts.books ?? 0}</span>
               </div>
               <div className="flex justify-between tabular-nums">
-                <span>ארונות:</span>
+                <span>{t("nav.dbSummaryCabinets")}</span>
                 <span className="font-semibold text-[var(--otzar-text)]">{health?.counts.cabinets ?? 0}</span>
               </div>
               <div className="flex justify-between tabular-nums">
-                <span>מושאלים כעת:</span>
+                <span>{t("nav.dbSummaryBorrowed")}</span>
                 <span className="font-semibold text-[var(--otzar-text)]">{health?.counts.activeLoans ?? 0}</span>
               </div>
               <div className="flex justify-between tabular-nums">
-                <span>ממתינים למדבקה:</span>
+                <span>{t("nav.dbSummaryPrintQueue")}</span>
                 <span className="font-semibold text-[var(--otzar-accent)]">{health?.counts.printQueue ?? 0}</span>
               </div>
             </div>
@@ -363,11 +368,11 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => setShowPinModal(true)}
-                title="כניסת מנהל (Ctrl+Shift+A)"
+                title={t("nav.adminLoginTitle")}
                 className="w-full flex items-center justify-center gap-1.5 py-2 px-3 rounded-lg text-xs text-[var(--otzar-text-muted)] hover:text-[var(--otzar-text)] hover:bg-[var(--otzar-surface)] transition-colors cursor-pointer"
               >
                 <Lock className="w-3.5 h-3.5" />
-                <span>כניסת מנהל</span>
+                <span>{t("nav.adminLoginButton")}</span>
               </button>
             </div>
           )}
@@ -387,10 +392,12 @@ export default function App() {
                 <RefreshCw className="w-4 h-4 text-[var(--otzar-accent)] shrink-0" />
                 <span>
                   {updateReadyToInstall
-                    ? `גרסה חדשה${updateAvailableVer ? ` v${updateAvailableVer}` : ""} ירדה ומוכנה להתקנה שקטה.`
+                    ? updateAvailableVer
+                      ? t("updater.bannerReadyWithVersion", { version: updateAvailableVer })
+                      : t("updater.bannerReadyNoVersion")
                     : updateAvailableVer
-                    ? `גרסה חדשה v${updateAvailableVer} זמינה להורדה.`
-                    : `קיים עדכון תוכנה חדש מ-GitHub (${updateBehindCount} שינויים ממתינים).`}
+                    ? t("updater.bannerAvailableVersion", { version: updateAvailableVer })
+                    : t("updater.bannerBehindCommits", { count: updateBehindCount })}
                 </span>
               </div>
               <div className="flex items-center gap-2">
@@ -409,7 +416,7 @@ export default function App() {
                     }}
                     className="px-3 py-1.5 rounded-lg text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-700 cursor-pointer disabled:opacity-60 whitespace-nowrap shrink-0"
                   >
-                    {installingBannerUpdate ? "מכין גיבוי ומתקין..." : "הפעל מחדש והתקן עכשיו"}
+                    {installingBannerUpdate ? t("updater.bannerInstallingButton") : t("updater.bannerRestartInstallButton")}
                   </button>
                 ) : (
                   <button
@@ -421,7 +428,7 @@ export default function App() {
                     }}
                     className="px-3 py-1.5 rounded-lg text-xs font-semibold text-white bg-[var(--otzar-accent)] hover:bg-[var(--otzar-accent-hover)] cursor-pointer whitespace-nowrap shrink-0"
                   >
-                    פתח עדכונים
+                    {t("updater.bannerOpenUpdatesButton")}
                   </button>
                 )}
                 <button
@@ -501,12 +508,13 @@ export default function App() {
                   {/* 6 Horizontal Sub-Tabs for Display & System Settings */}
                   <div className="flex flex-wrap items-center gap-1.5 p-1.5 rounded-xl bg-[var(--otzar-surface-alt)] border border-[var(--otzar-border-muted)]">
                     {[
-                      { id: "general", label: "כללי וספרייה", icon: SlidersHorizontal },
-                      { id: "ai", label: "בינה מלאכותית (AI)", icon: Bot },
-                      { id: "cloud", label: "סנכרון ענן (Firebase)", icon: Cloud },
-                      { id: "updates", label: "עדכוני תוכנה", icon: RefreshCw, badge: updateBehindCount > 0 ? updateBehindCount : 0 },
-                      { id: "transfer", label: "העברה למכשיר אחר", icon: Smartphone },
-                      { id: "maintenance", label: "תחזוקה ואיפוס", icon: ShieldCheck },
+                      { id: "general", label: t("settings.generalTab"), icon: SlidersHorizontal },
+                      { id: "ai", label: t("settings.aiTab"), icon: Bot },
+                      { id: "cloud", label: t("settings.syncTab"), icon: Cloud },
+                      { id: "updates", label: t("settings.updaterTab"), icon: RefreshCw, badge: updateBehindCount > 0 ? updateBehindCount : 0 },
+                      { id: "strings", label: t("settings.stringsTab"), icon: Type, badge: Object.keys(activeStringOverrides).length || 0 },
+                      { id: "transfer", label: t("settings.transferTab"), icon: Smartphone },
+                      { id: "maintenance", label: t("settings.maintenanceTab"), icon: ShieldCheck },
                     ].map((t) => {
                       const TabIcon = t.icon;
                       const active = settingsTab === t.id;
@@ -735,6 +743,13 @@ export default function App() {
                   {settingsTab === "updates" && (
                     <div className="max-w-3xl">
                       <UpdaterPanel onUpdateStatusChange={setUpdateBehindCount} />
+                    </div>
+                  )}
+
+                  {/* TAB 4.5: LIVE STRINGS EDITOR */}
+                  {settingsTab === "strings" && (
+                    <div className="max-w-3xl">
+                      <StringsEditorPanel onRequireAdmin={() => setShowPinModal(true)} />
                     </div>
                   )}
 

@@ -11,6 +11,10 @@ import { registerCirculationRoutes } from "./routes/circulation.ts";
 import { registerCatalogAiRoutes } from "./routes/catalogAi.ts";
 import { registerLabelsAndAdminRoutes } from "./routes/labelsAndAdmin.ts";
 import { registerSyncRoutes } from "./routes/sync.ts";
+import { registerStringsRoutes } from "./routes/strings.ts";
+import { DesktopStringsStore } from "./strings/stringsStore.ts";
+import type { StringsTranslateFn } from "../shared/strings/engine.ts";
+import type { UpdaterSplashStrings } from "../electron/updaterSplash.ts";
 import { OtzarFirebaseSyncService } from "./sync/firebaseSync.ts";
 import { loadWindowsRootCertificates } from "../electron/windowsCerts.ts";
 import {
@@ -41,6 +45,8 @@ export interface StartedOtzarServer {
   url: string;
   dataDir: string;
   dbPath: string;
+  t: StringsTranslateFn;
+  getSplashStrings: (targetVersion: string) => UpdaterSplashStrings;
   getThemeSnapshot: () => UiPrefsSnapshot;
   prepareAndCloseForUpdate: () => { backupPath: string; themePreset: string; darkMode: boolean };
   close: () => void;
@@ -121,6 +127,7 @@ export async function startOtzarServer(options: OtzarServerOptions = {}): Promis
   };
   saveUiPrefs(DATA_DIR, getThemeSnapshot());
 
+  const stringsStore = new DesktopStringsStore(DATA_DIR);
   const app = express();
   app.use(express.json({ limit: "25mb" }));
   let syncService: OtzarFirebaseSyncService | null = null;
@@ -299,7 +306,7 @@ export async function startOtzarServer(options: OtzarServerOptions = {}): Promis
       if (updated?.sync_id) enqueueSyncOutbox(db, "cabinet", String(updated.sync_id), "upsert", { id });
       res.json(updated);
     } catch (err: any) {
-      res.status(400).json({ error: err?.message || "שגיאה בעדכון ארון" });
+      res.status(400).json({ error: err?.message || stringsStore.t("errors.cabinetUpdateFailed") });
     }
   });
 
@@ -442,7 +449,7 @@ export async function startOtzarServer(options: OtzarServerOptions = {}): Promis
     } = req.body || {};
 
     if (!title || typeof title !== "string" || !title.trim()) {
-      return res.status(400).json({ error: "יש להזין שם ספר" });
+      return res.status(400).json({ error: stringsStore.t("errors.bookTitleRequired") });
     }
 
     const parsedThickness = thickness_mm !== null && thickness_mm !== "" && Number(thickness_mm) > 0 ? Number(thickness_mm) : null;
@@ -508,7 +515,7 @@ export async function startOtzarServer(options: OtzarServerOptions = {}): Promis
     const barcode = req.params.barcode;
     const existing = db.get<Record<string, unknown>>("SELECT * FROM books WHERE barcode = ?", barcode);
     if (!existing) {
-      return res.status(404).json({ error: "הספר לא נמצא" });
+      return res.status(404).json({ error: stringsStore.t("errors.bookNotFound") });
     }
     const {
       title = existing.title,
@@ -649,21 +656,24 @@ export async function startOtzarServer(options: OtzarServerOptions = {}): Promis
   });
 
   // Stage 3: Circulation, Borrowers & CSV/Excel Import
-  registerCirculationRoutes(app, db);
+  registerCirculationRoutes(app, db, stringsStore.t);
 
   // Stage 4: Catalog AI Queue, Image Compression & 768d Embeddings
-  const aiHooks = registerCatalogAiRoutes(app, db, DATA_DIR, () => syncService?.notifyLocalMutation());
+  const aiHooks = registerCatalogAiRoutes(app, db, DATA_DIR, () => syncService?.notifyLocalMutation(), stringsStore.t);
 
   // Stage 5: A4 Barcode PDF Labels, Backup/Export & Admin PIN Auth
-  registerLabelsAndAdminRoutes(app, db, DATA_DIR);
+  registerLabelsAndAdminRoutes(app, db, DATA_DIR, stringsStore.t);
 
   // Stage 6: Auto-Update & GitHub Sync
   const updaterHooks: UpdaterRestartHooks = {};
-  registerUpdaterRoutes(app, db, ROOT_DIR, DATA_DIR, updaterHooks, options.desktopUpdater, appVersion);
+  registerUpdaterRoutes(app, db, ROOT_DIR, DATA_DIR, updaterHooks, options.desktopUpdater, appVersion, stringsStore.t);
 
   // Stage 7: Bidirectional Firebase Firestore Delta Sync & Mobile Relay Listener
-  syncService = new OtzarFirebaseSyncService(db, DATA_DIR, () => aiHooks.triggerQueueProcessing());
-  registerSyncRoutes(app, db, syncService);
+  syncService = new OtzarFirebaseSyncService(db, DATA_DIR, () => aiHooks.triggerQueueProcessing(), stringsStore);
+  registerSyncRoutes(app, db, syncService, stringsStore.t);
+
+  // Central Strings & Hot Overrides API
+  registerStringsRoutes(app, stringsStore, syncService);
   void syncService.connect().catch(() => {});
 
   const distDir = path.join(ROOT_DIR, "dist", "client");
@@ -735,7 +745,7 @@ export async function startOtzarServer(options: OtzarServerOptions = {}): Promis
     // 2. Synchronous pre-update backup
     const backupPath = createBackupFile(db, DATA_DIR, "pre-update");
     if (!backupPath || !fs.existsSync(backupPath) || fs.statSync(backupPath).size === 0) {
-      throw new Error("גיבוי טרום-עדכון נכשל — העדכון נעצר לשמירה על מסד הנתונים");
+      throw new Error(stringsStore.t("errors.backupFailed"));
     }
     // 3. Full synchronous teardown of Express & SQLite locks
     serverClosed = true;
@@ -750,12 +760,27 @@ export async function startOtzarServer(options: OtzarServerOptions = {}): Promis
   updaterHooks.closeServer = close;
   scheduleStartupAutoUpdateCheck(db, ROOT_DIR, DATA_DIR, updaterHooks, options.desktopUpdater);
 
+  const getSplashStrings = (targetVersion: string): UpdaterSplashStrings => {
+    const cleanVer = (targetVersion || "").replace(/^v/i, "").trim();
+    return {
+      windowTitle: stringsStore.t("updater.splashWindowTitle"),
+      brandLine: stringsStore.t("updater.splashBrandLine"),
+      headline: cleanVer
+        ? stringsStore.t("updater.splashHeadline", { version: cleanVer })
+        : stringsStore.t("updater.splashHeadlineFallback"),
+      extractingMessage: stringsStore.t("updater.splashExtractingMessage"),
+      footerSafety: stringsStore.t("updater.splashFooterSafety"),
+    };
+  };
+
   return {
     app,
     port,
     url,
     dataDir: DATA_DIR,
     dbPath: db.dbPath,
+    t: stringsStore.t,
+    getSplashStrings,
     getThemeSnapshot,
     prepareAndCloseForUpdate,
     close,

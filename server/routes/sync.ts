@@ -3,6 +3,7 @@ import type { DbClient } from "../db/adapter.ts";
 import { isAdminRequest, requireAdmin } from "../auth/adminAuth.ts";
 import { buildNormalizedBookSearch, enqueueSyncOutbox, newSyncId } from "../db/schema.ts";
 import { FIRESTORE_RULES_TEMPLATE, type OtzarFirebaseSyncService } from "../sync/firebaseSync.ts";
+import { fallbackT, type StringsTranslateFn } from "../../shared/strings/engine.ts";
 import {
   cleanStartCatalogReset,
   exportEncryptedSetupBundle,
@@ -23,7 +24,7 @@ function parseTagsSafe(raw: unknown): string[] {
   return [];
 }
 
-export function registerSyncRoutes(app: Express, db: DbClient, syncService: OtzarFirebaseSyncService) {
+export function registerSyncRoutes(app: Express, db: DbClient, syncService: OtzarFirebaseSyncService, t: StringsTranslateFn = fallbackT) {
   app.get("/api/sync/status", (req, res) => {
     const status = syncService.getStatus();
     if (!isAdminRequest(req)) {
@@ -68,7 +69,7 @@ export function registerSyncRoutes(app: Express, db: DbClient, syncService: Otza
       });
       res.json(result);
     } catch (err: any) {
-      res.status(400).json({ error: err?.message || "שגיאה באימות הגדרות Firebase" });
+      res.status(400).json({ error: err?.message || t("errors.firebaseValidateFailed") });
     }
   });
 
@@ -79,7 +80,7 @@ export function registerSyncRoutes(app: Express, db: DbClient, syncService: Otza
       const status = await syncService.setEnabled(enabled, syncEmbeddings);
       res.json({ ok: true, status });
     } catch (err: any) {
-      res.status(500).json({ error: err?.message || "שגיאה בעדכון מצב הסנכרון" });
+      res.status(500).json({ error: err?.message || t("errors.syncToggleFailed") });
     }
   });
 
@@ -88,7 +89,7 @@ export function registerSyncRoutes(app: Express, db: DbClient, syncService: Otza
       const result = await syncService.syncNow();
       res.json({ ok: true, ...result, status: syncService.getStatus() });
     } catch (err: any) {
-      res.status(500).json({ error: err?.message || "שגיאה בביצוע סנכרון", status: syncService.getStatus() });
+      res.status(500).json({ error: err?.message || t("errors.syncRunFailed"), status: syncService.getStatus() });
     }
   });
 
@@ -97,7 +98,7 @@ export function registerSyncRoutes(app: Express, db: DbClient, syncService: Otza
       const result = await syncService.seedAllToCloud();
       res.json({ ok: true, ...result, status: syncService.getStatus() });
     } catch (err: any) {
-      res.status(500).json({ error: err?.message || "שגיאה בהעלאה ראשונית לענן", status: syncService.getStatus() });
+      res.status(500).json({ error: err?.message || t("errors.syncInitialPushFailed"), status: syncService.getStatus() });
     }
   });
 
@@ -106,7 +107,7 @@ export function registerSyncRoutes(app: Express, db: DbClient, syncService: Otza
       const result = await syncService.runRelayTest();
       res.json({ ...result, status: syncService.getStatus() });
     } catch (err: any) {
-      res.status(500).json({ error: err?.message || "שגיאה בבדיקת תור הענן", status: syncService.getStatus() });
+      res.status(500).json({ error: err?.message || t("errors.syncQueueCheckFailed"), status: syncService.getStatus() });
     }
   });
 
@@ -115,7 +116,7 @@ export function registerSyncRoutes(app: Express, db: DbClient, syncService: Otza
     const oldBarcode = String(req.params.barcode || "").trim();
     const book = db.get<Record<string, unknown>>("SELECT * FROM books WHERE barcode = ? AND deleted_at IS NULL", oldBarcode);
     if (!book) {
-      return res.status(404).json({ error: "הספר לא נמצא" });
+      return res.status(404).json({ error: t("errors.bookNotFound") });
     }
 
     const prefix = db.get<{ value: string }>("SELECT value FROM settings WHERE key = 'barcode_prefix'")?.value ?? "";
@@ -179,7 +180,7 @@ export function registerSyncRoutes(app: Express, db: DbClient, syncService: Otza
       const result = await exportMobilePairingQr(db);
       res.json(result);
     } catch (err: any) {
-      res.status(400).json({ error: err?.message || "שגיאה ביצירת ברקוד לחיבור הטלפון" });
+      res.status(400).json({ error: err?.message || t("errors.qrCreateFailed") });
     }
   });
 
@@ -189,7 +190,7 @@ export function registerSyncRoutes(app: Express, db: DbClient, syncService: Otza
       const result = exportEncryptedSetupBundle(db, passcode);
       res.json(result);
     } catch (err: any) {
-      res.status(400).json({ error: err?.message || "שגיאה ביצירת חבילת ההעברה" });
+      res.status(400).json({ error: err?.message || t("errors.transferExportFailed") });
     }
   });
 
@@ -206,7 +207,7 @@ export function registerSyncRoutes(app: Express, db: DbClient, syncService: Otza
       });
       res.json(result);
     } catch (err: any) {
-      res.status(400).json({ error: err?.message || "שגיאה בייבוא חבילת ההעברה" });
+      res.status(400).json({ error: err?.message || t("errors.transferImportFailed") });
     }
   });
 
@@ -215,7 +216,7 @@ export function registerSyncRoutes(app: Express, db: DbClient, syncService: Otza
       const result = await syncService.cleanupDemoAndDuplicates();
       res.json(result);
     } catch (err: any) {
-      res.status(500).json({ error: err?.message || "שגיאה בניקוי ספרי הדמו והכפילויות" });
+      res.status(500).json({ error: err?.message || t("errors.demoCleanFailed") });
     }
   });
 
@@ -224,7 +225,7 @@ export function registerSyncRoutes(app: Express, db: DbClient, syncService: Otza
       const result = await syncService.getAiKeysBackupStatus();
       res.json(result);
     } catch (err: any) {
-      res.status(500).json({ error: err?.message || "שגיאה בבדיקת גיבוי מפתחות ה-AI בענן" });
+      res.status(500).json({ error: err?.message || t("errors.aiBackupCheckFailed") });
     }
   });
 
@@ -234,7 +235,7 @@ export function registerSyncRoutes(app: Express, db: DbClient, syncService: Otza
       const result = await syncService.backupAiKeysToCloud(passcode);
       res.json(result);
     } catch (err: any) {
-      res.status(400).json({ error: err?.message || "שגיאה בגיבוי מפתחות ה-AI לענן" });
+      res.status(400).json({ error: err?.message || t("errors.aiBackupUploadFailed") });
     }
   });
 
@@ -244,7 +245,7 @@ export function registerSyncRoutes(app: Express, db: DbClient, syncService: Otza
       const result = await syncService.restoreAiKeysFromCloud(passcode);
       res.json(result);
     } catch (err: any) {
-      res.status(400).json({ error: err?.message || "שגיאה בשחזור מפתחות ה-AI מהענן" });
+      res.status(400).json({ error: err?.message || t("errors.aiBackupRestoreFailed") });
     }
   });
 
@@ -259,7 +260,7 @@ export function registerSyncRoutes(app: Express, db: DbClient, syncService: Otza
       });
       res.json(result);
     } catch (err: any) {
-      res.status(400).json({ error: err?.message || "שגיאה באיפוס מאגר הספרים" });
+      res.status(400).json({ error: err?.message || t("errors.resetLibraryFailed") });
     }
   });
 }

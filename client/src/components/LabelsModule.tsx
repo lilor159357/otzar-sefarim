@@ -11,6 +11,7 @@ import {
   X,
 } from "lucide-react";
 import type { BookRow } from "../types.ts";
+import { useStrings } from "../lib/stringsContext.tsx";
 
 interface LabelsModuleProps {
   books: BookRow[];
@@ -29,6 +30,7 @@ interface LabelQueueRow {
 }
 
 export const LabelsModule: React.FC<LabelsModuleProps> = ({ books, settings, onReload }) => {
+  const { t } = useStrings();
   const [queue, setQueue] = useState<LabelQueueRow[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [startPosition, setStartPosition] = useState<number>(1);
@@ -165,7 +167,7 @@ export const LabelsModule: React.FC<LabelsModuleProps> = ({ books, settings, onR
       setPdfUrl(url);
       setPdfBarcodes(selectedBarcodes);
     } catch (err: any) {
-      setError(err?.message || "שגיאה ביצירת ה-PDF");
+      setError(err?.message || t("errors.pdfGenerateFailed"));
     } finally {
       setGenerating(false);
     }
@@ -183,9 +185,9 @@ export const LabelsModule: React.FC<LabelsModuleProps> = ({ books, settings, onR
     <div className="space-y-5 max-w-6xl">
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight">הדפסת מדבקות ברקוד (PDF A4)</h1>
+          <h1 className="text-2xl font-bold tracking-tight">{t("labels.pageTitle")}</h1>
           <p className="text-sm text-[var(--otzar-text-muted)]">
-            מנוע ברקודי Code 128 חדים בדיוק מילימטרי לדף מדבקות A4, כולל התחלה ממדבקה מספר X לחיסכון בדפים.
+            {t("labels.pageSubtitle")}
           </p>
         </div>
 
@@ -196,7 +198,7 @@ export const LabelsModule: React.FC<LabelsModuleProps> = ({ books, settings, onR
             className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-semibold border border-[var(--otzar-border-muted)] hover:bg-[var(--otzar-surface-alt)] cursor-pointer"
           >
             <Plus className="w-3.5 h-3.5" />
-            הוסף ספר קיים להדפסה חוזרת
+            {t("labels.addExistingButton")}
           </button>
 
           <button
@@ -206,7 +208,7 @@ export const LabelsModule: React.FC<LabelsModuleProps> = ({ books, settings, onR
             className="inline-flex items-center gap-2 px-5 py-2 rounded-lg text-sm font-bold text-white bg-[var(--otzar-accent)] hover:bg-[var(--otzar-accent-hover)] cursor-pointer disabled:opacity-40"
           >
             <Printer className="w-4 h-4" />
-            {generating ? "מפיק PDF..." : `הפק PDF למדפסת (${selectedBarcodes.length})`}
+            {generating ? t("labels.generatingPdf") : t("labels.generatePdfCount", { count: selectedBarcodes.length })}
           </button>
         </div>
       </div>

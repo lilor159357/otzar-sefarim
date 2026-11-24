@@ -21,6 +21,7 @@ import {
   VolumeX,
 } from "lucide-react";
 import type { BorrowerRow, LoanRow } from "../types.ts";
+import { useStrings } from "../lib/stringsContext.tsx";
 
 interface CirculationModuleProps {
   defaultLoanDays: number;
@@ -118,6 +119,7 @@ function playFeedbackTone(kind: "success" | "warn" | "error", muted: boolean) {
 }
 
 export const CirculationModule: React.FC<CirculationModuleProps> = ({ defaultLoanDays, isAdmin = false, onReload }) => {
+  const { t } = useStrings();
   const [subTab, setSubTab] = useState<CircSubTab>("checkout");
   const [muted, setMuted] = useState(false);
 
@@ -551,28 +553,28 @@ export const CirculationModule: React.FC<CirculationModuleProps> = ({ defaultLoa
       {/* Top Bar + Summary Metrics */}
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight">השאלה, החזרה וניהול שואלים</h1>
+          <h1 className="text-2xl font-bold tracking-tight">{t("circulation.pageTitle")}</h1>
           <p className="text-sm text-[var(--otzar-text-muted)]">
-            תמיכה מלאה בסורק ברקוד USB (HID), התראות עיון בלבד, מעקב איחורים וייבוא מאקסל/CSV.
+            {t("circulation.pageSubtitle")}
           </p>
         </div>
 
         <div className="flex items-center gap-4">
           <div className="flex items-center gap-5 px-4 py-2 rounded-xl border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] text-sm">
             <div>
-              <span className="text-[var(--otzar-text-muted)]">מושאלים כעת: </span>
+              <span className="text-[var(--otzar-text-muted)]">{t("circulation.metricBorrowedNow")} </span>
               <span className="font-bold tabular-nums">{activeLoansCount}</span>
             </div>
             <div className="w-px h-4 bg-[var(--otzar-border-muted)]" />
             <div>
-              <span className="text-[var(--otzar-text-muted)]">איחורים: </span>
+              <span className="text-[var(--otzar-text-muted)]">{t("circulation.metricOverdue")} </span>
               <span className={`font-bold tabular-nums ${overdueLoansCount > 0 ? "text-red-600" : ""}`}>
                 {overdueLoansCount}
               </span>
             </div>
             <div className="w-px h-4 bg-[var(--otzar-border-muted)]" />
             <div>
-              <span className="text-[var(--otzar-text-muted)]">שואלים: </span>
+              <span className="text-[var(--otzar-text-muted)]">{t("circulation.metricBorrowers")} </span>
               <span className="font-bold tabular-nums">{borrowers.length}</span>
             </div>
           </div>
@@ -580,7 +582,7 @@ export const CirculationModule: React.FC<CirculationModuleProps> = ({ defaultLoa
           <button
             type="button"
             onClick={() => setMuted((m) => !m)}
-            title={muted ? "צלילי סריקה מושתקים" : "צלילי סריקה פעילים"}
+            title={muted ? t("circulation.soundMutedTitle") : t("circulation.soundActiveTitle")}
             className="p-2.5 rounded-lg border border-[var(--otzar-border-muted)] hover:bg-[var(--otzar-surface-alt)] cursor-pointer text-[var(--otzar-text-muted)]"
           >
             {muted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4 text-[var(--otzar-accent)]" />}
@@ -591,10 +593,10 @@ export const CirculationModule: React.FC<CirculationModuleProps> = ({ defaultLoa
       {/* Navigation Sub-tabs */}
       <div className="flex flex-wrap gap-1 p-1 rounded-xl bg-[var(--otzar-surface-alt)] border border-[var(--otzar-border-muted)] w-fit">
         {[
-          { id: "checkout", label: "השאלה מהירה", icon: ArrowLeftRight },
-          { id: "return", label: "החזרה מהירה", icon: RotateCcw },
-          { id: "active", label: `מושאלים ומאחרים (${activeLoansCount})`, icon: Clock },
-          ...(isAdmin ? [{ id: "borrowers", label: "ניהול שואלים וייבוא", icon: Users }] : []),
+          { id: "checkout", label: t("circulation.checkoutSubTab"), icon: ArrowLeftRight },
+          { id: "return", label: t("circulation.returnSubTab"), icon: RotateCcw },
+          { id: "active", label: t("circulation.activeSubTabCount", { count: activeLoansCount }), icon: Clock },
+          ...(isAdmin ? [{ id: "borrowers", label: t("circulation.borrowersSubTab"), icon: Users }] : []),
         ].map((t) => {
           const Icon = t.icon;
           const active = subTab === t.id;

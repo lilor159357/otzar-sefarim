@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { Plus, Save, RotateCw, Trash2, CheckCircle2, BarChart3, X, RefreshCw } from "lucide-react";
 import type { CabinetRow, MapEntrance, ShelvingReport } from "../types.ts";
 import { DEFAULT_ENTRANCE, EntranceMarker, MAP_HEIGHT, MAP_WIDTH } from "./LibraryMap2D.tsx";
+import { useStrings } from "../lib/stringsContext.tsx";
 
 interface MapEditorModuleProps {
   cabinets: CabinetRow[];
@@ -47,6 +48,7 @@ function getHandleCursor(dir: ResizeDir, rotation: number): string {
 }
 
 export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entrance, onReload }) => {
+  const { t } = useStrings();
   const [draftCabinets, setDraftCabinets] = useState<CabinetRow[]>(cabinets);
   const [draftEntrance, setDraftEntrance] = useState<MapEntrance>(entrance || DEFAULT_ENTRANCE);
   const [selectedId, setSelectedId] = useState<number | null>(cabinets[0]?.id ?? null);
@@ -275,7 +277,7 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
       if (!cabRes.ok || !setRes.ok) {
         throw new Error("שגיאה בשמירת המפה (" + cabRes.status + ")");
       }
-      setNotice("סידור המפה, מידות הארונות ומיקום הכניסה נשמרו בהצלחה.");
+      setNotice(t("map.saveMapSuccess"));
       await onReload();
     } catch (err: any) {
       setError(err?.message || "שגיאה בשמירה");
@@ -330,9 +332,9 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
     <div className="space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
-          <h2 className="text-xl font-bold">עורך מפת הספרייה</h2>
+          <h2 className="text-xl font-bold">{t("map.editMapTitle")}</h2>
           <p className="text-sm text-[var(--otzar-text-muted)]">
-            גרור ארונות, שנה אורך ורוחב ישירות מגבולות הארון או מהפינות, והזז את הכניסה לכל קיר.
+            {t("map.pageSubtitle")}
           </p>
         </div>
 
@@ -355,7 +357,7 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
             className="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold text-white bg-[var(--otzar-accent)] hover:bg-[var(--otzar-accent-hover)] cursor-pointer disabled:opacity-50 whitespace-nowrap"
           >
             <Save className="w-4 h-4" />
-            {saving ? "שומר..." : "שמור סידור מפה"}
+            {saving ? t("common.saving") : "שמור סידור מפה"}
           </button>
         </div>
       </div>

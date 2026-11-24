@@ -3,6 +3,7 @@ import * as XLSX from "xlsx";
 import type { DbClient } from "../db/adapter.ts";
 import { requireAdmin } from "../auth/adminAuth.ts";
 import { enqueueSyncOutbox, newSyncId } from "../db/schema.ts";
+import { fallbackT, type StringsTranslateFn } from "../../shared/strings/engine.ts";
 
 function normalizeHeader(h: string): string {
   return String(h || "")
@@ -108,7 +109,7 @@ function extractBorrowerFields(rawRow: Record<string, unknown>) {
   };
 }
 
-export function registerCirculationRoutes(app: Express, db: DbClient) {
+export function registerCirculationRoutes(app: Express, db: DbClient, t: StringsTranslateFn = fallbackT) {
   // List borrowers with active/overdue loan counters
   app.get("/api/borrowers", (req, res) => {
     const q = typeof req.query.q === "string" ? normalizeText(req.query.q) : "";
@@ -134,7 +135,7 @@ export function registerCirculationRoutes(app: Express, db: DbClient) {
   app.post("/api/borrowers", requireAdmin, (req, res) => {
     const { full_name, shiur_group = "", phone = "", notes = "" } = req.body || {};
     if (!full_name || !String(full_name).trim()) {
-      return res.status(400).json({ error: "יש להזין שם מלא לשואל" });
+      return res.status(400).json({ error: t("errors.borrowerNameRequired") });
     }
     const now = new Date().toISOString();
     const syncId = newSyncId();
@@ -159,7 +160,7 @@ export function registerCirculationRoutes(app: Express, db: DbClient) {
   app.put("/api/borrowers/:id", requireAdmin, (req, res) => {
     const id = Number(req.params.id);
     const existing = db.get<Record<string, unknown>>("SELECT * FROM borrowers WHERE id = ? AND deleted_at IS NULL", id);
-    if (!existing) return res.status(404).json({ error: "השואל לא נמצא" });
+    if (!existing) return res.status(404).json({ error: t("errors.borrowerNotFound") });
     const {
       full_name = existing.full_name,
       shiur_group = existing.shiur_group,
@@ -167,7 +168,7 @@ export function registerCirculationRoutes(app: Express, db: DbClient) {
       notes = existing.notes,
     } = req.body || {};
     if (!String(full_name).trim()) {
-      return res.status(400).json({ error: "שם השואל אינו יכול להיות ריק" });
+      return res.status(400).json({ error: t("errors.borrowerNameEmpty") });
     }
     const now = new Date().toISOString();
     const syncId = String(existing.sync_id || "") || newSyncId();
@@ -189,13 +190,13 @@ export function registerCirculationRoutes(app: Express, db: DbClient) {
   app.delete("/api/borrowers/:id", requireAdmin, (req, res) => {
     const id = Number(req.params.id);
     const existing = db.get<{ id: number; sync_id?: string }>("SELECT id, sync_id FROM borrowers WHERE id = ? AND deleted_at IS NULL", id);
-    if (!existing) return res.status(404).json({ error: "השואל לא נמצא" });
+    if (!existing) return res.status(404).json({ error: t("errors.borrowerNotFound") });
     const active = db.get<{ c: number }>(
       "SELECT COUNT(*) AS c FROM loans WHERE borrower_id = ? AND return_date IS NULL AND deleted_at IS NULL",
       id
     );
     if ((active?.c ?? 0) > 0) {
-      return res.status(400).json({ error: "לא ניתן למחוק שואל שברשותו ספרים מושאלים כעת. החזר את הספרים תחילה." });
+      return res.status(400).json({ error: t("errors.borrowerHasActiveLoans") });
     }
     const now = new Date().toISOString();
     db.transaction(() => {
@@ -211,7 +212,7 @@ export function registerCirculationRoutes(app: Express, db: DbClient) {
   app.post("/api/borrowers/import/preview", requireAdmin, (req, res) => {
     const { filename = "", contentBase64 = "" } = req.body || {};
     if (!contentBase64) {
-      return res.status(400).json({ error: "לא התקבל קובץ לייבוא" });
+      return res.status(400).json({ error: t("errors.importFileMissing") });
     }
     try {
       const buf = Buffer.from(String(contentBase64), "base64");
@@ -222,7 +223,7 @@ export function registerCirculationRoutes(app: Express, db: DbClient) {
 
       const firstSheetName = workbook.SheetNames[0];
       if (!firstSheetName) {
-        return res.status(400).json({ error: "הקובץ ריק ואינו מכיל גיליונות" });
+        return res.status(400).json({ error: t("errors.importFileEmpty") });
       }
       const sheet = workbook.Sheets[firstSheetName];
       const rawRows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: "" });
@@ -264,7 +265,7 @@ export function registerCirculationRoutes(app: Express, db: DbClient) {
         rows: parsed.slice(0, 500),
       });
     } catch (err: any) {
-      res.status(400).json({ error: "שגיאה בקריאת הקובץ: " + (err?.message || "פורמט לא נתמך") });
+      res.status(400).json({ error: t("errors.importReadFailed", { detail: err?.message || "פורמט לא נתמך" }) });
     }
   });
 
@@ -272,7 +273,7 @@ export function registerCirculationRoutes(app: Express, db: DbClient) {
     const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
     const skipDuplicates = req.body?.skipDuplicates !== false;
     if (rows.length === 0) {
-      return res.status(400).json({ error: "אין שורות לייבוא" });
+      return res.status(400).json({ error: t("errors.importNoRows") });
     }
     const now = new Date().toISOString();
     const existing = db.all<{ full_name: string; shiur_group: string }>(
@@ -339,7 +340,7 @@ export function registerCirculationRoutes(app: Express, db: DbClient) {
       barcode
     );
     if (!book) {
-      return res.status(404).json({ error: `ברקוד "${barcode}" לא נמצא במאגר הספרים` });
+      return res.status(404).json({ error: t("errors.barcodeNotFound", { barcode }) });
     }
     const activeLoan = db.get<Record<string, unknown>>(
       `SELECT l.*, br.full_name AS borrower_name, br.shiur_group AS borrower_shiur
@@ -411,10 +412,10 @@ export function registerCirculationRoutes(app: Express, db: DbClient) {
     const forceReferenceOverride = Boolean(req.body?.forceReferenceOverride);
 
     if (!borrowerId) {
-      return res.status(400).json({ error: "יש לבחור שואל לפני ביצוע ההשאלה" });
+      return res.status(400).json({ error: t("errors.borrowerSelectRequired") });
     }
     if (barcodes.length === 0) {
-      return res.status(400).json({ error: "יש לסרוק או להזין לפחות ברקוד ספר אחד" });
+      return res.status(400).json({ error: t("errors.scanAtLeastOneBook") });
     }
 
     const borrower = db.get<{ id: number; full_name: string; sync_id?: string }>(
@@ -422,7 +423,7 @@ export function registerCirculationRoutes(app: Express, db: DbClient) {
       borrowerId
     );
     if (!borrower) {
-      return res.status(404).json({ error: "השואל הנבחר לא נמצא במערכת" });
+      return res.status(404).json({ error: t("errors.selectedBorrowerNotFound") });
     }
 
     const defaultDaysSetting = db.get<{ value: string }>("SELECT value FROM settings WHERE key = 'default_loan_days'")?.value ?? "14";
@@ -437,7 +438,7 @@ export function registerCirculationRoutes(app: Express, db: DbClient) {
         code
       );
       if (!book) {
-        return res.status(404).json({ error: `ברקוד "${code}" לא נמצא במאגר הספרים` });
+        return res.status(404).json({ error: t("errors.barcodeNotFound", { barcode: code }) });
       }
       const openLoan = db.get<{ borrower_name: string }>(
         `SELECT br.full_name AS borrower_name
@@ -447,10 +448,10 @@ export function registerCirculationRoutes(app: Express, db: DbClient) {
       );
       if (openLoan || book.status === "borrowed") {
         const who = openLoan ? ` ל${openLoan.borrower_name}` : "";
-        return res.status(409).json({ error: `הספר "${book.title}" (ברקוד ${code}) כבר מושאל כעת${who}` });
+        return res.status(409).json({ error: t("errors.bookAlreadyLoaned", { title: book.title, barcode: code, borrowerSuffix: who }) });
       }
       if (book.status === "lost") {
-        return res.status(400).json({ error: `הספר "${book.title}" (ברקוד ${code}) מסומן כאבוד/חסר במערכת` });
+        return res.status(400).json({ error: t("errors.bookMarkedLost", { title: book.title, barcode: code }) });
       }
       if (book.status === "reference_only" && !forceReferenceOverride) {
         referenceBooks.push({ barcode: book.barcode, title: book.title });
@@ -460,7 +461,7 @@ export function registerCirculationRoutes(app: Express, db: DbClient) {
 
     if (referenceBooks.length > 0) {
       return res.status(409).json({
-        error: `הספר "${referenceBooks[0].title}" מוגדר "לעיון בלבד". האם לאשר השאלה חריגה?`,
+        error: t("errors.bookReferenceOnlyConfirm", { title: referenceBooks[0].title }),
         requiresConfirmation: true,
         referenceBooks,
       });
@@ -522,7 +523,7 @@ export function registerCirculationRoutes(app: Express, db: DbClient) {
   app.post("/api/loans/return", (req, res) => {
     const barcode = String(req.body?.barcode || "").trim();
     if (!barcode) {
-      return res.status(400).json({ error: "יש לסרוק או להזין ברקוד להחזרה" });
+      return res.status(400).json({ error: t("errors.returnBarcodeRequired") });
     }
 
     const book = db.get<Record<string, unknown>>(
@@ -533,7 +534,7 @@ export function registerCirculationRoutes(app: Express, db: DbClient) {
       barcode
     );
     if (!book) {
-      return res.status(404).json({ error: `ברקוד "${barcode}" לא נמצא במאגר הספרים` });
+      return res.status(404).json({ error: t("errors.barcodeNotFound", { barcode }) });
     }
 
     const openLoan = db.get<{
@@ -626,7 +627,7 @@ export function registerCirculationRoutes(app: Express, db: DbClient) {
     }
 
     return res.status(400).json({
-      error: `הספר "${book.title}" (ברקוד ${barcode}) אינו רשום כמושאל כרגע`,
+      error: t("errors.bookNotLoaned", { title: String(book.title || ""), barcode }),
     });
   });
 
@@ -644,7 +645,7 @@ export function registerCirculationRoutes(app: Express, db: DbClient) {
       sync_id?: string;
     }>("SELECT id, book_barcode, borrower_id, loan_date, due_date, return_date, sync_id FROM loans WHERE id = ? AND deleted_at IS NULL", id);
     if (!loan || loan.return_date) {
-      return res.status(404).json({ error: "השאלה פתוחה לא נמצאה" });
+      return res.status(404).json({ error: t("errors.openLoanNotFound") });
     }
     const baseMs = Math.max(Date.now(), new Date(loan.due_date).getTime());
     const newDue = new Date(baseMs + days * 86400000).toISOString();

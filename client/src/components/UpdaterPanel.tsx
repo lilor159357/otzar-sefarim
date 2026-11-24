@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { RefreshCw, CheckCircle2, AlertCircle, DownloadCloud, ShieldCheck, KeyRound, RotateCcw } from "lucide-react";
+import { useStrings } from "../lib/stringsContext.tsx";
 
 interface UpdateCommit {
   hash: string;
@@ -71,6 +72,7 @@ function formatSpeed(bytesPerSec: number): string {
 }
 
 export const UpdaterPanel: React.FC<UpdaterPanelProps> = ({ onUpdateStatusChange }) => {
+  const { t } = useStrings();
   const [status, setStatus] = useState<UpdaterStatus | null>(null);
   const [remoteInput, setRemoteInput] = useState("");
   const [releaseTokenInput, setReleaseTokenInput] = useState("");
@@ -148,7 +150,7 @@ export const UpdaterPanel: React.FC<UpdaterPanelProps> = ({ onUpdateStatusChange
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        setMsg({ type: "err", text: data.error || "שגיאה בשמירת הגדרות עדכון" });
+        setMsg({ type: "err", text: data.error || t("errors.updaterSettingsSaveFailed") });
         return;
       }
       if (releaseTokenInput.trim()) {
@@ -188,7 +190,7 @@ export const UpdaterPanel: React.FC<UpdaterPanelProps> = ({ onUpdateStatusChange
       const res = await fetch("/api/updater/check", { method: "POST" });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        setMsg({ type: "err", text: data.error || "שגיאה בבדיקת עדכונים" });
+        setMsg({ type: "err", text: data.error || t("errors.updaterCheckFailed") });
         return;
       }
       await loadStatus();
@@ -201,7 +203,7 @@ export const UpdaterPanel: React.FC<UpdaterPanelProps> = ({ onUpdateStatusChange
           setMsg({ type: "info", text: `נמצא עדכון חדש (${data.lastCheck.behindCount} שינויים ממתינים להתקנה).` });
         }
       } else {
-        setMsg({ type: "ok", text: "התוכנה מעודכנת לגרסה האחרונה." });
+        setMsg({ type: "ok", text: t("updater.upToDate", { version: status?.version || "1.0.0" }) });
       }
     } catch {
       setMsg({ type: "err", text: "שגיאת תקשורת בבדיקת העדכונים" });
@@ -249,7 +251,7 @@ export const UpdaterPanel: React.FC<UpdaterPanelProps> = ({ onUpdateStatusChange
       stopDownloadPolling();
       if (!res.ok) {
         setApplying(false);
-        setMsg({ type: "err", text: data.error || "שגיאה בהתקנת העדכון" });
+        setMsg({ type: "err", text: data.error || t("errors.updaterDownloadFailed") });
         return;
       }
       if (isDesktop) {
@@ -277,13 +279,13 @@ export const UpdaterPanel: React.FC<UpdaterPanelProps> = ({ onUpdateStatusChange
 
   const handleInstallNow = async () => {
     setInstallingNow(true);
-    setMsg({ type: "info", text: "מגבה את מסד הנתונים, מתקין את העדכון בשקט ופותח מחדש..." });
+    setMsg({ type: "info", text: t("updater.preparingInstallToast") });
     try {
       const res = await fetch("/api/updater/install-now", { method: "POST" });
       if (!res.ok) {
         const d = await res.json().catch(() => ({}));
         setInstallingNow(false);
-        setMsg({ type: "err", text: d.error || "שגיאה בהחלת העדכון" });
+        setMsg({ type: "err", text: d.error || t("errors.updaterApplyFailed") });
       }
     } catch {
       setInstallingNow(false);
@@ -294,7 +296,7 @@ export const UpdaterPanel: React.FC<UpdaterPanelProps> = ({ onUpdateStatusChange
   if (loading) {
     return (
       <div className="p-5 rounded-xl border border-[var(--otzar-border-muted)] text-sm text-[var(--otzar-text-muted)]">
-        טוען פרטי גרסה ועדכונים...
+        {t("updater.loadingVersionInfo")}
       </div>
     );
   }
@@ -311,7 +313,7 @@ export const UpdaterPanel: React.FC<UpdaterPanelProps> = ({ onUpdateStatusChange
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2 font-semibold text-base">
           <RefreshCw className="w-4 h-4 text-[var(--otzar-accent)]" />
-          <span>עדכוני תוכנה אוטומטיים וחיבור ל-GitHub</span>
+          <span>{t("updater.panelTitle")}</span>
         </div>
         <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--otzar-text-muted)]">
           <span className="font-mono tabular-nums text-[var(--otzar-text)]">
@@ -475,7 +477,7 @@ export const UpdaterPanel: React.FC<UpdaterPanelProps> = ({ onUpdateStatusChange
           className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium border border-[var(--otzar-border-muted)] hover:bg-[var(--otzar-surface)] cursor-pointer disabled:opacity-50 whitespace-nowrap shrink-0"
         >
           <RefreshCw className={`w-4 h-4 ${checking ? "animate-spin" : ""}`} />
-          {checking ? "בודק עדכונים..." : "בדוק עדכונים כעת"}
+          {checking ? t("common.loading") : t("updater.checkNow")}
         </button>
 
         {isElectron && isDownloadedDesktop ? (

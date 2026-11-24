@@ -19,6 +19,7 @@
   "include": [
     "client/src",
     "server",
-    "electron"
+    "electron",
+    "shared"
   ]
 }

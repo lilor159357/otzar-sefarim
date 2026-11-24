@@ -3,6 +3,7 @@ import { Search, MapPin, Plus, CheckCircle2, X, BookOpen, Pencil, Barcode } from
 import type { BookRow, CabinetRow, MapEntrance } from "../types.ts";
 import { STATUS_LABELS } from "../types.ts";
 import { LocationModal } from "./LocationModal.tsx";
+import { useStrings } from "../lib/stringsContext.tsx";
 
 interface SearchModuleProps {
   books: BookRow[];
@@ -39,6 +40,7 @@ export const SearchModule: React.FC<SearchModuleProps> = ({
   isAdmin = false,
   onReload,
 }) => {
+  const { t } = useStrings();
   const [selectedBarcode, setSelectedBarcode] = useState<string | null>(null);
   const [openInEditMode, setOpenInEditMode] = useState(false);
   const selectedBook = books.find((b) => b.barcode === selectedBarcode) || null;
@@ -116,9 +118,9 @@ export const SearchModule: React.FC<SearchModuleProps> = ({
     <div className="space-y-5 max-w-6xl">
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight">חיפוש ואיתור ספרים באוצר הספרים</h1>
+          <h1 className="text-2xl font-bold tracking-tight">{t("search.pageTitle")}</h1>
           <p className="text-sm text-[var(--otzar-text-muted)] mt-0.5">
-            תומך בראשי תיבות תורניים (שו״ע, רמב״ם, משנ״ב, ש״ס), כתיב מלא/חסר, סריקת ברקוד ואיתור במפה דו-ממדית.
+            {t("search.pageSubtitle")}
           </p>
         </div>
 
@@ -129,7 +131,7 @@ export const SearchModule: React.FC<SearchModuleProps> = ({
             className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-semibold border border-[var(--otzar-border)] bg-[var(--otzar-surface)] text-[var(--otzar-accent)] hover:bg-[var(--otzar-accent-soft)] cursor-pointer whitespace-nowrap shrink-0"
           >
             {showQuickAdd ? <X className="w-3.5 h-3.5" /> : <Plus className="w-3.5 h-3.5" />}
-            {showQuickAdd ? "סגור הוספה מהירה" : "הוספת ספר מהירה"}
+            {showQuickAdd ? t("search.quickAddClose") : t("search.quickAddOpen")}
           </button>
         )}
       </div>
@@ -145,7 +147,7 @@ export const SearchModule: React.FC<SearchModuleProps> = ({
             value={searchQuery}
             onChange={(e) => onSearchChange(e.target.value)}
             onKeyDown={handleSearchKeyDown}
-            placeholder="חפש לפי שם ספר, מחבר, ר״ת תורניים (שו״ע, משנ״ב, רמב״ם), נושא, כרך או סרוק ברקוד..."
+            placeholder={t("search.placeholder")}
             className="w-full pr-11 pl-10 py-3 text-base rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] focus:outline-none focus:border-[var(--otzar-accent)]"
           />
           {searchQuery && (
@@ -157,7 +159,7 @@ export const SearchModule: React.FC<SearchModuleProps> = ({
               }}
               className="absolute left-3 top-1/2 -translate-y-1/2 text-xs text-[var(--otzar-text-muted)] hover:text-[var(--otzar-text)] cursor-pointer"
             >
-              נקה
+              {t("search.clearSearch")}
             </button>
           )}
         </div>
@@ -166,10 +168,10 @@ export const SearchModule: React.FC<SearchModuleProps> = ({
           {/* Status segmented filter */}
           <div className="flex items-center gap-1 p-1 rounded-lg bg-[var(--otzar-bg)] border border-[var(--otzar-border-muted)]">
             {[
-              { id: "all", label: "הכל" },
-              { id: "available", label: "זמין בלבד" },
-              { id: "borrowed", label: "מושאל" },
-              { id: "reference_only", label: "לעיון בלבד" },
+              { id: "all", label: t("search.filterAll") },
+              { id: "available", label: t("search.filterAvailable") },
+              { id: "borrowed", label: t("search.filterBorrowed") },
+              { id: "reference_only", label: t("search.filterReferenceOnly") },
             ].map((st) => (
               <button
                 key={st.id}
@@ -198,7 +200,7 @@ export const SearchModule: React.FC<SearchModuleProps> = ({
                 }`}
               >
                 <BookOpen className="w-3.5 h-3.5" />
-                חיפוש לפי הקשר ומשמעות
+                {t("search.semanticButton")}
               </button>
             )}
             <select
@@ -206,7 +208,7 @@ export const SearchModule: React.FC<SearchModuleProps> = ({
               onChange={(e) => onCategoryFilterChange(e.target.value)}
               className="px-3 py-1.5 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] text-xs"
             >
-              <option value="all">כל הקטגוריות</option>
+              <option value="all">{t("search.allCategories")}</option>
               {categories.map((cat) => (
                 <option key={cat} value={cat}>
                   {cat}
@@ -215,7 +217,7 @@ export const SearchModule: React.FC<SearchModuleProps> = ({
             </select>
 
             <span className="text-[var(--otzar-text-muted)] tabular-nums">
-              מציג <strong className="text-[var(--otzar-text)]">{books.length}</strong> ספרים
+              {t("search.showingCount", { count: books.length })}
             </span>
           </div>
         </div>

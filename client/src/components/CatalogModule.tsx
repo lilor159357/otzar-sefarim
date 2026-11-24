@@ -25,6 +25,7 @@ import { FORMAT_SIZE_OPTIONS, type AiQueueItem, type CabinetRow } from "../types
 import { getAdminToken } from "../lib/adminSession.ts";
 import { AutocompleteInput } from "./AutocompleteInput.tsx";
 import { suggestNextVolume } from "../lib/torahUtils.ts";
+import { useStrings } from "../lib/stringsContext.tsx";
 
 interface CatalogModuleProps {
   cabinets: CabinetRow[];
@@ -127,6 +128,7 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
   hasApiKey,
   onReload,
 }) => {
+  const { t } = useStrings();
   const [subTab, setSubTab] = useState<CatalogSubTab>("manual");
 
   // Manual quick catalog form state
@@ -442,7 +444,7 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
 
   const handleSaveManual = async (keepForNextVolume: boolean) => {
     if (!title.trim()) {
-      setManualError("יש להזין שם ספר");
+      setManualError(t("errors.bookTitleRequired"));
       return;
     }
     setSavingManual(true);
@@ -848,14 +850,14 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
     <div className="space-y-5 max-w-6xl">
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight">קטלוג והוספת ספרים</h1>
+          <h1 className="text-2xl font-bold tracking-tight">{t("catalog.pageTitle")}</h1>
           <p className="text-sm text-[var(--otzar-text-muted)]">
-            הוספה מהירה עם ברקודים עוקבים לריבוי עותקים, או צילום וסריקת שערי ספרים לפענוח פרטים אוטומטי.
+            {t("catalog.pageSubtitle")}
           </p>
         </div>
 
         <div className="px-3.5 py-2 rounded-xl border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] text-xs flex items-center gap-3">
-          <span className="text-[var(--otzar-text-muted)]">ברקוד רץ הבא:</span>
+          <span className="text-[var(--otzar-text-muted)]">{t("catalog.nextBarcodeLabel")}</span>
           <strong className="font-mono text-sm tabular-nums text-[var(--otzar-accent)]">{previewStart}</strong>
         </div>
       </div>
@@ -863,17 +865,17 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
       {/* Sub-tabs */}
       <div className="flex flex-wrap gap-1 p-1 rounded-xl bg-[var(--otzar-surface-alt)] border border-[var(--otzar-border-muted)] w-fit">
         {[
-          { id: "manual", label: "קטלוג מהיר", icon: Layers },
-          { id: "ai-scan", label: `סריקה וצילום שערים (${queueItems.length})`, icon: Camera },
-          { id: "ai-review", label: `בדיקה ואישור (${doneCount} מוכנים)`, icon: CheckCircle2 },
-        ].map((t) => {
-          const Icon = t.icon;
-          const active = subTab === t.id;
+          { id: "manual", label: t("catalog.quickCatalogTab"), icon: Layers },
+          { id: "ai-scan", label: t("catalog.aiScanTabCount", { count: queueItems.length }), icon: Camera },
+          { id: "ai-review", label: t("catalog.aiReviewTabCount", { count: doneCount }), icon: CheckCircle2 },
+        ].map((tab) => {
+          const Icon = tab.icon;
+          const active = subTab === tab.id;
           return (
             <button
-              key={t.id}
+              key={tab.id}
               type="button"
-              onClick={() => setSubTab(t.id as CatalogSubTab)}
+              onClick={() => setSubTab(tab.id as CatalogSubTab)}
               className={`inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium cursor-pointer transition-colors ${
                 active
                   ? "bg-[var(--otzar-accent)] text-white"
@@ -881,7 +883,7 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
               }`}
             >
               <Icon className="w-4 h-4" />
-              {t.label}
+              {tab.label}
             </button>
           );
         })}
