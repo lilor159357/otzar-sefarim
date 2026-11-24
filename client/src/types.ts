@@ -47,6 +47,8 @@ export interface BookRow {
   title: string;
   author: string;
   volume: string;
+
+  set_name?: string;
   publisher: string;
   pub_year?: string;
   edition?: string;
@@ -112,6 +114,12 @@ export interface AiQueueItem {
   default_cabinet_id?: number | null;
   default_shelf_number?: number | null;
   source_relay_id?: string | null;
+
+  set_batch_id?: string | null;
+
+  is_shelf_set?: boolean;
+
+  spine_extracted?: Array<{ volume: string; copiesCount: number; notes?: string }> | null;
   processing_status: "pending" | "processing" | "done" | "error";
   extracted: {
     title?: string;
@@ -123,6 +131,11 @@ export interface AiQueueItem {
     category?: string;
     notes?: string;
     tags?: string[];
+    set_name?: string;
+    canonical_author?: string;
+    authority_suggestion?: { field: string; suggestion: string; confidence: number } | string;
+    authority_unified?: { field: string; original: string; matched: string } | boolean;
+    volumes?: Array<{ volume: string; copiesCount: number; notes?: string }>;
   } | null;
   error_message: string | null;
   approval_status: "pending" | "approved" | "rejected";

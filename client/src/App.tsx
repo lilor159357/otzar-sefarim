@@ -16,6 +16,10 @@ import {
   KeyRound,
   FileSpreadsheet,
   RefreshCw,
+  Bot,
+  Cloud,
+  Smartphone,
+  SlidersHorizontal,
 } from "lucide-react";
 import type { BookRow, CabinetRow, HealthData, ModuleKey } from "./types.ts";
 import { SearchModule } from "./components/SearchModule.tsx";
@@ -44,6 +48,8 @@ const NAV_ITEMS: Array<{ key: ModuleKey; label: string; icon: React.ComponentTyp
 export default function App() {
   const [activeTab, setActiveTab] = useState<ModuleKey>("search");
   const [adminSubTab, setAdminSubTab] = useState<"settings" | "map">("settings");
+  const [settingsTab, setSettingsTab] = useState<"general" | "ai" | "cloud" | "updates" | "transfer" | "maintenance">("general");
+  const [generalSaveMsg, setGeneralSaveMsg] = useState<string | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [health, setHealth] = useState<HealthData | null>(null);
   const [settings, setSettings] = useState<Record<string, any>>({});
@@ -411,6 +417,7 @@ export default function App() {
                     onClick={() => {
                       setActiveTab("admin");
                       setAdminSubTab("settings");
+                      setSettingsTab("updates");
                     }}
                     className="px-3 py-1.5 rounded-lg text-xs font-semibold text-white bg-[var(--otzar-accent)] hover:bg-[var(--otzar-accent-hover)] cursor-pointer whitespace-nowrap shrink-0"
                   >
@@ -490,240 +497,350 @@ export default function App() {
                   onReload={() => loadAll(searchQuery, statusFilter, categoryFilter)}
                 />
               ) : (
-                <div className="space-y-6 max-w-3xl">
-                  <div className="p-5 rounded-xl border border-[var(--otzar-border-muted)] space-y-4">
-                    <h2 className="font-semibold text-base">ערכת צבעים ומצב תאורה</h2>
-                    <div className="flex flex-wrap gap-2">
-                      {[
-                        { id: "otzar-orange", label: "כתום-לבן (אוצר החוכמה)" },
-                        { id: "classic-blue", label: "כחול קלאסי" },
-                        { id: "forest-green", label: "ירוק זית רגוע" },
-                      ].map((p) => (
+                <div className="space-y-5 max-w-4xl">
+                  {/* 6 Horizontal Sub-Tabs for Display & System Settings */}
+                  <div className="flex flex-wrap items-center gap-1.5 p-1.5 rounded-xl bg-[var(--otzar-surface-alt)] border border-[var(--otzar-border-muted)]">
+                    {[
+                      { id: "general", label: "כללי וספרייה", icon: SlidersHorizontal },
+                      { id: "ai", label: "בינה מלאכותית (AI)", icon: Bot },
+                      { id: "cloud", label: "סנכרון ענן (Firebase)", icon: Cloud },
+                      { id: "updates", label: "עדכוני תוכנה", icon: RefreshCw, badge: updateBehindCount > 0 ? updateBehindCount : 0 },
+                      { id: "transfer", label: "העברה למכשיר אחר", icon: Smartphone },
+                      { id: "maintenance", label: "תחזוקה ואיפוס", icon: ShieldCheck },
+                    ].map((t) => {
+                      const TabIcon = t.icon;
+                      const active = settingsTab === t.id;
+                      return (
                         <button
-                          key={p.id}
+                          key={t.id}
                           type="button"
-                          onClick={() => updateThemeSetting(p.id, settings.theme_mode || "light")}
-                          className={`px-4 py-2 rounded-lg text-sm font-medium border cursor-pointer ${
-                            (settings.theme_preset || "otzar-orange") === p.id
-                              ? "border-[var(--otzar-accent)] bg-[var(--otzar-surface)] text-[var(--otzar-accent)]"
-                              : "border-[var(--otzar-border-muted)]"
+                          onClick={() => setSettingsTab(t.id as typeof settingsTab)}
+                          className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs sm:text-sm font-medium cursor-pointer transition-colors whitespace-nowrap ${
+                            active
+                              ? "bg-[var(--otzar-accent)] text-white shadow-xs"
+                              : "text-[var(--otzar-text-muted)] hover:text-[var(--otzar-text)] hover:bg-[var(--otzar-bg)]"
                           }`}
                         >
-                          {p.label}
+                          <TabIcon className="w-3.5 h-3.5 shrink-0" />
+                          <span>{t.label}</span>
+                          {t.badge ? (
+                            <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-bold tabular-nums ${active ? "bg-white/25 text-white" : "bg-[var(--otzar-accent)] text-white"}`}>
+                              {t.badge}
+                            </span>
+                          ) : null}
                         </button>
-                      ))}
-                    </div>
-
-                    <div className="flex gap-2 pt-2">
-                      {[
-                        { id: "light", label: "מצב בהיר" },
-                        { id: "dark", label: "מצב כהה" },
-                      ].map((m) => (
-                        <button
-                          key={m.id}
-                          type="button"
-                          onClick={() => updateThemeSetting(settings.theme_preset || "otzar-orange", m.id)}
-                          className={`px-4 py-2 rounded-lg text-sm font-medium border cursor-pointer ${
-                            (settings.theme_mode || "light") === m.id
-                              ? "border-[var(--otzar-accent)] bg-[var(--otzar-accent)] text-white"
-                              : "border-[var(--otzar-border-muted)]"
-                          }`}
-                        >
-                          {m.label}
-                        </button>
-                      ))}
-                    </div>
+                      );
+                    })}
                   </div>
 
-                  <div className="p-5 rounded-xl border border-[var(--otzar-border-muted)] space-y-4">
-                    <h2 className="font-semibold text-base">הגדרות כלליות והשאלה</h2>
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
-                      <div>
-                        <label className="block text-xs font-medium mb-1">שם הספרייה / הישיבה</label>
-                        <input
-                          type="text"
-                          value={settings.library_name || ""}
-                          onChange={(e) => setSettings((p) => ({ ...p, library_name: e.target.value }))}
-                          className="w-full px-3 py-2 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)]"
-                        />
+                  {/* TAB 1: GENERAL & LIBRARY */}
+                  {settingsTab === "general" && (
+                    <div className="space-y-5 max-w-3xl">
+                      <div className="p-5 rounded-xl border border-[var(--otzar-border-muted)] space-y-4">
+                        <h2 className="font-semibold text-base">ערכת צבעים ומצב תאורה</h2>
+                        <div className="flex flex-wrap gap-2">
+                          {[
+                            { id: "otzar-orange", label: "כתום-לבן (אוצר החוכמה)" },
+                            { id: "classic-blue", label: "כחול קלאסי" },
+                            { id: "forest-green", label: "ירוק זית רגוע" },
+                          ].map((p) => (
+                            <button
+                              key={p.id}
+                              type="button"
+                              onClick={() => updateThemeSetting(p.id, settings.theme_mode || "light")}
+                              className={`px-4 py-2 rounded-lg text-sm font-medium border cursor-pointer ${
+                                (settings.theme_preset || "otzar-orange") === p.id
+                                  ? "border-[var(--otzar-accent)] bg-[var(--otzar-surface)] text-[var(--otzar-accent)]"
+                                  : "border-[var(--otzar-border-muted)]"
+                              }`}
+                            >
+                              {p.label}
+                            </button>
+                          ))}
+                        </div>
+
+                        <div className="flex gap-2 pt-2">
+                          {[
+                            { id: "light", label: "מצב בהיר" },
+                            { id: "dark", label: "מצב כהה" },
+                          ].map((m) => (
+                            <button
+                              key={m.id}
+                              type="button"
+                              onClick={() => updateThemeSetting(settings.theme_preset || "otzar-orange", m.id)}
+                              className={`px-4 py-2 rounded-lg text-sm font-medium border cursor-pointer ${
+                                (settings.theme_mode || "light") === m.id
+                                  ? "border-[var(--otzar-accent)] bg-[var(--otzar-accent)] text-white"
+                                  : "border-[var(--otzar-border-muted)]"
+                              }`}
+                            >
+                              {m.label}
+                            </button>
+                          ))}
+                        </div>
                       </div>
-                      <div>
-                        <label className="block text-xs font-medium mb-1">ימי השאלה כברירת מחדל</label>
-                        <input
-                          type="number"
-                          min={1}
-                          max={365}
-                          value={settings.default_loan_days || "14"}
-                          onChange={(e) => setSettings((p) => ({ ...p, default_loan_days: e.target.value }))}
-                          className="w-full px-3 py-2 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] tabular-nums"
-                        />
+
+                      <div className="p-5 rounded-xl border border-[var(--otzar-border-muted)] space-y-4">
+                        <h2 className="font-semibold text-base">הגדרות כלליות, השאלה וברקודים</h2>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+                          <div>
+                            <label className="block text-xs font-medium mb-1">שם הספרייה / הישיבה</label>
+                            <input
+                              type="text"
+                              value={settings.library_name || ""}
+                              onChange={(e) => setSettings((p) => ({ ...p, library_name: e.target.value }))}
+                              className="w-full px-3 py-2 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)]"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-xs font-medium mb-1">ימי השאלה כברירת מחדל</label>
+                            <input
+                              type="number"
+                              min={1}
+                              max={365}
+                              value={settings.default_loan_days || "14"}
+                              onChange={(e) => setSettings((p) => ({ ...p, default_loan_days: e.target.value }))}
+                              className="w-full px-3 py-2 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] tabular-nums"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-xs font-medium mb-1">קידומת ברקוד (אופציונלי)</label>
+                            <input
+                              type="text"
+                              dir="ltr"
+                              placeholder="למשל: OTZ-"
+                              value={settings.barcode_prefix ?? ""}
+                              onChange={(e) => setSettings((p) => ({ ...p, barcode_prefix: e.target.value }))}
+                              className="w-full px-3 py-2 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] font-mono"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-xs font-medium mb-1">מונה ברקוד אוטומטי הבא</label>
+                            <input
+                              type="number"
+                              min={1}
+                              dir="ltr"
+                              value={settings.next_barcode || "100001"}
+                              onChange={(e) => setSettings((p) => ({ ...p, next_barcode: e.target.value }))}
+                              className="w-full px-3 py-2 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] font-mono tabular-nums"
+                            />
+                          </div>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-3">
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              setGeneralSaveMsg(null);
+                              await fetch("/api/settings", {
+                                method: "PUT",
+                                headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify({
+                                  library_name: settings.library_name || "אוצר ספרים",
+                                  default_loan_days: String(settings.default_loan_days || "14"),
+                                  barcode_prefix: String(settings.barcode_prefix ?? "").trim(),
+                                  next_barcode: String(settings.next_barcode || "100001").trim(),
+                                }),
+                              });
+                              await loadAll(searchQuery, statusFilter, categoryFilter);
+                              setGeneralSaveMsg("הגדרות הספרייה והברקודים נשמרו בהצלחה.");
+                            }}
+                            className="px-4 py-2 rounded-lg text-sm font-semibold text-white bg-[var(--otzar-accent)] hover:bg-[var(--otzar-accent-hover)] cursor-pointer"
+                          >
+                            שמור הגדרות
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setActiveTab("labels")}
+                            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-medium border border-[var(--otzar-border-muted)] hover:bg-[var(--otzar-surface)] cursor-pointer"
+                          >
+                            <Printer className="w-3.5 h-3.5 text-[var(--otzar-accent)]" />
+                            הגדרות תבניות מדבקות A4 ({Number(settings.a4_template?.rows) || 8}×{Number(settings.a4_template?.cols) || 3})
+                          </button>
+                          {generalSaveMsg && (
+                            <span className="text-xs font-medium text-emerald-700 dark:text-emerald-400">{generalSaveMsg}</span>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Admin PIN Change */}
+                      <div className="p-5 rounded-xl border border-[var(--otzar-border-muted)] space-y-3">
+                        <div className="flex items-center gap-2 font-semibold text-base">
+                          <KeyRound className="w-4 h-4 text-[var(--otzar-accent)]" />
+                          <span>אבטחת מנהל (קוד PIN)</span>
+                        </div>
+                        <p className="text-xs text-[var(--otzar-text-muted)]">
+                          שינוי קוד ה-PIN הנדרש לפתיחת מצב מנהל (לפחות 4 תווים).
+                        </p>
+                        <div className="flex flex-wrap items-center gap-2 text-sm">
+                          <input
+                            type="password"
+                            dir="ltr"
+                            value={newPin}
+                            onChange={(e) => setNewPin(e.target.value)}
+                            placeholder="קוד PIN חדש"
+                            className="px-3 py-2 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] font-mono w-48"
+                          />
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              setPinMsg(null);
+                              if (newPin.trim().length < 4) {
+                                setPinMsg("הקוד חייב להכיל לפחות 4 תווים.");
+                                return;
+                              }
+                              const res = await fetch("/api/admin/pin", {
+                                method: "PUT",
+                                headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify({ newPin: newPin.trim() }),
+                              });
+                              const d = await res.json().catch(() => ({}));
+                              if (!res.ok) {
+                                setPinMsg(d.error || "שגיאה בעדכון קוד PIN");
+                              } else {
+                                setNewPin("");
+                                setPinMsg("קוד ה-PIN עודכן בהצלחה.");
+                              }
+                            }}
+                            className="px-4 py-2 rounded-lg text-sm font-semibold text-white bg-[var(--otzar-accent)] hover:bg-[var(--otzar-accent-hover)] cursor-pointer"
+                          >
+                            עדכן קוד PIN
+                          </button>
+                        </div>
+                        {pinMsg && <div className="text-xs text-[var(--otzar-accent)] font-medium">{pinMsg}</div>}
                       </div>
                     </div>
-                    <button
-                      type="button"
-                      onClick={async () => {
-                        await fetch("/api/settings", {
-                          method: "PUT",
-                          headers: { "Content-Type": "application/json" },
-                          body: JSON.stringify({
-                            library_name: settings.library_name || "אוצר ספרים",
-                            default_loan_days: String(settings.default_loan_days || "14"),
-                          }),
-                        });
-                        loadAll(searchQuery, statusFilter, categoryFilter);
-                      }}
-                      className="px-4 py-2 rounded-lg text-sm font-semibold text-white bg-[var(--otzar-accent)] hover:bg-[var(--otzar-accent-hover)] cursor-pointer"
-                    >
-                      שמור הגדרות
-                    </button>
-                  </div>
+                  )}
 
-                  <AiSettingsPanel
-                    settings={settings}
-                    setSettings={setSettings}
-                    onReload={() => loadAll(searchQuery, statusFilter, categoryFilter, semanticMode)}
-                  />
-
-                  <FirebaseSyncPanel
-                    onReload={() => loadAll(searchQuery, statusFilter, categoryFilter, semanticMode)}
-                  />
-
-                  <SetupTransferPanel
-                    onReload={() => loadAll(searchQuery, statusFilter, categoryFilter, semanticMode)}
-                  />
-
-                  <UpdaterPanel onUpdateStatusChange={setUpdateBehindCount} />
-
-                  {/* Admin PIN Change */}
-                  <div className="p-5 rounded-xl border border-[var(--otzar-border-muted)] space-y-3">
-                    <div className="flex items-center gap-2 font-semibold text-base">
-                      <KeyRound className="w-4 h-4 text-[var(--otzar-accent)]" />
-                      <span>אבטחת מנהל (קוד PIN)</span>
-                    </div>
-                    <p className="text-xs text-[var(--otzar-text-muted)]">
-                      שינוי קוד ה-PIN הנדרש לפתיחת מצב מנהל (לפחות 4 תווים).
-                    </p>
-                    <div className="flex flex-wrap items-center gap-2 text-sm">
-                      <input
-                        type="password"
-                        dir="ltr"
-                        value={newPin}
-                        onChange={(e) => setNewPin(e.target.value)}
-                        placeholder="קוד PIN חדש"
-                        className="px-3 py-2 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] font-mono w-48"
+                  {/* TAB 2: AI */}
+                  {settingsTab === "ai" && (
+                    <div className="max-w-3xl">
+                      <AiSettingsPanel
+                        settings={settings}
+                        setSettings={setSettings}
+                        onReload={() => loadAll(searchQuery, statusFilter, categoryFilter, semanticMode)}
                       />
-                      <button
-                        type="button"
-                        onClick={async () => {
-                          setPinMsg(null);
-                          if (newPin.trim().length < 4) {
-                            setPinMsg("הקוד חייב להכיל לפחות 4 תווים.");
-                            return;
-                          }
-                          const res = await fetch("/api/admin/pin", {
-                            method: "PUT",
-                            headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({ newPin: newPin.trim() }),
-                          });
-                          const d = await res.json().catch(() => ({}));
-                          if (!res.ok) {
-                            setPinMsg(d.error || "שגיאה בעדכון קוד PIN");
-                          } else {
-                            setNewPin("");
-                            setPinMsg("קוד ה-PIN עודכן בהצלחה.");
-                          }
-                        }}
-                        className="px-4 py-2 rounded-lg text-sm font-semibold text-white bg-[var(--otzar-accent)] hover:bg-[var(--otzar-accent-hover)] cursor-pointer"
-                      >
-                        עדכן קוד PIN
-                      </button>
                     </div>
-                    {pinMsg && <div className="text-xs text-[var(--otzar-accent)] font-medium">{pinMsg}</div>}
-                  </div>
+                  )}
 
-                  {/* Export & Local SQLite Backup */}
-                  <div className="p-5 rounded-xl border border-[var(--otzar-border-muted)] space-y-3">
-                    <div className="flex items-center gap-2 font-semibold text-base">
-                      <HardDrive className="w-4 h-4 text-[var(--otzar-accent)]" />
-                      <span>גיבוי וייצוא נתונים</span>
+                  {/* TAB 3: CLOUD FIREBASE */}
+                  {settingsTab === "cloud" && (
+                    <div className="max-w-3xl">
+                      <FirebaseSyncPanel
+                        onReload={() => loadAll(searchQuery, statusFilter, categoryFilter, semanticMode)}
+                      />
                     </div>
-                    <div className="flex flex-wrap gap-2.5 text-sm">
-                      <button
-                        type="button"
-                        onClick={() => downloadWithAuth("/api/export/books.xlsx", "otzar-sefarim-catalog.xlsx")}
-                        className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-[var(--otzar-border-muted)] hover:bg-[var(--otzar-surface)] font-medium cursor-pointer"
-                      >
-                        <FileSpreadsheet className="w-4 h-4 text-[var(--otzar-accent)]" />
-                        ייצוא קטלוג ל-Excel (.xlsx)
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => downloadWithAuth("/api/export/books.csv", "otzar-sefarim-catalog.csv")}
-                        className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-[var(--otzar-border-muted)] hover:bg-[var(--otzar-surface)] font-medium cursor-pointer"
-                      >
-                        <Download className="w-4 h-4 text-[var(--otzar-accent)]" />
-                        ייצוא קטלוג ל-CSV (עברית)
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => downloadWithAuth("/api/backup/download", "otzar-backup.db")}
-                        className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-[var(--otzar-border-muted)] hover:bg-[var(--otzar-surface)] font-medium cursor-pointer"
-                      >
-                        <Database className="w-4 h-4 text-[var(--otzar-accent)]" />
-                        הורד גיבוי מסד נתונים (.db)
-                      </button>
-                      <button
-                        type="button"
-                        onClick={async () => {
-                          setBackupMsg(null);
-                          const res = await fetch("/api/backup/save-local", { method: "POST" });
-                          const d = await res.json().catch(() => ({}));
-                          if (!res.ok) {
-                            setBackupMsg(d.error || "שגיאה בשמירת גיבוי מקומי");
-                          } else {
-                            setBackupMsg("הגיבוי נשמר בהצלחה בנתיב: " + d.path);
-                          }
-                        }}
-                        className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-white bg-[var(--otzar-accent)] hover:bg-[var(--otzar-accent-hover)] font-semibold cursor-pointer"
-                      >
-                        <HardDrive className="w-4 h-4" />
-                        שמור גיבוי מקומי בתיקיית data/backups
-                      </button>
-                    </div>
-                    {backupMsg && <div className="text-xs text-[var(--otzar-accent)] font-medium" dir="auto">{backupMsg}</div>}
-                  </div>
+                  )}
 
-                  <div className="p-5 rounded-xl border border-[var(--otzar-border-muted)] text-sm space-y-1.5">
-                    <div className="font-semibold">פרטי מסד הנתונים והסביבה המקומית</div>
-                    <div className="text-[var(--otzar-text-muted)]">
-                      סביבת הרצה:{" "}
-                      <span className="text-[var(--otzar-text)]">
-                        {health?.isElectron ? "תוכנת שולחן עבודה עצמאית (Desktop)" : "שרת מקומי בדפדפן"}
-                      </span>
-                      {health?.appVersion && (
-                        <>
-                          <span aria-hidden="true" className="mx-1.5">·</span>
-                          <span className="font-mono tabular-nums text-[var(--otzar-text)]">v{health.appVersion}</span>
-                        </>
-                      )}
+                  {/* TAB 4: SOFTWARE UPDATES */}
+                  {settingsTab === "updates" && (
+                    <div className="max-w-3xl">
+                      <UpdaterPanel onUpdateStatusChange={setUpdateBehindCount} />
                     </div>
-                    <div className="text-[var(--otzar-text-muted)]">דרייבר SQLite: <span className="font-mono text-[var(--otzar-text)]">{health?.driver}</span></div>
-                    {health?.dataDir && (
-                      <div className="text-[var(--otzar-text-muted)]">תיקיית נתונים: <span className="font-mono text-[var(--otzar-text)]" dir="ltr">{health.dataDir}</span></div>
-                    )}
-                    <div className="text-[var(--otzar-text-muted)]">נתיב קובץ מסד: <span className="font-mono text-[var(--otzar-text)]" dir="ltr">{health?.dbPath}</span></div>
-                    {health?.migratedFrom && (
-                      <div className="text-[var(--otzar-text-muted)]">
-                        הועתקו נתונים קיימים מ: <span className="font-mono text-[var(--otzar-text)]" dir="ltr">{health.migratedFrom}</span>
+                  )}
+
+                  {/* TAB 5: TRANSFER TO ANOTHER DEVICE */}
+                  {settingsTab === "transfer" && (
+                    <div className="max-w-3xl">
+                      <SetupTransferPanel
+                        section="transfer"
+                        onReload={() => loadAll(searchQuery, statusFilter, categoryFilter, semanticMode)}
+                      />
+                    </div>
+                  )}
+
+                  {/* TAB 6: MAINTENANCE & RESET */}
+                  {settingsTab === "maintenance" && (
+                    <div className="space-y-5 max-w-3xl">
+                      <SetupTransferPanel
+                        section="reset"
+                        onReload={() => loadAll(searchQuery, statusFilter, categoryFilter, semanticMode)}
+                      />
+
+                      {/* Export & Local SQLite Backup */}
+                      <div className="p-5 rounded-xl border border-[var(--otzar-border-muted)] space-y-3">
+                        <div className="flex items-center gap-2 font-semibold text-base">
+                          <HardDrive className="w-4 h-4 text-[var(--otzar-accent)]" />
+                          <span>גיבוי וייצוא נתונים</span>
+                        </div>
+                        <div className="flex flex-wrap gap-2.5 text-sm">
+                          <button
+                            type="button"
+                            onClick={() => downloadWithAuth("/api/export/books.xlsx", "otzar-sefarim-catalog.xlsx")}
+                            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-[var(--otzar-border-muted)] hover:bg-[var(--otzar-surface)] font-medium cursor-pointer"
+                          >
+                            <FileSpreadsheet className="w-4 h-4 text-[var(--otzar-accent)]" />
+                            ייצוא קטלוג ל-Excel (.xlsx)
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => downloadWithAuth("/api/export/books.csv", "otzar-sefarim-catalog.csv")}
+                            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-[var(--otzar-border-muted)] hover:bg-[var(--otzar-surface)] font-medium cursor-pointer"
+                          >
+                            <Download className="w-4 h-4 text-[var(--otzar-accent)]" />
+                            ייצוא קטלוג ל-CSV (עברית)
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => downloadWithAuth("/api/backup/download", "otzar-backup.db")}
+                            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-[var(--otzar-border-muted)] hover:bg-[var(--otzar-surface)] font-medium cursor-pointer"
+                          >
+                            <Database className="w-4 h-4 text-[var(--otzar-accent)]" />
+                            הורד גיבוי מסד נתונים (.db)
+                          </button>
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              setBackupMsg(null);
+                              const res = await fetch("/api/backup/save-local", { method: "POST" });
+                              const d = await res.json().catch(() => ({}));
+                              if (!res.ok) {
+                                setBackupMsg(d.error || "שגיאה בשמירת גיבוי מקומי");
+                              } else {
+                                setBackupMsg("הגיבוי נשמר בהצלחה בנתיב: " + d.path);
+                              }
+                            }}
+                            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-white bg-[var(--otzar-accent)] hover:bg-[var(--otzar-accent-hover)] font-semibold cursor-pointer"
+                          >
+                            <HardDrive className="w-4 h-4" />
+                            שמור גיבוי מקומי בתיקיית data/backups
+                          </button>
+                        </div>
+                        {backupMsg && <div className="text-xs text-[var(--otzar-accent)] font-medium" dir="auto">{backupMsg}</div>}
                       </div>
-                    )}
-                    {health?.certSummary && health.certSummary.loadedCount > 0 && (
-                      <div className="text-[var(--otzar-text-muted)]">
-                        תעודות שורש Windows (תמיכת אתרוג/סינון):{" "}
-                        <span className="tabular-nums text-[var(--otzar-text)]">{health.certSummary.loadedCount} נטענו</span>
+
+                      <div className="p-5 rounded-xl border border-[var(--otzar-border-muted)] text-sm space-y-1.5">
+                        <div className="font-semibold">פרטי מסד הנתונים והסביבה המקומית</div>
+                        <div className="text-[var(--otzar-text-muted)]">
+                          סביבת הרצה:{" "}
+                          <span className="text-[var(--otzar-text)]">
+                            {health?.isElectron ? "תוכנת שולחן עבודה עצמאית (Desktop)" : "שרת מקומי בדפדפן"}
+                          </span>
+                          {health?.appVersion && (
+                            <>
+                              <span aria-hidden="true" className="mx-1.5">·</span>
+                              <span className="font-mono tabular-nums text-[var(--otzar-text)]">v{health.appVersion}</span>
+                            </>
+                          )}
+                        </div>
+                        <div className="text-[var(--otzar-text-muted)]">דרייבר SQLite: <span className="font-mono text-[var(--otzar-text)]">{health?.driver}</span></div>
+                        {health?.dataDir && (
+                          <div className="text-[var(--otzar-text-muted)]">תיקיית נתונים: <span className="font-mono text-[var(--otzar-text)]" dir="ltr">{health.dataDir}</span></div>
+                        )}
+                        <div className="text-[var(--otzar-text-muted)]">נתיב קובץ מסד: <span className="font-mono text-[var(--otzar-text)]" dir="ltr">{health?.dbPath}</span></div>
+                        {health?.migratedFrom && (
+                          <div className="text-[var(--otzar-text-muted)]">
+                            הועתקו נתונים קיימים מ: <span className="font-mono text-[var(--otzar-text)]" dir="ltr">{health.migratedFrom}</span>
+                          </div>
+                        )}
+                        {health?.certSummary && health.certSummary.loadedCount > 0 && (
+                          <div className="text-[var(--otzar-text-muted)]">
+                            תעודות שורש Windows (תמיכת אתרוג/סינון):{" "}
+                            <span className="tabular-nums text-[var(--otzar-text)]">{health.certSummary.loadedCount} נטענו</span>
+                          </div>
+                        )}
                       </div>
-                    )}
-                  </div>
+                    </div>
+                  )}
                 </div>
               )}
             </div>

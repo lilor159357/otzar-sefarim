@@ -6,6 +6,7 @@ import { requireAdmin } from "../auth/adminAuth.ts";
 import { buildNormalizedBookSearch, enqueueSyncOutbox, newSyncId } from "../db/schema.ts";
 import {
   analyzeBookCoverImage,
+  analyzeShelfSetImages,
   buildBookEmbeddingText,
   float32ToBlob,
   formatGeminiError,
@@ -15,7 +16,10 @@ import {
   saveAiKeyPool,
   testGeminiConnection,
   testSinglePoolKey,
+  type ExtractedBookMetadata,
+  type ExtractedShelfSet,
 } from "../ai/geminiService.ts";
+import { findAuthorityMatch } from "../search/torahAuthority.ts";
 
 let isQueueWorkerRunning = false;
 
@@ -52,6 +56,16 @@ function parseExtraImages(raw: unknown): string[] {
   }
 }
 
+function parseSpineVolumes(raw: unknown): Array<{ volume: string; copiesCount: number; notes?: string }> {
+  if (typeof raw !== "string" || !raw) return [];
+  try {
+    const p = JSON.parse(raw);
+    return Array.isArray(p) ? p : [];
+  } catch {
+    return [];
+  }
+}
+
 function getItemImagePaths(row: { image_path?: unknown; extra_images_json?: unknown }): string[] {
   const first = String(row.image_path || "").trim();
   const extras = parseExtraImages(row.extra_images_json);
@@ -65,30 +79,131 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
   async function processPendingQueue() {
     if (isQueueWorkerRunning) return;
     isQueueWorkerRunning = true;
+
     try {
       while (true) {
-        const nextItem = db.get<{ id: number; image_path: string; extra_images_json: string }>(
-          "SELECT id, image_path, extra_images_json FROM ai_catalog_queue WHERE processing_status = 'pending' AND approval_status = 'pending' ORDER BY id ASC LIMIT 1"
+        const nextItem = db.get<{
+          id: number;
+          image_path: string;
+          extra_images_json: string;
+          is_shelf_set: number;
+          extracted_json: string;
+        }>(
+          "SELECT id, image_path, extra_images_json, is_shelf_set, extracted_json FROM ai_catalog_queue WHERE processing_status = 'pending' AND approval_status = 'pending' ORDER BY id ASC LIMIT 1"
         );
         if (!nextItem) break;
 
-        db.run("UPDATE ai_catalog_queue SET processing_status = 'processing', error_message = NULL WHERE id = ?", nextItem.id);
+        db.run(
+          "UPDATE ai_catalog_queue SET processing_status = 'processing', error_message = NULL WHERE id = ?",
+          nextItem.id
+        );
 
         try {
           const paths = getItemImagePaths(nextItem).filter((p) => fs.existsSync(p));
           if (paths.length === 0) {
             throw new Error("קובץ התמונה לא נמצא בדיסק");
           }
-          const imageBuffers = paths.map((p) => ({
-            buffer: fs.readFileSync(p),
-            mimeType: detectMimeFromExt(p),
-          }));
-          const extracted = await analyzeBookCoverImage(db, imageBuffers);
-          db.run(
-            "UPDATE ai_catalog_queue SET processing_status = 'done', extracted_json = ?, error_message = NULL WHERE id = ?",
-            JSON.stringify(extracted),
-            nextItem.id
-          );
+
+          if (Number(nextItem.is_shelf_set) === 1) {
+            const [titlePath, ...spinePaths] = paths;
+            const titlePart = {
+              buffer: fs.readFileSync(titlePath),
+              mimeType: detectMimeFromExt(titlePath),
+            };
+            const spineParts = spinePaths.map((p) => ({
+              buffer: fs.readFileSync(p),
+              mimeType: detectMimeFromExt(p),
+            }));
+
+            const setExtracted: ExtractedShelfSet = await analyzeShelfSetImages(db, titlePart, spineParts);
+            try {
+              const pre = JSON.parse(nextItem.extracted_json || "{}");
+              if (pre?.set_name && String(pre.set_name).trim()) {
+                setExtracted.set_name = String(pre.set_name).trim();
+              }
+            } catch {}
+
+            // Local authority normalization on extracted set
+            if (setExtracted.author) {
+              const authMatch = findAuthorityMatch(db, "author", setExtracted.author);
+              if (authMatch && authMatch.confidence === "high") {
+                setExtracted.author = authMatch.match;
+              }
+            }
+            if (setExtracted.set_name) {
+              const setMatch = findAuthorityMatch(db, "set_name", setExtracted.set_name);
+              if (setMatch && setMatch.confidence === "high") {
+                setExtracted.set_name = setMatch.match;
+              }
+            }
+            if (setExtracted.publisher) {
+              const pubMatch = findAuthorityMatch(db, "publisher", setExtracted.publisher);
+              if (pubMatch && pubMatch.confidence === "high") {
+                setExtracted.publisher = pubMatch.match;
+              }
+            }
+
+            db.run(
+              "UPDATE ai_catalog_queue SET processing_status = 'done', extracted_json = ?, spine_extracted_json = ?, error_message = NULL WHERE id = ?",
+              JSON.stringify(setExtracted),
+              JSON.stringify(setExtracted.volumes || []),
+              nextItem.id
+            );
+          } else {
+            const imageBuffers = paths.map((p) => ({
+              buffer: fs.readFileSync(p),
+              mimeType: detectMimeFromExt(p),
+            }));
+            const extracted: ExtractedBookMetadata = await analyzeBookCoverImage(db, imageBuffers);
+            try {
+              const pre = JSON.parse(nextItem.extracted_json || "{}");
+              if (pre?.set_name && String(pre.set_name).trim()) {
+                extracted.set_name = String(pre.set_name).trim();
+              }
+            } catch {}
+
+            // Local Authority Normalization (0 tokens, 100% database consistency)
+            if (extracted.author) {
+              const authMatch = findAuthorityMatch(db, "author", extracted.author);
+              if (authMatch) {
+                if (authMatch.confidence === "high") {
+                  extracted.authority_unified = {
+                    field: "author",
+                    original: extracted.author,
+                    matched: authMatch.match,
+                  };
+                  extracted.canonical_author = authMatch.match;
+                  extracted.author = authMatch.match;
+                } else {
+                  extracted.authority_suggestion = {
+                    field: "author",
+                    suggestion: authMatch.match,
+                    confidence: Math.round(authMatch.score * 100),
+                  };
+                }
+              }
+            }
+
+            if (extracted.set_name) {
+              const setMatch = findAuthorityMatch(db, "set_name", extracted.set_name);
+              if (setMatch && setMatch.confidence === "high") {
+                extracted.set_name = setMatch.match;
+              }
+            }
+
+            if (extracted.publisher) {
+              const pubMatch = findAuthorityMatch(db, "publisher", extracted.publisher);
+              if (pubMatch && pubMatch.confidence === "high") {
+                extracted.publisher = pubMatch.match;
+              }
+            }
+
+            db.run(
+              "UPDATE ai_catalog_queue SET processing_status = 'done', extracted_json = ?, error_message = NULL WHERE id = ?",
+              JSON.stringify(extracted),
+              nextItem.id
+            );
+          }
         } catch (err) {
           db.run(
             "UPDATE ai_catalog_queue SET processing_status = 'error', error_message = ? WHERE id = ?",
@@ -103,7 +218,8 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
         if ((more?.c ?? 0) > 0) {
           const cfg = getAiConfig(db);
           const readyKeys = getAiKeyPoolPublicStatus(db).filter((k) => k.enabled && k.status === "ready").length;
-          const effectiveDelay = readyKeys > 1 ? Math.max(1000, Math.round(cfg.delayMs / Math.min(readyKeys, 4))) : cfg.delayMs;
+          const effectiveDelay =
+            readyKeys > 1 ? Math.max(1000, Math.round(cfg.delayMs / Math.min(readyKeys, 4))) : cfg.delayMs;
           await sleep(effectiveDelay);
         }
       }
@@ -138,7 +254,9 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
   // Embeddings coverage stats
   app.get("/api/ai/embeddings-stats", requireAdmin, (_req, res) => {
     const totalBooks = db.get<{ c: number }>("SELECT COUNT(*) AS c FROM books WHERE deleted_at IS NULL")?.c ?? 0;
-    const indexedBooks = db.get<{ c: number }>("SELECT COUNT(*) AS c FROM books WHERE deleted_at IS NULL AND embedding IS NOT NULL")?.c ?? 0;
+    const indexedBooks =
+      db.get<{ c: number }>("SELECT COUNT(*) AS c FROM books WHERE deleted_at IS NULL AND embedding IS NOT NULL")?.c ??
+      0;
     res.json({
       totalBooks,
       indexedBooks,
@@ -153,10 +271,11 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
     if (!cfg.hasAnyKey) {
       return res.status(400).json({ error: "לא הוגדרו מפתחות Gemini API פעילים בהגדרות" });
     }
+
     const rows = db.all<Record<string, unknown>>(
       forceAll
-        ? "SELECT barcode, sync_id, title, author, volume, publisher, pub_year, edition, category, tags, notes FROM books WHERE deleted_at IS NULL"
-        : "SELECT barcode, sync_id, title, author, volume, publisher, pub_year, edition, category, tags, notes FROM books WHERE deleted_at IS NULL AND embedding IS NULL"
+        ? "SELECT barcode, sync_id, title, set_name, author, volume, publisher, pub_year, edition, category, tags, notes FROM books WHERE deleted_at IS NULL"
+        : "SELECT barcode, sync_id, title, set_name, author, volume, publisher, pub_year, edition, category, tags, notes FROM books WHERE deleted_at IS NULL AND embedding IS NULL"
     );
 
     let indexed = 0;
@@ -168,6 +287,7 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
       try {
         const text = buildBookEmbeddingText({
           title: String(b.title || ""),
+          set_name: String(b.set_name || ""),
           author: String(b.author || ""),
           volume: String(b.volume || ""),
           publisher: String(b.publisher || ""),
@@ -186,7 +306,6 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
       } catch (err) {
         failed++;
         lastError = formatGeminiError(err);
-        // Stop early on offline/invalid key so user doesn't wait unnecessarily
         if (lastError.includes("אין חיבור") || lastError.includes("403")) {
           break;
         }
@@ -196,9 +315,10 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
       }
     }
 
-    const statsAfter = db.get<{ c: number }>("SELECT COUNT(*) AS c FROM books WHERE deleted_at IS NULL AND embedding IS NOT NULL")?.c ?? 0;
+    const statsAfter =
+      db.get<{ c: number }>("SELECT COUNT(*) AS c FROM books WHERE deleted_at IS NULL AND embedding IS NOT NULL")?.c ??
+      0;
     const totalBooks = db.get<{ c: number }>("SELECT COUNT(*) AS c FROM books WHERE deleted_at IS NULL")?.c ?? 0;
-
     res.json({
       ok: failed === 0 || indexed > 0,
       attempted: rows.length,
@@ -247,6 +367,7 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
     const rows = db.all<Record<string, unknown>>(
       `SELECT * FROM ai_catalog_queue ${whereClause} ORDER BY id ASC`
     );
+
     const mapped = rows.map((r) => {
       let extracted = null;
       if (typeof r.extracted_json === "string" && r.extracted_json) {
@@ -262,6 +383,9 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
         default_cabinet_id: r.default_cabinet_id ?? null,
         default_shelf_number: r.default_shelf_number ?? null,
         source_relay_id: r.source_relay_id || null,
+        set_batch_id: r.set_batch_id ? String(r.set_batch_id) : null,
+        is_shelf_set: Boolean(r.is_shelf_set),
+        spine_extracted: parseSpineVolumes(r.spine_extracted_json),
         processing_status: r.processing_status,
         extracted,
         error_message: r.error_message || null,
@@ -269,6 +393,7 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
         created_at: r.created_at,
       };
     });
+
     res.json({ items: mapped, workerRunning: isQueueWorkerRunning });
   });
 
@@ -276,7 +401,10 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
   app.get("/api/ai-queue/image/:id", requireAdmin, (req, res) => {
     const id = Number(req.params.id);
     const idx = Math.max(0, Number(req.query.index) || 0);
-    const row = db.get<{ image_path: string; extra_images_json: string }>("SELECT image_path, extra_images_json FROM ai_catalog_queue WHERE id = ?", id);
+    const row = db.get<{ image_path: string; extra_images_json: string }>(
+      "SELECT image_path, extra_images_json FROM ai_catalog_queue WHERE id = ?",
+      id
+    );
     if (!row) return res.status(404).send("Image not found");
     const existingPaths = getItemImagePaths(row).filter((p) => fs.existsSync(p));
     const targetPath = existingPaths[idx] || existingPaths[0];
@@ -287,10 +415,25 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
     res.sendFile(path.resolve(targetPath));
   });
 
-  // Upload compressed cover image(s) to AI queue
+  const saveBase64ToFile = (rawB64Input: unknown, mimeInput: unknown): string | null => {
+    const rawB64 = String(rawB64Input || "");
+    if (!rawB64) return null;
+    const cleanB64 = rawB64.includes(",") ? rawB64.split(",")[1] : rawB64;
+    const mime = String(mimeInput || "image/jpeg");
+    const ext = mime.includes("webp") ? ".webp" : mime.includes("png") ? ".png" : ".jpg";
+    const fileName = `cover_${Date.now()}_${Math.random().toString(36).slice(2, 8)}${ext}`;
+    const destPath = path.join(aiImagesDir, fileName);
+    fs.writeFileSync(destPath, Buffer.from(cleanB64, "base64"));
+    return destPath;
+  };
+
+  // Upload compressed cover image(s) to AI queue (supports continuous set batch)
   app.post("/api/ai-queue/upload", requireAdmin, (req, res) => {
     const items = Array.isArray(req.body?.items) ? req.body.items : [];
     const autoProcess = req.body?.autoProcess !== false;
+    const globalSetBatchId = req.body?.set_batch_id ? String(req.body.set_batch_id).trim() : null;
+    const globalPresetSetName = req.body?.preset_set_name ? String(req.body.preset_set_name).trim() : "";
+
     if (items.length === 0) {
       return res.status(400).json({ error: "לא התקבלו תמונות להעלאה" });
     }
@@ -298,37 +441,35 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
     const now = new Date().toISOString();
     const createdIds: number[] = [];
 
-    const saveImg = (rawB64Input: unknown, mimeInput: unknown): string | null => {
-      const rawB64 = String(rawB64Input || "");
-      if (!rawB64) return null;
-      const cleanB64 = rawB64.includes(",") ? rawB64.split(",")[1] : rawB64;
-      const mime = String(mimeInput || "image/jpeg");
-      const ext = mime.includes("webp") ? ".webp" : mime.includes("png") ? ".png" : ".jpg";
-      const fileName = `cover_${Date.now()}_${Math.random().toString(36).slice(2, 8)}${ext}`;
-      const destPath = path.join(aiImagesDir, fileName);
-      fs.writeFileSync(destPath, Buffer.from(cleanB64, "base64"));
-      return destPath;
-    };
-
     db.transaction(() => {
       for (const item of items) {
         const savedPaths: string[] = [];
         if (Array.isArray(item?.images) && item.images.length > 0) {
           for (const sub of item.images) {
-            const p = saveImg(sub?.imageBase64, sub?.mimeType);
+            const p = saveBase64ToFile(sub?.imageBase64, sub?.mimeType);
             if (p) savedPaths.push(p);
           }
         } else {
-          const p = saveImg(item?.imageBase64, item?.mimeType);
+          const p = saveBase64ToFile(item?.imageBase64, item?.mimeType);
           if (p) savedPaths.push(p);
         }
         if (savedPaths.length === 0) continue;
 
         const [firstPath, ...extraPaths] = savedPaths;
+        const setBatchId = item?.set_batch_id ? String(item.set_batch_id).trim() : globalSetBatchId;
+        const defaultCabId = item?.default_cabinet_id != null ? Number(item.default_cabinet_id) : null;
+        const defaultShelf = item?.default_shelf_number != null ? Number(item.default_shelf_number) : null;
+
+        const presetSetName = item?.preset_set_name ? String(item.preset_set_name).trim() : globalPresetSetName;
+        const initialExtractedJson = presetSetName ? JSON.stringify({ set_name: presetSetName }) : "";
         const info = db.run(
-          "INSERT INTO ai_catalog_queue (image_path, extra_images_json, processing_status, approval_status, created_at) VALUES (?, ?, 'pending', 'pending', ?)",
+          "INSERT INTO ai_catalog_queue (image_path, extra_images_json, default_cabinet_id, default_shelf_number, set_batch_id, extracted_json, processing_status, approval_status, created_at) VALUES (?, ?, ?, ?, ?, ?, 'pending', 'pending', ?)",
           firstPath,
           JSON.stringify(extraPaths),
+          defaultCabId,
+          defaultShelf,
+          setBatchId,
+          initialExtractedJson,
           now
         );
         createdIds.push(info.lastInsertRowid);
@@ -338,8 +479,95 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
     if (autoProcess && createdIds.length > 0) {
       void processPendingQueue();
     }
-
     res.status(201).json({ ok: true, count: createdIds.length, ids: createdIds });
+  });
+
+  // Upload whole Shelf Set: Title page + Spine shelf photos
+  app.post("/api/ai-queue/upload-shelf-set", requireAdmin, (req, res) => {
+    const { titleImage, spineImages = [], default_cabinet_id, default_shelf_number, set_batch_id, preset_set_name } = req.body || {};
+    if (!titleImage || (!titleImage.imageBase64 && typeof titleImage !== "string")) {
+      return res.status(400).json({ error: "נדרשת תמונת שער מייצגת עבור הסט" });
+    }
+
+    const titlePath = saveBase64ToFile(titleImage.imageBase64 || titleImage, titleImage.mimeType);
+    if (!titlePath) return res.status(400).json({ error: "שמירת תמונת השער נכשלה" });
+
+    const spinePaths: string[] = [];
+    for (const sp of spineImages) {
+      const p = saveBase64ToFile(sp?.imageBase64 || sp, sp?.mimeType);
+      if (p) spinePaths.push(p);
+    }
+
+    const now = new Date().toISOString();
+    const initialExtractedJson = preset_set_name && String(preset_set_name).trim()
+      ? JSON.stringify({ set_name: String(preset_set_name).trim() })
+      : "";
+    const info = db.run(
+      "INSERT INTO ai_catalog_queue (image_path, extra_images_json, default_cabinet_id, default_shelf_number, set_batch_id, is_shelf_set, extracted_json, processing_status, approval_status, created_at) VALUES (?, ?, ?, ?, ?, 1, ?, 'pending', 'pending', ?)",
+      titlePath,
+      JSON.stringify(spinePaths),
+      default_cabinet_id ? Number(default_cabinet_id) : null,
+      default_shelf_number ? Number(default_shelf_number) : 1,
+      set_batch_id ? String(set_batch_id).trim() : null,
+      initialExtractedJson,
+      now
+    );
+
+    void processPendingQueue();
+    res.status(201).json({ ok: true, id: info.lastInsertRowid });
+  });
+
+  // Apply unified set details across all pending items in a batch
+  app.post("/api/ai-queue/batch-apply-set", requireAdmin, (req, res) => {
+    const {
+      batchId,
+      set_name,
+      author,
+      publisher,
+      category,
+      default_cabinet_id,
+      default_shelf_number,
+      format_size,
+      edition,
+    } = req.body || {};
+    if (!batchId) return res.status(400).json({ error: "נדרש מזהה מקבץ batchId" });
+
+    const pendingInBatch = db.all<{ id: number; extracted_json: string }>(
+      "SELECT id, extracted_json FROM ai_catalog_queue WHERE set_batch_id = ? AND approval_status = 'pending'",
+      batchId
+    );
+
+    let updatedCount = 0;
+    db.transaction(() => {
+      for (const item of pendingInBatch) {
+        let ext: Record<string, unknown> = {};
+        try {
+          ext = JSON.parse(item.extracted_json || "{}");
+        } catch {}
+
+        if (set_name !== undefined) ext.set_name = String(set_name).trim();
+        if (author !== undefined) ext.author = String(author).trim();
+        if (publisher !== undefined) ext.publisher = String(publisher).trim();
+        if (category !== undefined) ext.category = String(category).trim();
+        if (format_size !== undefined) ext.format_size = String(format_size).trim();
+        if (edition !== undefined) ext.edition = String(edition).trim();
+
+        db.run(
+          `UPDATE ai_catalog_queue 
+           SET extracted_json = ?, 
+               default_cabinet_id = COALESCE(?, default_cabinet_id), 
+               default_shelf_number = COALESCE(?, default_shelf_number) 
+           WHERE id = ?`,
+          JSON.stringify(ext),
+          default_cabinet_id != null ? Number(default_cabinet_id) : null,
+          default_shelf_number != null ? Number(default_shelf_number) : null,
+          item.id
+        );
+        updatedCount++;
+      }
+    });
+
+    res.json({ ok: true, updatedCount });
   });
 
   // Trigger queue processing manually
@@ -378,6 +606,7 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
 
     const {
       title,
+      set_name = "",
       author = "",
       volume = "",
       publisher = "",
@@ -393,77 +622,167 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
       thickness_mm = null,
       pages_count = null,
       copiesCount = 1,
+      volumes, // optional array for batch shelf-set approval
     } = req.body || {};
 
-    if (!title || !String(title).trim()) {
-      return res.status(400).json({ error: "יש להזין שם ספר לפני אישור" });
-    }
-
-    const parsedThickness = thickness_mm !== null && thickness_mm !== "" && Number(thickness_mm) > 0 ? Number(thickness_mm) : null;
-    const parsedPages = pages_count !== null && pages_count !== "" && Number(pages_count) > 0 ? Math.round(Number(pages_count)) : null;
-
-    const count = Math.max(1, Math.min(200, Number(copiesCount) || 1));
     const prefix = db.get<{ value: string }>("SELECT value FROM settings WHERE key = 'barcode_prefix'")?.value ?? "";
-    let nextNum = parseInt(db.get<{ value: string }>("SELECT value FROM settings WHERE key = 'next_barcode'")?.value ?? "100001", 10) || 100001;
+    let nextNum =
+      parseInt(db.get<{ value: string }>("SELECT value FROM settings WHERE key = 'next_barcode'")?.value ?? "100001", 10) ||
+      100001;
     const now = new Date().toISOString();
     const tagsArr = parseTags(tags);
     const createdBarcodes: string[] = [];
 
-    db.transaction(() => {
-      for (let i = 0; i < count; i++) {
-        while (db.get("SELECT barcode FROM books WHERE barcode = ?", prefix + String(nextNum))) {
-          nextNum++;
+    const parsedThickness =
+      thickness_mm !== null && thickness_mm !== "" && Number(thickness_mm) > 0 ? Number(thickness_mm) : null;
+    const parsedPages =
+      pages_count !== null && pages_count !== "" && Number(pages_count) > 0 ? Math.round(Number(pages_count)) : null;
+
+    // Batch shelf-set approval
+    if (Array.isArray(volumes) && volumes.length > 0) {
+      db.transaction(() => {
+        for (const volItem of volumes) {
+          const vName = String(volItem?.volume || "").trim();
+          if (!vName) continue;
+          const vCopies = Math.max(1, Math.min(20, Number(volItem.copiesCount) || 1));
+          const vTitle = title ? String(title).trim() : set_name ? `${set_name} ${vName}` : vName;
+          const vNotes = volItem.notes ? `${notes ? notes + " | " : ""}${volItem.notes}` : notes;
+
+          for (let c = 0; c < vCopies; c++) {
+            while (db.get("SELECT barcode FROM books WHERE barcode = ?", prefix + String(nextNum))) {
+              nextNum++;
+            }
+            const code = prefix + String(nextNum);
+            nextNum++;
+            const syncId = newSyncId();
+            const norm = buildNormalizedBookSearch([
+              code,
+              vTitle,
+              String(set_name || ""),
+              String(author || ""),
+              vName,
+              String(publisher || ""),
+              String(pub_year || ""),
+              String(edition || ""),
+              String(category || ""),
+              tagsArr.join(" "),
+              vNotes,
+            ]);
+
+            db.run(
+              `INSERT INTO books (barcode, title, set_name, author, volume, publisher, pub_year, edition, category, tags, normalized_search, cabinet_id, shelf_number, notes, status, label_printed, created_at, format_size, thickness_mm, pages_count, barcode_status, sync_id, updated_at) 
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, 'assigned', ?, ?)`,
+              code,
+              vTitle,
+              String(set_name || "").trim(),
+              String(author || "").trim(),
+              vName,
+              String(publisher || "").trim(),
+              String(pub_year || "").trim(),
+              String(edition || "").trim(),
+              String(category || "").trim(),
+              JSON.stringify(tagsArr),
+              norm,
+              cabinet_id ? Number(cabinet_id) : null,
+              shelf_number ? Number(shelf_number) : 1,
+              String(vNotes).trim(),
+              String(status),
+              now,
+              String(format_size || "").trim(),
+              parsedThickness,
+              parsedPages,
+              syncId,
+              now
+            );
+            enqueueSyncOutbox(db, "book", syncId, "upsert", { barcode: code });
+            createdBarcodes.push(code);
+          }
         }
-        const code = prefix + String(nextNum);
-        nextNum++;
-        const syncId = newSyncId();
-        const norm = buildNormalizedBookSearch([
-          code,
-          String(title),
-          String(author),
-          String(volume),
-          String(publisher),
-          String(pub_year),
-          String(edition),
-          String(category),
-          tagsArr.join(" "),
-          String(notes),
-        ]);
         db.run(
-          `INSERT INTO books (barcode, title, author, volume, publisher, pub_year, edition, category, tags, normalized_search, cabinet_id, shelf_number, notes, status, label_printed, created_at, format_size, thickness_mm, pages_count, barcode_status, sync_id, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, 'assigned', ?, ?)`,
-          code,
-          String(title).trim(),
-          String(author).trim(),
-          String(volume).trim(),
-          String(publisher).trim(),
-          String(pub_year).trim(),
-          String(edition).trim(),
-          String(category).trim(),
-          JSON.stringify(tagsArr),
-          norm,
-          cabinet_id ? Number(cabinet_id) : null,
-          shelf_number ? Number(shelf_number) : 1,
-          String(notes).trim(),
-          String(status),
-          now,
-          String(format_size || "").trim(),
-          parsedThickness,
-          parsedPages,
-          syncId,
-          now
+          "INSERT INTO settings (key, value) VALUES ('next_barcode', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+          String(nextNum)
         );
-        enqueueSyncOutbox(db, "book", syncId, "upsert", { barcode: code });
-        createdBarcodes.push(code);
+        db.run("UPDATE ai_catalog_queue SET approval_status = 'approved' WHERE id = ?", id);
+      });
+    } else {
+      // Standard single queue item approval
+      if (!title || !String(title).trim()) {
+        return res.status(400).json({ error: "יש להזין שם ספר לפני אישור" });
       }
-      db.run("INSERT INTO settings (key, value) VALUES ('next_barcode', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", String(nextNum));
-      db.run("UPDATE ai_catalog_queue SET approval_status = 'approved' WHERE id = ?", id);
-    });
+
+      const count = Math.max(1, Math.min(200, Number(copiesCount) || 1));
+      db.transaction(() => {
+        for (let i = 0; i < count; i++) {
+          while (db.get("SELECT barcode FROM books WHERE barcode = ?", prefix + String(nextNum))) {
+            nextNum++;
+          }
+          const code = prefix + String(nextNum);
+          nextNum++;
+          const syncId = newSyncId();
+          const norm = buildNormalizedBookSearch([
+            code,
+            String(title),
+            String(set_name),
+            String(author),
+            String(volume),
+            String(publisher),
+            String(pub_year),
+            String(edition),
+            String(category),
+            tagsArr.join(" "),
+            String(notes),
+          ]);
+          db.run(
+            `INSERT INTO books (barcode, title, set_name, author, volume, publisher, pub_year, edition, category, tags, normalized_search, cabinet_id, shelf_number, notes, status, label_printed, created_at, format_size, thickness_mm, pages_count, barcode_status, sync_id, updated_at) 
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, 'assigned', ?, ?)`,
+            code,
+            String(title).trim(),
+            String(set_name || "").trim(),
+            String(author).trim(),
+            String(volume).trim(),
+            String(publisher).trim(),
+            String(pub_year).trim(),
+            String(edition).trim(),
+            String(category).trim(),
+            JSON.stringify(tagsArr),
+            norm,
+            cabinet_id ? Number(cabinet_id) : null,
+            shelf_number ? Number(shelf_number) : 1,
+            String(notes).trim(),
+            String(status),
+            now,
+            String(format_size || "").trim(),
+            parsedThickness,
+            parsedPages,
+            syncId,
+            now
+          );
+          enqueueSyncOutbox(db, "book", syncId, "upsert", { barcode: code });
+          createdBarcodes.push(code);
+        }
+        db.run(
+          "INSERT INTO settings (key, value) VALUES ('next_barcode', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+          String(nextNum)
+        );
+        db.run("UPDATE ai_catalog_queue SET approval_status = 'approved' WHERE id = ?", id);
+      });
+    }
 
     // Best-effort non-blocking 768d embedding generation when online & API key configured
     const cfg = getAiConfig(db);
-    if (cfg.hasAnyKey) {
-      const embText = buildBookEmbeddingText({ title, author, volume, publisher, pub_year, edition, category, tags: tagsArr, notes });
+    if (cfg.hasAnyKey && createdBarcodes.length > 0) {
+      const embText = buildBookEmbeddingText({
+        title,
+        set_name,
+        author,
+        volume,
+        publisher,
+        pub_year,
+        edition,
+        category,
+        tags: tagsArr,
+        notes,
+      });
       void generateTextEmbedding(db, embText)
         .then((vec) => {
           const blob = float32ToBlob(vec);
@@ -475,9 +794,7 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
           }
           onSyncTrigger?.();
         })
-        .catch(() => {
-          // Silently skip if offline/blocked; can be indexed later from Settings
-        });
+        .catch(() => {});
     }
 
     res.status(201).json({ ok: true, barcodes: createdBarcodes, nextBarcode: prefix + String(nextNum) });
@@ -491,7 +808,10 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
 
   app.delete("/api/ai-queue/:id", requireAdmin, (req, res) => {
     const id = Number(req.params.id);
-    const row = db.get<{ image_path: string; extra_images_json: string }>("SELECT image_path, extra_images_json FROM ai_catalog_queue WHERE id = ?", id);
+    const row = db.get<{ image_path: string; extra_images_json: string }>(
+      "SELECT image_path, extra_images_json FROM ai_catalog_queue WHERE id = ?",
+      id
+    );
     if (row) {
       for (const p of getItemImagePaths(row)) {
         if (p && fs.existsSync(p)) {

@@ -83,6 +83,7 @@ export function initSchemaAndSeed(db: DbClient): void {
     CREATE TABLE IF NOT EXISTS books (
       barcode TEXT PRIMARY KEY,
       title TEXT NOT NULL,
+      set_name TEXT NOT NULL DEFAULT '',
       author TEXT NOT NULL DEFAULT '',
       volume TEXT NOT NULL DEFAULT '',
       publisher TEXT NOT NULL DEFAULT '',
@@ -173,6 +174,8 @@ export function initSchemaAndSeed(db: DbClient): void {
   `);
 
   // Safe idempotent migrations for existing databases
+  ensureColumn(db, "books", "set_name", "TEXT NOT NULL DEFAULT ''");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_books_set_name ON books(set_name)");
   ensureColumn(db, "books", "pub_year", "TEXT NOT NULL DEFAULT ''");
   ensureColumn(db, "books", "edition", "TEXT NOT NULL DEFAULT ''");
   ensureColumn(db, "books", "format_size", "TEXT NOT NULL DEFAULT ''");
@@ -199,6 +202,10 @@ export function initSchemaAndSeed(db: DbClient): void {
   ensureColumn(db, "ai_catalog_queue", "default_cabinet_id", "INTEGER");
   ensureColumn(db, "ai_catalog_queue", "default_shelf_number", "INTEGER");
   ensureColumn(db, "ai_catalog_queue", "source_relay_id", "TEXT");
+  ensureColumn(db, "ai_catalog_queue", "set_batch_id", "TEXT");
+  ensureColumn(db, "ai_catalog_queue", "is_shelf_set", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(db, "ai_catalog_queue", "spine_extracted_json", "TEXT NOT NULL DEFAULT '[]'");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_ai_queue_set_batch ON ai_catalog_queue(set_batch_id)");
   db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_queue_relay_id ON ai_catalog_queue(source_relay_id)");
 
   backfillSyncColumns(db, "cabinets", "id");

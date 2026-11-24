@@ -17,9 +17,14 @@ import {
   ZoomIn,
   ZoomOut,
   AlertTriangle,
+  Plus,
+  Sparkles,
+  BookCopy,
 } from "lucide-react";
 import { FORMAT_SIZE_OPTIONS, type AiQueueItem, type CabinetRow } from "../types.ts";
 import { getAdminToken } from "../lib/adminSession.ts";
+import { AutocompleteInput } from "./AutocompleteInput.tsx";
+import { suggestNextVolume } from "../lib/torahUtils.ts";
 
 interface CatalogModuleProps {
   cabinets: CabinetRow[];
@@ -126,8 +131,10 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
 
   // Manual quick catalog form state
   const [title, setTitle] = useState("");
+  const [setName, setSetName] = useState("");
   const [author, setAuthor] = useState("");
   const [volume, setVolume] = useState("");
+  const [nextVolSuggestion, setNextVolSuggestion] = useState("");
   const [publisher, setPublisher] = useState("");
   const [pubYear, setPubYear] = useState("");
   const [edition, setEdition] = useState("");
@@ -155,6 +162,19 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
   const [compressionStats, setCompressionStats] = useState<string | null>(null);
   const [aiError, setAiError] = useState<string | null>(null);
 
+  // Sticky Set & Shelf-Set Capture modes
+  const [scanMode, setScanMode] = useState<"standard" | "shelf-set">("standard");
+  const [stickySetEnabled, setStickySetEnabled] = useState(false);
+  const [stickyBatchId, setStickyBatchId] = useState<string>(() => `batch_${Date.now()}`);
+  const [stickyPresetSetName, setStickyPresetSetName] = useState("");
+  const [shelfTitleImage, setShelfTitleImage] = useState<{ dataUrl: string; base64: string; compKb: number } | null>(null);
+  const [shelfSpineImages, setShelfSpineImages] = useState<Array<{ dataUrl: string; base64: string; compKb: number }>>([]);
+  const [shelfCabId, setShelfCabId] = useState<string>(() => (cabinets[0] ? String(cabinets[0].id) : ""));
+  const [shelfNum, setShelfNum] = useState<number>(1);
+  const [shelfPresetSetName, setShelfPresetSetName] = useState("");
+  const shelfTitleInputRef = useRef<HTMLInputElement>(null);
+  const shelfSpineInputRef = useRef<HTMLInputElement>(null);
+
   // Webcam state (multi-page capture with preview + confirm / add another)
   const [cameraOpen, setCameraOpen] = useState(false);
   const [cameraErr, setCameraErr] = useState<string | null>(null);
@@ -169,8 +189,11 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
   const [imgZoom, setImgZoom] = useState(1);
   const [imgRotate, setImgRotate] = useState(0);
   const [revTitle, setRevTitle] = useState("");
+  const [revSetName, setRevSetName] = useState("");
   const [revAuthor, setRevAuthor] = useState("");
   const [revVolume, setRevVolume] = useState("");
+  const [revVolumes, setRevVolumes] = useState<Array<{ volume: string; copiesCount: number; notes?: string }>>([]);
+  const [applyingBatch, setApplyingBatch] = useState(false);
   const [revPublisher, setRevPublisher] = useState("");
   const [revPubYear, setRevPubYear] = useState("");
   const [revEdition, setRevEdition] = useState("");
@@ -193,6 +216,7 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
   useEffect(() => {
     if (!cabinetId && cabinets[0]) setCabinetId(String(cabinets[0].id));
     if (!revCabinetId && cabinets[0]) setRevCabinetId(String(cabinets[0].id));
+    if (!shelfCabId && cabinets[0]) setShelfCabId(String(cabinets[0].id));
   }, [cabinets]);
 
   const selectedManualCab = cabinets.find((c) => String(c.id) === cabinetId) || cabinets[0];
@@ -237,15 +261,33 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
     setImgZoom(1);
     setImgRotate(0);
     const ex = activeReviewItem.extracted;
-    setRevTitle(ex?.title || "");
+    setRevTitle(ex?.title || ex?.set_name || "");
+    setRevSetName(ex?.set_name || "");
     setRevAuthor(ex?.author || "");
     setRevVolume(ex?.volume || "");
+    const rawVols =
+      Array.isArray(ex?.volumes) && ex.volumes.length > 0
+        ? ex.volumes
+        : Array.isArray(activeReviewItem.spine_extracted) && activeReviewItem.spine_extracted.length > 0
+        ? activeReviewItem.spine_extracted
+        : [];
+    setRevVolumes(
+      activeReviewItem.is_shelf_set
+        ? rawVols.length > 0
+          ? rawVols.map((v) => ({
+              volume: String(v.volume || ""),
+              copiesCount: Math.max(1, Number(v.copiesCount) || 1),
+              notes: v.notes ? String(v.notes) : "",
+            }))
+          : [{ volume: ex?.volume || "חלק א׳", copiesCount: 1, notes: "" }]
+        : []
+    );
     setRevPublisher(ex?.publisher || "");
     setRevPubYear(ex?.pub_year || "");
     setRevEdition(ex?.edition || "");
     setRevCategory(ex?.category || "הלכה");
     setRevTags(Array.isArray(ex?.tags) ? ex.tags.join(", ") : "");
-    setRevFormatSize("");
+    setRevFormatSize((ex as any)?.format_size || "");
     setRevThicknessMm("");
     setRevPagesCount("");
     setRevNotes(ex?.notes || "");
@@ -287,6 +329,7 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           title: title.trim(),
+          set_name: setName.trim(),
           author: author.trim(),
           volume: volume.trim(),
           publisher: publisher.trim(),
@@ -315,12 +358,16 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
       );
       setCopiesCount(1);
       if (keepForNextVolume) {
+        const nextSuggested = suggestNextVolume(volume);
         setVolume("");
+        setNextVolSuggestion(nextSuggested);
         setTimeout(() => volumeRef.current?.focus(), 40);
       } else {
         setTitle("");
+        setSetName("");
         setAuthor("");
         setVolume("");
+        setNextVolSuggestion("");
         setPublisher("");
         setPubYear("");
         setEdition("");
@@ -373,6 +420,8 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
         body: JSON.stringify({
           items: compressedItems,
           autoProcess: hasApiKey,
+          set_batch_id: stickySetEnabled ? stickyBatchId : null,
+          preset_set_name: stickySetEnabled ? stickyPresetSetName.trim() : "",
         }),
       });
       const data = await resp.json();
@@ -463,6 +512,8 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
             },
           ],
           autoProcess: hasApiKey,
+          set_batch_id: stickySetEnabled ? stickyBatchId : null,
+          preset_set_name: stickySetEnabled ? stickyPresetSetName.trim() : "",
         }),
       });
       if (!res.ok) throw new Error("שגיאה בשליחת הצילומים לתור");
@@ -481,19 +532,134 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
     }
   };
 
+  const handlePickShelfTitleFiles = async (fileList: FileList | null) => {
+    if (!fileList || fileList.length === 0) return;
+    const file = Array.from(fileList).find((f) => f.type.startsWith("image/"));
+    if (!file) return;
+    setUploadingAi(true);
+    setAiError(null);
+    try {
+      const res = await compressImageToJpeg(file, 1400, 0.82);
+      setShelfTitleImage({ dataUrl: `data:image/jpeg;base64,${res.base64}`, base64: res.base64, compKb: res.compKb });
+    } catch (err: any) {
+      setAiError(err?.message || "שגיאה בטעינת תמונת השער");
+    } finally {
+      setUploadingAi(false);
+      if (shelfTitleInputRef.current) shelfTitleInputRef.current.value = "";
+    }
+  };
+
+  const handlePickShelfSpineFiles = async (fileList: FileList | null) => {
+    if (!fileList || fileList.length === 0) return;
+    const files = Array.from(fileList).filter((f) => f.type.startsWith("image/"));
+    if (files.length === 0) return;
+    setUploadingAi(true);
+    setAiError(null);
+    try {
+      const next: Array<{ dataUrl: string; base64: string; compKb: number }> = [];
+      for (const f of files) {
+        const res = await compressImageToJpeg(f, 1400, 0.82);
+        next.push({ dataUrl: `data:image/jpeg;base64,${res.base64}`, base64: res.base64, compKb: res.compKb });
+      }
+      setShelfSpineImages((prev) => [...prev, ...next]);
+    } catch (err: any) {
+      setAiError(err?.message || "שגיאה בטעינת תמונות השדרות");
+    } finally {
+      setUploadingAi(false);
+      if (shelfSpineInputRef.current) shelfSpineInputRef.current.value = "";
+    }
+  };
+
+  const handleSubmitShelfSet = async () => {
+    if (!shelfTitleImage) {
+      setAiError("יש לצרף תמונת שער מייצגת עבור הסט");
+      return;
+    }
+    setUploadingAi(true);
+    setAiError(null);
+    setCompressionStats(null);
+    try {
+      const res = await fetch("/api/ai-queue/upload-shelf-set", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          titleImage: { imageBase64: shelfTitleImage.base64, mimeType: "image/jpeg" },
+          spineImages: shelfSpineImages.map((s) => ({ imageBase64: s.base64, mimeType: "image/jpeg" })),
+          default_cabinet_id: shelfCabId ? Number(shelfCabId) : null,
+          default_shelf_number: shelfNum,
+          set_batch_id: stickySetEnabled ? stickyBatchId : null,
+          preset_set_name: shelfPresetSetName.trim(),
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "שגיאה בשליחת הסט לתור");
+      setCompressionStats(`סט מהמדף נשלח לפענוח (שער + ${shelfSpineImages.length} תמונות שדרות)`);
+      setShelfTitleImage(null);
+      setShelfSpineImages([]);
+      setShelfPresetSetName("");
+      await Promise.all([loadQueue(), onReload()]);
+    } catch (err: any) {
+      setAiError(err?.message || "שגיאה בשליחת הסט מהמדף");
+    } finally {
+      setUploadingAi(false);
+    }
+  };
+
+  const handleApplyBatchDetails = async () => {
+    if (!activeReviewItem?.set_batch_id) return;
+    setApplyingBatch(true);
+    setReviewNotice(null);
+    try {
+      const res = await fetch("/api/ai-queue/batch-apply-set", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          batchId: activeReviewItem.set_batch_id,
+          set_name: revSetName.trim() || revTitle.trim(),
+          author: revAuthor.trim(),
+          publisher: revPublisher.trim(),
+          category: revCategory.trim(),
+          default_cabinet_id: revCabinetId ? Number(revCabinetId) : null,
+          default_shelf_number: revShelf,
+          format_size: revFormatSize.trim(),
+          edition: revEdition.trim(),
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "שגיאה בהחלת פרטי הסט");
+      setReviewNotice(`פרטי הסט הוחלו בהצלחה על ${data.updatedCount} פריטים במקבץ!`);
+      await loadQueue();
+    } catch (err: any) {
+      setAiError(err?.message || "שגיאה בהחלת פרטי הסט");
+    } finally {
+      setApplyingBatch(false);
+    }
+  };
+
   const handleApproveReview = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    if (!activeReviewItem || !revTitle.trim()) return;
+    if (!activeReviewItem) return;
+    const isBatchShelfSet = Boolean(activeReviewItem.is_shelf_set);
+    const cleanedVolumes = revVolumes.filter((v) => v.volume.trim());
+    const effectiveTitle = revTitle.trim() || revSetName.trim();
+    if (!isBatchShelfSet && !effectiveTitle) return;
+    if (isBatchShelfSet && cleanedVolumes.length === 0) {
+      setAiError("יש להגדיר לפחות כרך אחד בטבלת הסט לפני אישור");
+      return;
+    }
     setApproving(true);
     setReviewNotice(null);
+    setAiError(null);
     try {
       const res = await fetch(`/api/ai-queue/${activeReviewItem.id}/approve`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          title: revTitle.trim(),
+          title: effectiveTitle,
+          set_name: revSetName.trim(),
           author: revAuthor.trim(),
           volume: revVolume.trim(),
+          volumes: isBatchShelfSet ? cleanedVolumes : undefined,
           publisher: revPublisher.trim(),
           pub_year: revPubYear.trim(),
           edition: revEdition.trim(),
@@ -591,7 +757,7 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
           )}
 
           <div className="grid grid-cols-1 md:grid-cols-12 gap-4 text-sm">
-            <div className="md:col-span-5">
+            <div className="md:col-span-4">
               <label className="block text-xs font-medium mb-1">שם הספר *</label>
               <input
                 ref={titleRef}
@@ -603,51 +769,72 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
               />
             </div>
 
-            <div className="md:col-span-4">
-              <label className="block text-xs font-medium mb-1">מחבר / מפרש</label>
-              <input
-                type="text"
-                value={author}
-                onChange={(e) => setAuthor(e.target.value)}
-                placeholder="למשל: רבי אריה לייב הלר"
-                className="w-full px-3 py-2 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)]"
+            <div className="md:col-span-3">
+              <AutocompleteInput
+                label="שם הסט / סדרה (אופציונלי)"
+                field="set_name"
+                value={setName}
+                onChange={setSetName}
+                placeholder="למשל: ש״ס וילנא / משנה ברורה"
               />
             </div>
 
             <div className="md:col-span-3">
+              <AutocompleteInput
+                label="מחבר / מפרש"
+                field="author"
+                value={author}
+                onChange={setAuthor}
+                placeholder="למשל: רבי אריה לייב הלר"
+              />
+            </div>
+
+            <div className="md:col-span-2">
               <label className="block text-xs font-medium mb-1">כרך / חלק / מסכת</label>
               <input
                 ref={volumeRef}
                 type="text"
                 value={volume}
-                onChange={(e) => setVolume(e.target.value)}
+                onChange={(e) => {
+                  setVolume(e.target.value);
+                  if (nextVolSuggestion) setNextVolSuggestion("");
+                }}
                 placeholder="למשל: חלק א׳"
                 className="w-full px-3 py-2 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)]"
               />
+              {nextVolSuggestion && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setVolume(nextVolSuggestion);
+                    setNextVolSuggestion("");
+                    setTimeout(() => volumeRef.current?.focus(), 20);
+                  }}
+                  className="mt-1 inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-amber-50 dark:bg-amber-950/40 border border-amber-300/70 text-[11px] font-semibold text-amber-800 dark:text-amber-300 hover:bg-amber-100 cursor-pointer"
+                >
+                  <Sparkles className="w-3 h-3" />
+                  הצעה לכרך הבא: {nextVolSuggestion}
+                </button>
+              )}
             </div>
 
             <div className="md:col-span-3">
-              <label className="block text-xs font-medium mb-1">קטגוריה</label>
-              <input
-                list="otzar-categories-list"
+              <AutocompleteInput
+                label="קטגוריה"
+                field="category"
                 value={category}
-                onChange={(e) => setCategory(e.target.value)}
-                className="w-full px-3 py-2 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)]"
+                onChange={setCategory}
+                placeholder="הלכה / ש״ס בבלי..."
               />
-              <datalist id="otzar-categories-list">
-                {CATEGORY_SUGGESTIONS.map((c) => (
-                  <option key={c} value={c} />
-                ))}
-              </datalist>
             </div>
 
             <div className="md:col-span-3">
-              <label className="block text-xs font-medium mb-1">הוצאה / מכון</label>
-              <input
-                type="text"
+              <AutocompleteInput
+                label="הוצאה / מכון"
+                field="publisher"
                 value={publisher}
-                onChange={(e) => setPublisher(e.target.value)}
-                className="w-full px-3 py-2 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)]"
+                onChange={setPublisher}
+                placeholder="מכון ירושלים / פלדהיים..."
               />
             </div>
 
@@ -850,8 +1037,239 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
             </div>
           )}
 
-          {/* Upload Dropzone & Webcam */}
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+          {/* Scan Mode Switcher & Sticky Set Bar */}
+          <div className="rounded-xl border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] p-3.5 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex flex-wrap gap-1 p-1 rounded-lg bg-[var(--otzar-surface-alt)] border border-[var(--otzar-border-muted)]">
+                <button
+                  type="button"
+                  onClick={() => setScanMode("standard")}
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold cursor-pointer ${
+                    scanMode === "standard"
+                      ? "bg-[var(--otzar-accent)] text-white"
+                      : "text-[var(--otzar-text-muted)] hover:text-[var(--otzar-text)]"
+                  }`}
+                >
+                  <Camera className="w-3.5 h-3.5" />
+                  סריקה רגילה / מקבץ רציף
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setScanMode("shelf-set")}
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold cursor-pointer ${
+                    scanMode === "shelf-set"
+                      ? "bg-[var(--otzar-accent)] text-white"
+                      : "text-[var(--otzar-text-muted)] hover:text-[var(--otzar-text)]"
+                  }`}
+                >
+                  <BookCopy className="w-3.5 h-3.5" />
+                  צילום סט מהמדף (שער + שדרות)
+                </button>
+              </div>
+
+              {scanMode === "standard" && (
+                <div className="flex flex-wrap items-center gap-2">
+                  <label className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-surface)] text-xs font-semibold cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={stickySetEnabled}
+                      onChange={(e) => {
+                        const on = e.target.checked;
+                        setStickySetEnabled(on);
+                        if (on && !stickyBatchId) setStickyBatchId(`batch_${Date.now()}`);
+                      }}
+                      className="accent-[var(--otzar-accent)]"
+                    />
+                    <span>קיבוץ צילומים לסט (Sticky Set)</span>
+                  </label>
+                  {stickySetEnabled && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setStickyBatchId(`batch_${Date.now()}`);
+                        setStickyPresetSetName("");
+                      }}
+                      className="px-2.5 py-1.5 rounded-lg text-xs font-semibold border border-[var(--otzar-accent)] text-[var(--otzar-accent)] hover:bg-[var(--otzar-surface)] cursor-pointer"
+                    >
+                      התחל מקבץ סט חדש
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {scanMode === "standard" && stickySetEnabled && (
+              <div className="grid grid-cols-1 md:grid-cols-12 gap-3 pt-2 border-t border-[var(--otzar-border-muted)] items-end">
+                <div className="md:col-span-5">
+                  <AutocompleteInput
+                    label="שם סט מקדים לכל הצילומים במקבץ (אופציונלי)"
+                    field="set_name"
+                    value={stickyPresetSetName}
+                    onChange={setStickyPresetSetName}
+                    placeholder="למשל: אגרות משה / שו״ת יביע אומר"
+                  />
+                </div>
+                <div className="md:col-span-7 text-xs text-[var(--otzar-text-muted)] pb-2">
+                  מקבץ פעיל: <span className="font-mono font-semibold text-[var(--otzar-accent)]">{stickyBatchId}</span> · כל תמונה שתועלה או תצולם תשויך למקבץ זה ותוכל להחיל את פרטי הסט על כולן בלחיצה אחת במסך האישור.
+                </div>
+              </div>
+            )}
+          </div>
+
+          {scanMode === "shelf-set" ? (
+            <div className="rounded-xl border border-[var(--otzar-border)] bg-[var(--otzar-bg)] p-5 space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <h3 className="font-bold text-base flex items-center gap-2">
+                    <BookCopy className="w-5 h-5 text-[var(--otzar-accent)]" />
+                    מצב סט מהמדף — זיהוי סדרה שלמה מ-2 תמונות (שער + שדרות)
+                  </h3>
+                  <p className="text-xs text-[var(--otzar-text-muted)] mt-0.5">
+                    העלה 1) שער מייצג לפרטי הספר, מחבר והוצאה, ו-2) צילומי שדרות מהמדף לזיהוי כל הכרכים והעותקים במכה אחת.
+                  </p>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="rounded-xl border border-[var(--otzar-border-muted)] bg-[var(--otzar-surface-alt)] p-4 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-bold">1. תמונת שער מייצגת *</span>
+                    <input
+                      ref={shelfTitleInputRef}
+                      type="file"
+                      accept="image/*"
+                      onChange={(e) => handlePickShelfTitleFiles(e.target.files)}
+                      className="hidden"
+                    />
+                    <button
+                      type="button"
+                      disabled={uploadingAi}
+                      onClick={() => shelfTitleInputRef.current?.click()}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-[var(--otzar-accent)] text-white cursor-pointer"
+                    >
+                      <Upload className="w-3.5 h-3.5" />
+                      בחר תמונת שער
+                    </button>
+                  </div>
+                  {shelfTitleImage ? (
+                    <div className="relative h-44 rounded-lg border border-[var(--otzar-border-muted)] bg-black/5 overflow-hidden flex items-center justify-center">
+                      <img src={shelfTitleImage.dataUrl} alt="שער הסט" className="max-h-full max-w-full object-contain" />
+                      <button
+                        type="button"
+                        onClick={() => setShelfTitleImage(null)}
+                        className="absolute top-2 left-2 p-1 rounded-full bg-red-600 text-white cursor-pointer"
+                        title="הסר"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="h-44 rounded-lg border-2 border-dashed border-[var(--otzar-border-muted)] flex flex-col items-center justify-center text-xs text-[var(--otzar-text-muted)]">
+                      <ImagePlus className="w-7 h-7 mb-1.5 opacity-60" />
+                      לחץ על &quot;בחר תמונת שער&quot; (דף השער של כרך אחד מהסט)
+                    </div>
+                  )}
+                </div>
+
+                <div className="rounded-xl border border-[var(--otzar-border-muted)] bg-[var(--otzar-surface-alt)] p-4 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-bold">2. צילומי שדרות הסט על המדף ({shelfSpineImages.length})</span>
+                    <input
+                      ref={shelfSpineInputRef}
+                      type="file"
+                      accept="image/*"
+                      multiple
+                      onChange={(e) => handlePickShelfSpineFiles(e.target.files)}
+                      className="hidden"
+                    />
+                    <button
+                      type="button"
+                      disabled={uploadingAi}
+                      onClick={() => shelfSpineInputRef.current?.click()}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border border-[var(--otzar-accent)] text-[var(--otzar-accent)] bg-[var(--otzar-bg)] cursor-pointer"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                      הוסף צילומי שדרות
+                    </button>
+                  </div>
+                  {shelfSpineImages.length > 0 ? (
+                    <div className="grid grid-cols-3 gap-2 max-h-44 overflow-y-auto p-1">
+                      {shelfSpineImages.map((sp, idx) => (
+                        <div key={idx} className="relative h-24 rounded-lg border border-[var(--otzar-border-muted)] bg-black/5 overflow-hidden">
+                          <img src={sp.dataUrl} alt={`שדרות ${idx + 1}`} className="w-full h-full object-cover" />
+                          <button
+                            type="button"
+                            onClick={() => setShelfSpineImages((prev) => prev.filter((_, i) => i !== idx))}
+                            className="absolute top-1 left-1 p-0.5 rounded-full bg-red-600 text-white cursor-pointer"
+                          >
+                            <X className="w-3 h-3" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="h-44 rounded-lg border-2 border-dashed border-[var(--otzar-border-muted)] flex flex-col items-center justify-center text-xs text-[var(--otzar-text-muted)] text-center px-3">
+                      <Layers className="w-7 h-7 mb-1.5 opacity-60" />
+                      העלה תמונה אחת או יותר של שדרות הכרכים על המדף כדי שה-AI ימנה את כל הכרכים והעותקים
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-12 gap-3 pt-2 border-t border-[var(--otzar-border-muted)] items-end text-sm">
+                <div className="md:col-span-4">
+                  <AutocompleteInput
+                    label="שם הסט (אופציונלי)"
+                    field="set_name"
+                    value={shelfPresetSetName}
+                    onChange={setShelfPresetSetName}
+                    placeholder="ייקבע אוטומטית מהשער אם ריק"
+                  />
+                </div>
+                <div className="md:col-span-3">
+                  <label className="block text-xs font-medium mb-1">ארון יעד</label>
+                  <select
+                    value={shelfCabId}
+                    onChange={(e) => {
+                      setShelfCabId(e.target.value);
+                      setShelfNum(1);
+                    }}
+                    className="w-full px-3 py-2 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)]"
+                  >
+                    {cabinets.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        ארון {c.code} ({c.main_subject})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="md:col-span-2">
+                  <label className="block text-xs font-medium mb-1">מדף</label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={cabinets.find((c) => String(c.id) === shelfCabId)?.shelves_count || 20}
+                    value={shelfNum}
+                    onChange={(e) => setShelfNum(Math.max(1, Number(e.target.value) || 1))}
+                    className="w-full px-3 py-2 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] tabular-nums"
+                  />
+                </div>
+                <div className="md:col-span-3 flex justify-end">
+                  <button
+                    type="button"
+                    disabled={uploadingAi || !shelfTitleImage}
+                    onClick={handleSubmitShelfSet}
+                    className="w-full inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-sm font-bold text-white bg-[var(--otzar-accent)] hover:bg-[var(--otzar-accent-hover)] cursor-pointer disabled:opacity-40"
+                  >
+                    <CheckCircle2 className="w-4 h-4" />
+                    {uploadingAi ? "שולח..." : "שלח סט שלם לפענוח AI"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          ) : (
+            /* Upload Dropzone & Webcam */
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
             <div
               onDragOver={(e) => e.preventDefault()}
               onDrop={(e) => {
@@ -1046,6 +1464,7 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
               )}
             </div>
           </div>
+          )}
 
           {/* Queue Monitor Bar */}
           <div className="rounded-xl border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] p-4 space-y-3">
@@ -1210,7 +1629,7 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
                         : "border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)]"
                     }`}
                   >
-                    #{q.id} · {q.extracted?.title || (q.processing_status === "error" ? "שגיאה" : "ממתין")}
+                    #{q.id} · {q.is_shelf_set ? "[סט מהמדף] " : ""}{q.extracted?.title || q.extracted?.set_name || (q.processing_status === "error" ? "שגיאה" : "ממתין")}
                   </button>
                 ))}
               </div>
@@ -1308,51 +1727,118 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
                     </div>
                   )}
 
+                  {/* Sticky Set Batch Banner */}
+                  {(() => {
+                    const batchId = activeReviewItem.set_batch_id;
+                    const otherCount = batchId
+                      ? queueItems.filter(
+                          (q) => q.id !== activeReviewItem.id && q.set_batch_id === batchId && q.approval_status === "pending"
+                        ).length
+                      : 0;
+                    if (!batchId || otherCount === 0) return null;
+                    return (
+                      <div className="p-3 rounded-lg border border-amber-300 bg-amber-50 dark:bg-amber-950/40 dark:border-amber-800/60 text-amber-900 dark:text-amber-200 text-xs flex flex-wrap items-center justify-between gap-2">
+                        <span className="font-semibold">
+                          זוהו עוד {otherCount} צילומים במקבץ סט זה ({batchId}) — החל עליהם את פרטי הסט (שם סט, מחבר, הוצאה, מיקום)?
+                        </span>
+                        <button
+                          type="button"
+                          disabled={applyingBatch}
+                          onClick={handleApplyBatchDetails}
+                          className="px-3 py-1.5 rounded-lg bg-amber-600 text-white font-bold hover:bg-amber-700 cursor-pointer disabled:opacity-50"
+                        >
+                          {applyingBatch ? "מחיל..." : "החל על כל המקבץ"}
+                        </button>
+                      </div>
+                    );
+                  })()}
+
+                  {/* Authority Suggestion Banner (85-93% similarity) */}
+                  {(() => {
+                    const suggObj = activeReviewItem.extracted?.authority_suggestion;
+                    const suggText = typeof suggObj === "string" ? suggObj : suggObj?.suggestion;
+                    const suggConf = typeof suggObj === "object" && suggObj ? suggObj.confidence : null;
+                    if (!suggText || suggText === revAuthor.trim()) return null;
+                    return (
+                      <div className="p-2.5 rounded-lg border border-sky-300 bg-sky-50 dark:bg-sky-950/30 dark:border-sky-800 text-sky-900 dark:text-sky-200 text-xs flex flex-wrap items-center justify-between gap-2">
+                        <span>
+                          שם מחבר דומה קיים במאגר{suggConf ? ` (${suggConf}%)` : ""}: <strong>{suggText}</strong>
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setRevAuthor(suggText)}
+                          className="px-2.5 py-1 rounded bg-sky-600 text-white font-semibold hover:bg-sky-700 cursor-pointer"
+                        >
+                          לחץ להחלה
+                        </button>
+                      </div>
+                    );
+                  })()}
+
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                    <div className="md:col-span-2">
-                      <label className="block text-xs font-medium mb-1">שם הספר *</label>
+                    <div>
+                      <label className="block text-xs font-medium mb-1">
+                        {activeReviewItem.is_shelf_set ? "שם הספר הכללי (אופציונלי אם הוזן שם סט)" : "שם הספר *"}
+                      </label>
                       <input
                         type="text"
-                        required
+                        required={!activeReviewItem.is_shelf_set}
                         value={revTitle}
                         onChange={(e) => setRevTitle(e.target.value)}
                         className="w-full px-3 py-2 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] font-semibold"
                       />
                     </div>
                     <div>
-                      <label className="block text-xs font-medium mb-1">מחבר / מפרש</label>
-                      <input
-                        type="text"
-                        value={revAuthor}
-                        onChange={(e) => setRevAuthor(e.target.value)}
-                        className="w-full px-3 py-2 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)]"
+                      <AutocompleteInput
+                        label="שם הסט / סדרה"
+                        field="set_name"
+                        value={revSetName}
+                        onChange={setRevSetName}
+                        placeholder="למשל: משנה ברורה / שו״ת יביע אומר"
                       />
                     </div>
                     <div>
-                      <label className="block text-xs font-medium mb-1">כרך / חלק</label>
-                      <input
-                        type="text"
-                        value={revVolume}
-                        onChange={(e) => setRevVolume(e.target.value)}
-                        className="w-full px-3 py-2 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)]"
-                      />
+                      {(() => {
+                        const uni = activeReviewItem.extracted?.authority_unified;
+                        const uniObj = typeof uni === "object" && uni ? uni : null;
+                        return (
+                          <AutocompleteInput
+                            label="מחבר / מפרש"
+                            field="author"
+                            value={revAuthor}
+                            onChange={setRevAuthor}
+                            badgeText={uniObj ? `אוחד עם השם הקיים במאגר (${uniObj.matched})` : uni ? "אוחד עם השם הקיים במאגר" : undefined}
+                            rawRestorableValue={uniObj?.original}
+                            onRestoreRaw={uniObj?.original ? () => setRevAuthor(uniObj.original) : undefined}
+                          />
+                        );
+                      })()}
                     </div>
+                    {!activeReviewItem.is_shelf_set && (
+                      <div>
+                        <label className="block text-xs font-medium mb-1">כרך / חלק</label>
+                        <input
+                          type="text"
+                          value={revVolume}
+                          onChange={(e) => setRevVolume(e.target.value)}
+                          className="w-full px-3 py-2 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)]"
+                        />
+                      </div>
+                    )}
                     <div>
-                      <label className="block text-xs font-medium mb-1">קטגוריה</label>
-                      <input
-                        list="otzar-categories-list"
+                      <AutocompleteInput
+                        label="קטגוריה"
+                        field="category"
                         value={revCategory}
-                        onChange={(e) => setRevCategory(e.target.value)}
-                        className="w-full px-3 py-2 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)]"
+                        onChange={setRevCategory}
                       />
                     </div>
                     <div>
-                      <label className="block text-xs font-medium mb-1">הוצאה לאור</label>
-                      <input
-                        type="text"
+                      <AutocompleteInput
+                        label="הוצאה לאור"
+                        field="publisher"
                         value={revPublisher}
-                        onChange={(e) => setRevPublisher(e.target.value)}
-                        className="w-full px-3 py-2 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)]"
+                        onChange={setRevPublisher}
                       />
                     </div>
                     <div>
@@ -1417,6 +1903,79 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
                         />
                       </div>
                     </div>
+                    {activeReviewItem.is_shelf_set && (
+                      <div className="md:col-span-2 rounded-xl border border-[var(--otzar-border)] bg-[var(--otzar-surface-alt)] p-3 space-y-2.5">
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs font-bold flex items-center gap-1.5">
+                            <BookCopy className="w-4 h-4 text-[var(--otzar-accent)]" />
+                            כרכים ועותקים שזוהו על המדף ({revVolumes.length} שורות)
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const lastVol = revVolumes[revVolumes.length - 1]?.volume || "";
+                              const nextVol = suggestNextVolume(lastVol) || `חלק ${revVolumes.length + 1}`;
+                              setRevVolumes((prev) => [...prev, { volume: nextVol, copiesCount: 1, notes: "" }]);
+                            }}
+                            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-semibold bg-[var(--otzar-accent)] text-white cursor-pointer"
+                          >
+                            <Plus className="w-3.5 h-3.5" />
+                            הוסף כרך
+                          </button>
+                        </div>
+                        <div className="space-y-1.5 max-h-56 overflow-y-auto">
+                          {revVolumes.map((row, idx) => (
+                            <div key={idx} className="grid grid-cols-12 gap-2 items-center">
+                              <input
+                                type="text"
+                                value={row.volume}
+                                onChange={(e) =>
+                                  setRevVolumes((prev) =>
+                                    prev.map((r, i) => (i === idx ? { ...r, volume: e.target.value } : r))
+                                  )
+                                }
+                                placeholder="כרך / חלק"
+                                className="col-span-5 px-2.5 py-1.5 rounded border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] text-xs font-medium"
+                              />
+                              <input
+                                type="number"
+                                min={1}
+                                max={20}
+                                value={row.copiesCount}
+                                onChange={(e) =>
+                                  setRevVolumes((prev) =>
+                                    prev.map((r, i) =>
+                                      i === idx ? { ...r, copiesCount: Math.max(1, Number(e.target.value) || 1) } : r
+                                    )
+                                  )
+                                }
+                                title="כמות עותקים"
+                                className="col-span-2 px-2 py-1.5 rounded border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] text-xs text-center tabular-nums font-bold"
+                              />
+                              <input
+                                type="text"
+                                value={row.notes || ""}
+                                onChange={(e) =>
+                                  setRevVolumes((prev) =>
+                                    prev.map((r, i) => (i === idx ? { ...r, notes: e.target.value } : r))
+                                  )
+                                }
+                                placeholder="הערה (אופציונלי)"
+                                className="col-span-4 px-2.5 py-1.5 rounded border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] text-xs"
+                              />
+                              <button
+                                type="button"
+                                onClick={() => setRevVolumes((prev) => prev.filter((_, i) => i !== idx))}
+                                className="col-span-1 p-1.5 text-red-600 hover:bg-red-50 rounded cursor-pointer flex justify-center"
+                                title="הסר שורה"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                     <div className="md:col-span-2">
                       <label className="block text-xs font-medium mb-1">תגיות חיפוש ונושאים (ניתנות לעריכה)</label>
                       <input
@@ -1501,11 +2060,20 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
                     </button>
                     <button
                       type="submit"
-                      disabled={approving || !revTitle.trim()}
+                      disabled={
+                        approving ||
+                        (activeReviewItem.is_shelf_set
+                          ? revVolumes.filter((v) => v.volume.trim()).length === 0
+                          : !revTitle.trim())
+                      }
                       className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-bold text-white bg-[var(--otzar-accent)] hover:bg-[var(--otzar-accent-hover)] cursor-pointer disabled:opacity-40"
                     >
                       <CheckCircle2 className="w-4 h-4" />
-                      {approving ? "מאשר..." : "אשר והוסף לאוצר (Enter)"}
+                      {approving
+                        ? "מאשר..."
+                        : activeReviewItem.is_shelf_set
+                        ? `אשר את כל הסט (${revVolumes.reduce((s, v) => s + (v.volume.trim() ? Math.max(1, v.copiesCount || 1) : 0), 0)} עותקים)`
+                        : "אשר והוסף לאוצר (Enter)"}
                     </button>
                   </div>
                 </form>

@@ -798,16 +798,23 @@ export class OtzarFirebaseSyncService {
 
       const [firstPath, ...extraPaths] = savedPaths;
       const createdAt = String(data.created_at || new Date().toISOString());
+      const setBatchId = data.set_batch_id ? String(data.set_batch_id).trim() : null;
+      const isShelfSet = data.is_shelf_set ? 1 : 0;
+      const presetSetName = data.preset_set_name ? String(data.preset_set_name).trim() : "";
+      const initialExtractedJson = presetSetName ? JSON.stringify({ set_name: presetSetName }) : "";
 
       this.db.run(
         `INSERT INTO ai_catalog_queue
-         (image_path, extra_images_json, default_cabinet_id, default_shelf_number, source_relay_id, processing_status, approval_status, created_at)
-         VALUES (?, ?, ?, ?, ?, 'pending', 'pending', ?)`,
+         (image_path, extra_images_json, default_cabinet_id, default_shelf_number, source_relay_id, set_batch_id, is_shelf_set, extracted_json, processing_status, approval_status, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'pending', ?)`,
         firstPath,
         JSON.stringify(extraPaths),
         defaultCabId,
         defaultShelf,
         relayId,
+        setBatchId,
+        isShelfSet,
+        initialExtractedJson,
         createdAt
       );
 
@@ -1091,6 +1098,7 @@ export class OtzarFirebaseSyncService {
               barcode: String(bk.barcode || ""),
               barcode_status: String(bk.barcode_status || "assigned"),
               title: String(bk.title || ""),
+              set_name: String(bk.set_name || ""),
               author: String(bk.author || ""),
               volume: String(bk.volume || ""),
               publisher: String(bk.publisher || ""),
@@ -1397,13 +1405,14 @@ export class OtzarFirebaseSyncService {
         }
         this.db.run(
           `UPDATE books
-           SET barcode = ?, title = ?, author = ?, volume = ?, publisher = ?, pub_year = ?, edition = ?, category = ?,
+           SET barcode = ?, title = ?, set_name = ?, author = ?, volume = ?, publisher = ?, pub_year = ?, edition = ?, category = ?,
                tags = ?, normalized_search = ?, cabinet_id = ?, shelf_number = ?, notes = ?, status = ?, label_printed = ?,
                format_size = ?, thickness_mm = ?, pages_count = ?, barcode_status = ?, updated_at = ?, deleted_at = NULL
                ${embBlob !== undefined ? ", embedding = ?" : ""}
            WHERE sync_id = ?`,
           targetBarcode,
           title,
+          String(data.set_name || ""),
           String(data.author || ""),
           String(data.volume || ""),
           String(data.publisher || ""),
@@ -1428,12 +1437,13 @@ export class OtzarFirebaseSyncService {
       } else {
         this.db.run(
           `INSERT INTO books
-           (barcode, title, author, volume, publisher, pub_year, edition, category, tags, normalized_search, embedding,
+           (barcode, title, set_name, author, volume, publisher, pub_year, edition, category, tags, normalized_search, embedding,
             cabinet_id, shelf_number, notes, status, label_printed, created_at, format_size, thickness_mm, pages_count,
             barcode_status, sync_id, updated_at, deleted_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
           targetBarcode,
           title,
+          String(data.set_name || ""),
           String(data.author || ""),
           String(data.volume || ""),
           String(data.publisher || ""),

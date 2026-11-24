@@ -16,6 +16,7 @@ import {
 
 interface SetupTransferPanelProps {
   onReload: () => void;
+  section?: "transfer" | "reset" | "all";
 }
 
 interface BundleSummary {
@@ -43,7 +44,7 @@ interface ImportSuccessResult {
   deleteFileReminder: boolean;
 }
 
-export const SetupTransferPanel: React.FC<SetupTransferPanelProps> = ({ onReload }) => {
+export const SetupTransferPanel: React.FC<SetupTransferPanelProps> = ({ onReload, section = "all" }) => {
   const [mode, setMode] = useState<"export" | "import">("export");
   const [summary, setSummary] = useState<BundleSummary | null>(null);
 
@@ -223,6 +224,7 @@ export const SetupTransferPanel: React.FC<SetupTransferPanelProps> = ({ onReload
 
   return (
     <div className="p-5 rounded-xl border border-[var(--otzar-border-muted)] space-y-5">
+      {(section === "transfer" || section === "all") && (<>
       {/* Header + Segmented Switch */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="space-y-0.5">
@@ -471,8 +473,14 @@ export const SetupTransferPanel: React.FC<SetupTransferPanelProps> = ({ onReload
         </div>
       )}
 
+      </>)}
+
+
+
       {/* Clean Start Reset Section */}
-      <div className="border-t border-[var(--otzar-border-muted)] pt-4 space-y-2.5">
+
+      {(section === "reset" || section === "all") && (<>
+      <div className={section === "all" ? "border-t border-[var(--otzar-border-muted)] pt-4 space-y-2.5" : "space-y-2.5"}>
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="space-y-0.5">
             <div className="flex items-center gap-2 text-sm font-semibold">
@@ -504,6 +512,10 @@ export const SetupTransferPanel: React.FC<SetupTransferPanelProps> = ({ onReload
           </div>
         )}
       </div>
+
+      </>)}
+
+
 
       {/* Double Confirmation Modal for Clean Start */}
       {cleanModalOpen && (

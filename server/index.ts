@@ -6,6 +6,7 @@ import { fileURLToPath } from "url";
 import { openDatabase } from "./db/adapter.ts";
 import { buildNormalizedBookSearch, enqueueSyncOutbox, initSchemaAndSeed, newSyncId } from "./db/schema.ts";
 import { searchBooksOffline, type SearchableBook } from "./search/torahSearch.ts";
+import { getAuthoritySuggestions, torahNaturalVolumeSort } from "./search/torahAuthority.ts";
 import { registerCirculationRoutes } from "./routes/circulation.ts";
 import { registerCatalogAiRoutes } from "./routes/catalogAi.ts";
 import { registerLabelsAndAdminRoutes } from "./routes/labelsAndAdmin.ts";
@@ -420,6 +421,7 @@ export async function startOtzarServer(options: OtzarServerOptions = {}): Promis
   app.post("/api/books", requireAdmin, (req, res) => {
     const {
       title,
+      set_name = "",
       author = "",
       volume = "",
       publisher = "",
@@ -464,11 +466,11 @@ export async function startOtzarServer(options: OtzarServerOptions = {}): Promis
           nextNum++;
         }
         const syncId = newSyncId();
-        const norm = buildNormalizedBookSearch([code, title, author, volume, publisher, pub_year, edition, category, tagsArr.join(" "), notes]);
+        const norm = buildNormalizedBookSearch([code, title, set_name, author, volume, publisher, pub_year, edition, category, tagsArr.join(" "), notes]);
         db.run(
-          `INSERT INTO books (barcode, title, author, volume, publisher, pub_year, edition, category, tags, normalized_search, cabinet_id, shelf_number, notes, status, label_printed, created_at, format_size, thickness_mm, pages_count, barcode_status, sync_id, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)`,
-          code, title.trim(), String(author).trim(), String(volume).trim(), String(publisher).trim(),
+          `INSERT INTO books (barcode, title, set_name, author, volume, publisher, pub_year, edition, category, tags, normalized_search, cabinet_id, shelf_number, notes, status, label_printed, created_at, format_size, thickness_mm, pages_count, barcode_status, sync_id, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          code, title.trim(), String(set_name || "").trim(), String(author).trim(), String(volume).trim(), String(publisher).trim(),
           String(pub_year).trim(), String(edition).trim(),
           String(category).trim(), JSON.stringify(tagsArr), norm, cabinet_id ? Number(cabinet_id) : null,
           shelf_number ? Number(shelf_number) : null, String(notes).trim(), status, now,
@@ -484,7 +486,7 @@ export async function startOtzarServer(options: OtzarServerOptions = {}): Promis
 
     const cfg = getAiConfig(db);
     if (cfg.hasAnyKey && createdBarcodes.length > 0) {
-      const embText = buildBookEmbeddingText({ title, author, volume, publisher, pub_year, edition, category, tags: tagsArr, notes });
+      const embText = buildBookEmbeddingText({ title, set_name, author, volume, publisher, pub_year, edition, category, tags: tagsArr, notes });
       void generateTextEmbedding(db, embText)
         .then((vec) => {
           const blob = float32ToBlob(vec);
@@ -510,6 +512,7 @@ export async function startOtzarServer(options: OtzarServerOptions = {}): Promis
     }
     const {
       title = existing.title,
+      set_name = existing.set_name || "",
       author = existing.author,
       volume = existing.volume,
       publisher = existing.publisher,
@@ -535,6 +538,7 @@ export async function startOtzarServer(options: OtzarServerOptions = {}): Promis
     const norm = buildNormalizedBookSearch([
       barcode,
       String(title),
+      String(set_name),
       String(author),
       String(volume),
       String(publisher),
@@ -547,9 +551,10 @@ export async function startOtzarServer(options: OtzarServerOptions = {}): Promis
 
     db.run(
       `UPDATE books
-       SET title = ?, author = ?, volume = ?, publisher = ?, pub_year = ?, edition = ?, category = ?, tags = ?, normalized_search = ?, cabinet_id = ?, shelf_number = ?, notes = ?, status = ?, format_size = ?, thickness_mm = ?, pages_count = ?, barcode_status = ?, updated_at = ?
+       SET title = ?, set_name = ?, author = ?, volume = ?, publisher = ?, pub_year = ?, edition = ?, category = ?, tags = ?, normalized_search = ?, cabinet_id = ?, shelf_number = ?, notes = ?, status = ?, format_size = ?, thickness_mm = ?, pages_count = ?, barcode_status = ?, updated_at = ?
        WHERE barcode = ?`,
       String(title).trim(),
+      String(set_name || "").trim(),
       String(author).trim(),
       String(volume).trim(),
       String(publisher).trim(),
@@ -579,6 +584,7 @@ export async function startOtzarServer(options: OtzarServerOptions = {}): Promis
     if (cfg.hasAnyKey) {
       const embText = buildBookEmbeddingText({
         title: String(title),
+        set_name: String(set_name),
         author: String(author),
         volume: String(volume),
         publisher: String(publisher),
@@ -613,6 +619,33 @@ export async function startOtzarServer(options: OtzarServerOptions = {}): Promis
       db.run("DELETE FROM books WHERE barcode = ?", barcode);
     });
     res.json({ ok: true });
+  });
+
+  // Suggestions API for Authority Autocomplete (author, set_name, publisher, category)
+  app.get("/api/catalog/suggestions", (req, res) => {
+    const field = String(req.query.field || "author") as "author" | "set_name" | "publisher" | "category";
+    const q = String(req.query.q || "");
+    const suggestions = getAuthoritySuggestions(db, field, q, 25);
+    res.json({ suggestions });
+  });
+
+  // Multi-volume series / set query with natural Torah volume sort
+  app.get("/api/books/set/:setName", (req, res) => {
+    const setName = String(req.params.setName || "").trim();
+    if (!setName) return res.json({ books: [] });
+    const rows = db.all<Record<string, unknown>>(
+      `SELECT b.*, c.code AS cabinet_code, c.main_subject AS cabinet_subject
+       FROM books b
+       LEFT JOIN cabinets c ON b.cabinet_id = c.id
+       WHERE b.set_name = ? AND b.deleted_at IS NULL`,
+      setName
+    );
+    rows.sort((a, b) => torahNaturalVolumeSort(a.volume, b.volume));
+    const cleanRows = rows.map((r) => {
+      const { embedding: _drop, ...rest } = r;
+      return { ...rest, tagsList: parseTags(r.tags) };
+    });
+    res.json({ books: cleanRows });
   });
 
   // Stage 3: Circulation, Borrowers & CSV/Excel Import

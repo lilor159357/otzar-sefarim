@@ -4,6 +4,7 @@ import type { DbClient } from "../db/adapter.ts";
 
 export interface ExtractedBookMetadata {
   title: string;
+  set_name?: string;
   author: string;
   volume: string;
   publisher: string;
@@ -12,6 +13,27 @@ export interface ExtractedBookMetadata {
   category: string;
   notes: string;
   tags: string[];
+  canonical_author?: string;
+  authority_suggestion?: { field: string; suggestion: string; confidence: number };
+  authority_unified?: { field: string; original: string; matched: string };
+}
+
+export interface ExtractedShelfSetVolume {
+  volume: string;
+  copiesCount: number;
+  notes?: string;
+}
+
+export interface ExtractedShelfSet {
+  set_name: string;
+  author: string;
+  publisher: string;
+  pub_year: string;
+  edition: string;
+  category: string;
+  notes: string;
+  tags: string[];
+  volumes: ExtractedShelfSetVolume[];
 }
 
 export interface AiKeyEntry {
@@ -587,7 +609,7 @@ export async function analyzeBookCoverImage(
     "אתה ספרן תורני מומחה בישיבה. תפקידך לפענח צילומי שערי ספרים תורניים (כולל אותיות מרובעות, כתב רש״י וראשי תיבות תורניים כמו שו״ע, רמב״ם, משנ״ב, ש״ס, שו״ת). אם מצורפות מספר תמונות, כולן דפים שונים של אותו ספר (למשל שער ראשי, גב שער עם שנת הוצאה ומהדורה, כריכה או תוכן עניינים) — מזג את הפרטים מכל התמונות לרשומה אחת מלאה ומדויקת. החזר JSON מדויק בלבד בעברית. בשדה tags צור 5 עד 10 תגיות חיפוש שימושיות (נושאים, מסכתות, סימנים, כינויים וראשי תיבות נפוצים).";
 
   const userPrompt =
-    "פענח את דפי הספר המצולמים וחלץ: שם הספר (title), שם המחבר/מפרש (author), כרך/חלק/מסכת (volume), הוצאה/מכון (publisher), שנת הוצאה (pub_year - עברי או לועזי אם מופיעה באחד הדפים), מהדורה (edition - למשל מהדורה מתוקנת, מורחבת, שניה, עוז והדר), קטגוריה ראשית (category - למשל ש״ס בבלי, הלכה, רמב״ם, תנ״ך, שו״ת, מוסר ומחשבה, חסידות), הערות קצרות (notes), ו-5 עד 10 תגיות חיפוש (tags). אם שדה לא מופיע באף תמונה השאר מחרוזת ריקה.";
+    "פענח את דפי הספר המצולמים וחלץ: שם הספר המלא (title), שם הסט/הסדרה אם הספר הוא חלק מסט כמו משנה ברורה/שולחן ערוך/ילקוט יוסף/שבט הלוי (set_name), שם המחבר/מפרש (author), כרך/חלק/מסכת (volume), הוצאה/מכון (publisher), שנת הוצאה (pub_year - עברי או לועזי אם מופיעה באחד הדפים), מהדורה (edition - למשל מהדורה מתוקנת, מורחבת, שניה, עוז והדר), קטגוריה ראשית (category - למשל ש״ס בבלי, הלכה, רמב״ם, תנ״ך, שו״ת, מוסר ומחשבה, חסידות), הערות קצרות (notes), ו-5 עד 10 תגיות חיפוש (tags). אם שדה לא מופיע באף תמונה השאר מחרוזת ריקה.";
 
   const imageParts = images.map((img) => ({
     inlineData: {
@@ -617,6 +639,7 @@ export async function analyzeBookCoverImage(
           type: Type.OBJECT,
           properties: {
             title: { type: Type.STRING, description: "שם הספר המלא" },
+            set_name: { type: Type.STRING, description: "שם הסט או הסדרה אם הספר שייך לסט/סדרה רב-כרכית, ריק אם ספר בודד" },
             author: { type: Type.STRING, description: "שם המחבר או המפרש" },
             volume: { type: Type.STRING, description: "כרך, חלק או מסכת" },
             publisher: { type: Type.STRING, description: "הוצאה לאור או מכון" },
@@ -641,6 +664,7 @@ export async function analyzeBookCoverImage(
 
   return {
     title: String(parsed.title || "").trim(),
+    set_name: String(parsed.set_name || "").trim(),
     author: String(parsed.author || "").trim(),
     volume: String(parsed.volume || "").trim(),
     publisher: String(parsed.publisher || "").trim(),
@@ -651,6 +675,111 @@ export async function analyzeBookCoverImage(
     tags: Array.isArray(parsed.tags)
       ? parsed.tags.map((t) => String(t).trim()).filter(Boolean).slice(0, 12)
       : [],
+  };
+}
+
+
+export async function analyzeShelfSetImages(
+  db: DbClient,
+  titlePagePart: CoverImagePart,
+  spineImageParts: CoverImagePart[]
+): Promise<ExtractedShelfSet> {
+  const cfg = getAiConfig(db);
+  if (!cfg.hasAnyKey) {
+    throw new Error("לא הוגדר מפתח Gemini API בהגדרות המערכת");
+  }
+
+  const allParts = [
+    {
+      inlineData: {
+        mimeType: titlePagePart.mimeType || "image/jpeg",
+        data: titlePagePart.buffer.toString("base64"),
+      },
+    },
+    ...spineImageParts.map((p) => ({
+      inlineData: {
+        mimeType: p.mimeType || "image/jpeg",
+        data: p.buffer.toString("base64"),
+      },
+    })),
+  ];
+
+  const systemPrompt =
+    "אתה ספרן תורני מומחה בישיבה. לפניך צילומים של סט ספרים: התמונה הראשונה היא עמוד שער מייצג של הסט, ושאר התמונות הן צילום שדרות כרכי הסט העומדים על המדף בספרייה.\n" +
+    "תפקידך:\n" +
+    "1. חלץ מעמוד השער את פרטי הסט הכלליים: שם הסט (set_name), שם המחבר/מפרש (author), הוצאה/מכון (publisher), שנת הוצאה (pub_year), מהדורה (edition), קטגוריה ראשית (category), הערות (notes) ותגיות (tags).\n" +
+    "2. זהה בעיון מתוך שדרות הספרים שעל המדף את רשימת כל הכרכים/החלקים המופיעים (volumes), בסדר כרכים נכון (למשל: חלק א, חלק ב, או ברכות, שבת חלק א). אם כרך מסוים מופיע פעמיים על המדף, ציין copiesCount: 2.";
+
+  const userPrompt =
+    "פענח את צילום השער וצילום השדרות של הסט, וחלץ את פרטי הסט ורשימת כל הכרכים שעל המדף בפורמט JSON מדויק.";
+
+  const { result: response } = await executeWithModelAndKeyFallback(
+    db,
+    cfg.aiModel,
+    cfg.autoFallback,
+    async (apiKey, activeModel) => {
+      const ai = createClient(apiKey);
+      return ai.models.generateContent({
+        model: activeModel,
+        contents: {
+          parts: [...allParts, { text: userPrompt }],
+        },
+        config: {
+          systemInstruction: systemPrompt,
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              set_name: { type: Type.STRING, description: "שם הסט או הסדרה" },
+              author: { type: Type.STRING, description: "שם המחבר או המפרש הראשי" },
+              publisher: { type: Type.STRING, description: "הוצאה לאור או מכון" },
+              pub_year: { type: Type.STRING, description: "שנת הוצאה אם מופיעה בשער" },
+              edition: { type: Type.STRING, description: "מהדורה" },
+              category: { type: Type.STRING, description: "קטגוריה ראשית" },
+              notes: { type: Type.STRING, description: "הערות" },
+              tags: {
+                type: Type.ARRAY,
+                items: { type: Type.STRING },
+                description: "5 עד 10 תגיות חיפוש",
+              },
+              volumes: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    volume: { type: Type.STRING, description: "שם הכרך, החלק או המסכת כפי שמופיע בשדרה" },
+                    copiesCount: { type: Type.INTEGER, description: "מספר העותקים של כרך זה שנראים על המדף (ברירת מחדל 1)" },
+                    notes: { type: Type.STRING, description: "הערה על הכרך במידה ויש" },
+                  },
+                  required: ["volume"],
+                },
+                description: "רשימת הכרכים שעל המדף",
+              },
+            },
+            required: ["set_name", "author", "publisher", "category", "volumes"],
+          },
+        },
+      });
+    }
+  );
+
+  const rawText = (response.text || "{}").trim();
+  const parsed = JSON.parse(rawText) as Partial<ExtractedShelfSet>;
+  const rawVolumes = Array.isArray(parsed.volumes) ? parsed.volumes : [];
+  return {
+    set_name: String(parsed.set_name || "").trim(),
+    author: String(parsed.author || "").trim(),
+    publisher: String(parsed.publisher || "").trim(),
+    pub_year: String(parsed.pub_year || "").trim(),
+    edition: String(parsed.edition || "").trim(),
+    category: String(parsed.category || "").trim() || "כללי",
+    notes: String(parsed.notes || "").trim(),
+    tags: Array.isArray(parsed.tags) ? parsed.tags.map((t) => String(t).trim()).filter(Boolean) : [],
+    volumes: rawVolumes.map((v) => ({
+      volume: String(v.volume || "").trim(),
+      copiesCount: Math.max(1, Number(v.copiesCount) || 1),
+      notes: v.notes ? String(v.notes).trim() : undefined,
+    })),
   };
 }
 
@@ -729,6 +858,7 @@ export function cosineSimilarity(a: Float32Array, b: Float32Array): number {
 
 export function buildBookEmbeddingText(book: {
   title?: string;
+  set_name?: string;
   author?: string;
   volume?: string;
   publisher?: string;
@@ -750,6 +880,7 @@ export function buildBookEmbeddingText(book: {
       })();
   return [
     book.title ? `ספר: ${book.title}` : "",
+    book.set_name ? `סט/סדרה: ${book.set_name}` : "",
     book.author ? `מחבר: ${book.author}` : "",
     book.volume ? `כרך: ${book.volume}` : "",
     book.category ? `קטגוריה: ${book.category}` : "",

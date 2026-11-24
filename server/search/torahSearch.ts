@@ -86,6 +86,7 @@ function damerauLevenshtein(a: string, b: string): number {
 export interface SearchableBook {
   barcode: string;
   title: string;
+  set_name?: string;
   author: string;
   volume: string;
   publisher: string;
@@ -127,6 +128,7 @@ export function searchBooksOffline<T extends SearchableBook>(books: T[], rawQuer
     }
 
     const normTitle = normalizeHebrewText(book.title);
+    const normSetName = normalizeHebrewText(String(book.set_name || ""));
     const normAuthor = normalizeHebrewText(book.author);
     const normCategory = normalizeHebrewText(book.category);
     const normVolume = normalizeHebrewText(book.volume);
@@ -145,6 +147,7 @@ export function searchBooksOffline<T extends SearchableBook>(books: T[], rawQuer
 
     const combinedText = [
       normTitle,
+      normSetName,
       normAuthor,
       normVolume,
       normPublisher,
@@ -180,10 +183,10 @@ export function searchBooksOffline<T extends SearchableBook>(books: T[], rawQuer
       const tokenSyns = SYNONYM_MAP.get(token) || [];
       const tokenSkel = skeletonHebrew(token);
 
-      if (normTitle.includes(token)) {
+      if (normTitle.includes(token) || (normSetName && normSetName.includes(token))) {
         totalScore += 100;
         matchedTokens++;
-        if (!hint) hint = "שם ספר";
+        if (!hint) hint = normTitle.includes(token) ? "שם ספר" : "שם סט";
       } else if (normAuthor.includes(token) || normCategory.includes(token) || normVolume.includes(token) || normPublisher.includes(token) || normPubYear.includes(token) || normEdition.includes(token)) {
         totalScore += 80;
         matchedTokens++;

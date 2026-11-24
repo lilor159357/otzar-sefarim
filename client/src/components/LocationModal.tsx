@@ -1,8 +1,10 @@
 import React, { useEffect, useState } from "react";
-import { X, MapPin, Layers, BookOpen, Pencil, Trash2, Save, CheckCircle2 } from "lucide-react";
+import { X, MapPin, Layers, BookOpen, Pencil, Trash2, Save, CheckCircle2, ChevronDown, ChevronUp, Library } from "lucide-react";
 import type { BookRow, CabinetRow, MapEntrance } from "../types.ts";
 import { FORMAT_SIZE_OPTIONS, STATUS_LABELS } from "../types.ts";
 import { LibraryMap2D } from "./LibraryMap2D.tsx";
+import { AutocompleteInput } from "./AutocompleteInput.tsx";
+import { groupSetVolumes, type SetVolumeGroup } from "../lib/torahUtils.ts";
 
 interface LocationModalProps {
   book: BookRow;
@@ -11,6 +13,7 @@ interface LocationModalProps {
   isAdmin?: boolean;
   initialEditMode?: boolean;
   onBookUpdated?: () => Promise<void>;
+  onSelectBarcode?: (barcode: string) => void;
   onClose: () => void;
 }
 
@@ -21,6 +24,7 @@ export const LocationModal: React.FC<LocationModalProps> = ({
   isAdmin = false,
   initialEditMode = false,
   onBookUpdated,
+  onSelectBarcode,
   onClose,
 }) => {
   const [editing, setEditing] = useState(isAdmin && initialEditMode);
@@ -30,6 +34,7 @@ export const LocationModal: React.FC<LocationModalProps> = ({
   const [savedNotice, setSavedNotice] = useState<string | null>(null);
 
   const [title, setTitle] = useState(book.title);
+  const [setName, setSetName] = useState(book.set_name || "");
   const [author, setAuthor] = useState(book.author || "");
   const [volume, setVolume] = useState(book.volume || "");
   const [publisher, setPublisher] = useState(book.publisher || "");
@@ -44,9 +49,13 @@ export const LocationModal: React.FC<LocationModalProps> = ({
   const [shelfNumber, setShelfNumber] = useState(book.shelf_number ?? 1);
   const [status, setStatus] = useState<BookRow["status"]>(book.status);
   const [notes, setNotes] = useState(book.notes || "");
+  const [setBooks, setSetBooks] = useState<BookRow[]>([]);
+  const [loadingSet, setLoadingSet] = useState(false);
+  const [expandedVol, setExpandedVol] = useState<string | null>(null);
 
   useEffect(() => {
     setTitle(book.title);
+    setSetName(book.set_name || "");
     setAuthor(book.author || "");
     setVolume(book.volume || "");
     setPublisher(book.publisher || "");
@@ -65,7 +74,32 @@ export const LocationModal: React.FC<LocationModalProps> = ({
     setConfirmDelete(false);
     setErrMsg(null);
     setSavedNotice(null);
+    setExpandedVol((book.volume || "").trim() || null);
   }, [book.barcode, initialEditMode]);
+
+  useEffect(() => {
+    const sName = (book.set_name || "").trim();
+    if (!sName) {
+      setSetBooks([]);
+      return;
+    }
+    let cancelled = false;
+    setLoadingSet(true);
+    fetch("/api/books/set/" + encodeURIComponent(sName))
+      .then((r) => (r.ok ? r.json() : { books: [] }))
+      .then((d) => {
+        if (!cancelled) setSetBooks(Array.isArray(d?.books) ? d.books : []);
+      })
+      .catch(() => {
+        if (!cancelled) setSetBooks([]);
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingSet(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [book.set_name, book.barcode]);
 
   const activeCabId = editing ? (cabinetId ? Number(cabinetId) : null) : book.cabinet_id;
   const cabinet = cabinets.find((c) => c.id === activeCabId) || null;
@@ -87,6 +121,7 @@ export const LocationModal: React.FC<LocationModalProps> = ({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           title: title.trim(),
+          set_name: setName.trim(),
           author: author.trim(),
           volume: volume.trim(),
           publisher: publisher.trim(),
@@ -191,6 +226,7 @@ export const LocationModal: React.FC<LocationModalProps> = ({
               {book.volume ? <span className="text-[var(--otzar-text-muted)] font-normal"> — {book.volume}</span> : null}
             </h2>
             <p className="text-sm text-[var(--otzar-text-muted)]">
+              {book.set_name ? `סט: ${book.set_name} · ` : ""}
               {book.author ? `מאת: ${book.author}` : "מחבר לא צוין"}
               {book.publisher ? ` · הוצאה: ${book.publisher}` : ""}
               {book.edition ? ` · מהדורה: ${book.edition}` : ""}
@@ -242,7 +278,7 @@ export const LocationModal: React.FC<LocationModalProps> = ({
           {editing ? (
             <form onSubmit={handleSave} className="space-y-4 text-sm">
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
-                <div className="md:col-span-2">
+                <div>
                   <label className="block text-xs font-medium mb-1">שם הספר *</label>
                   <input
                     type="text"
@@ -252,15 +288,21 @@ export const LocationModal: React.FC<LocationModalProps> = ({
                     className="w-full px-3 py-2 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] font-semibold"
                   />
                 </div>
-                <div>
-                  <label className="block text-xs font-medium mb-1">מחבר / מפרש</label>
-                  <input
-                    type="text"
-                    value={author}
-                    onChange={(e) => setAuthor(e.target.value)}
-                    className="w-full px-3 py-2 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)]"
-                  />
-                </div>
+                <AutocompleteInput
+                  label="שם הסט / סדרה (אופציונלי)"
+                  field="set_name"
+                  value={setName}
+                  onChange={setSetName}
+                  placeholder="למשל: משנה ברורה / שולחן ערוך"
+                  inputClassName="!bg-[var(--otzar-bg)] !border-[var(--otzar-border-muted)]"
+                />
+                <AutocompleteInput
+                  label="מחבר / מפרש"
+                  field="author"
+                  value={author}
+                  onChange={setAuthor}
+                  inputClassName="!bg-[var(--otzar-bg)] !border-[var(--otzar-border-muted)]"
+                />
                 <div>
                   <label className="block text-xs font-medium mb-1">כרך / חלק / מסכת</label>
                   <input
@@ -270,24 +312,20 @@ export const LocationModal: React.FC<LocationModalProps> = ({
                     className="w-full px-3 py-2 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)]"
                   />
                 </div>
-                <div>
-                  <label className="block text-xs font-medium mb-1">קטגוריה</label>
-                  <input
-                    type="text"
-                    value={category}
-                    onChange={(e) => setCategory(e.target.value)}
-                    className="w-full px-3 py-2 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)]"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium mb-1">הוצאה / מכון</label>
-                  <input
-                    type="text"
-                    value={publisher}
-                    onChange={(e) => setPublisher(e.target.value)}
-                    className="w-full px-3 py-2 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)]"
-                  />
-                </div>
+                <AutocompleteInput
+                  label="קטגוריה"
+                  field="category"
+                  value={category}
+                  onChange={setCategory}
+                  inputClassName="!bg-[var(--otzar-bg)] !border-[var(--otzar-border-muted)]"
+                />
+                <AutocompleteInput
+                  label="הוצאה / מכון"
+                  field="publisher"
+                  value={publisher}
+                  onChange={setPublisher}
+                  inputClassName="!bg-[var(--otzar-bg)] !border-[var(--otzar-border-muted)]"
+                />
                 <div>
                   <label className="block text-xs font-medium mb-1">מהדורה (אופציונלי)</label>
                   <input
@@ -534,6 +572,97 @@ export const LocationModal: React.FC<LocationModalProps> = ({
                   </div>
                 </div>
               </div>
+
+              {/* Set / Multi-Volume Section with Torah Natural Sort & Copy Grouping */}
+              {book.set_name && (
+                <div className="rounded-xl border border-[var(--otzar-border-muted)] bg-[var(--otzar-surface-alt)] p-4 space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <span className="flex items-center gap-1.5 text-sm font-semibold">
+                      <Library className="w-4 h-4 text-[var(--otzar-accent)]" />
+                      כרכים נוספים בסט &quot;{book.set_name}&quot;
+                    </span>
+                    <span className="text-xs text-[var(--otzar-text-muted)] tabular-nums">
+                      {loadingSet ? "טוען..." : `${setBooks.length} עותקים בסך הכל`}
+                    </span>
+                  </div>
+                  {!loadingSet && setBooks.length > 0 && (
+                    <div className="divide-y divide-[var(--otzar-border-muted)] rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] overflow-hidden">
+                      {groupSetVolumes(setBooks).map((grp: SetVolumeGroup) => {
+                        const isExpanded = expandedVol === grp.volumeLabel;
+                        const isCurrentVol = grp.books.some((x) => x.barcode === book.barcode);
+                        return (
+                          <div key={grp.volumeLabel} className="text-xs">
+                            <button
+                              type="button"
+                              onClick={() => setExpandedVol(isExpanded ? null : grp.volumeLabel)}
+                              className={`w-full px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2 text-right hover:bg-[var(--otzar-surface)] cursor-pointer ${
+                                isCurrentVol ? "bg-[var(--otzar-surface)]/70" : ""
+                              }`}
+                            >
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                <span className="font-bold text-sm text-[var(--otzar-text)]">{grp.volumeLabel}</span>
+                                <span aria-hidden="true">·</span>
+                                <span className="font-medium tabular-nums">
+                                  {grp.totalCopies} {grp.totalCopies === 1 ? "עותק" : "עותקים"} (
+                                  <span className="text-emerald-700 dark:text-emerald-400">{grp.availableCount} זמינים</span>
+                                  {grp.borrowedCount > 0 ? (
+                                    <>
+                                      {", "}
+                                      <span className="text-red-700 dark:text-red-400">{grp.borrowedCount} מושאל</span>
+                                    </>
+                                  ) : null}
+                                  )
+                                </span>
+                                <span aria-hidden="true">·</span>
+                                <span className="text-[var(--otzar-text-muted)]">{grp.locationSummary}</span>
+                              </div>
+                              {isExpanded ? <ChevronUp className="w-4 h-4 text-[var(--otzar-text-muted)]" /> : <ChevronDown className="w-4 h-4 text-[var(--otzar-text-muted)]" />}
+                            </button>
+                            {isExpanded && (
+                              <div className="px-3.5 pb-2.5 pt-1 bg-[var(--otzar-surface-alt)]/50 space-y-1 border-t border-[var(--otzar-border-muted)]">
+                                {grp.books.map((copy) => {
+                                  const isThis = copy.barcode === book.barcode;
+                                  return (
+                                    <div key={copy.barcode} className="flex flex-wrap items-center justify-between gap-2 py-1">
+                                      <div className="flex items-center gap-2">
+                                        <span className="font-mono font-semibold text-[var(--otzar-accent)] tabular-nums">#{copy.barcode}</span>
+                                        <span
+                                          className={
+                                            copy.status === "available"
+                                              ? "text-emerald-700 dark:text-emerald-400 font-medium"
+                                              : copy.status === "reference_only"
+                                              ? "text-amber-700 dark:text-amber-400 font-medium"
+                                              : "text-red-700 dark:text-red-400 font-medium"
+                                          }
+                                        >
+                                          {STATUS_LABELS[copy.status] || copy.status}
+                                        </span>
+                                        <span className="text-[var(--otzar-text-muted)]">
+                                          {copy.cabinet_code ? `ארון ${copy.cabinet_code} מדף ${copy.shelf_number ?? "-"}` : "לא שויך"}
+                                        </span>
+                                        {isThis && <span className="text-[11px] font-semibold text-[var(--otzar-accent)]">(עותק מוצג)</span>}
+                                      </div>
+                                      {!isThis && onSelectBarcode && (
+                                        <button
+                                          type="button"
+                                          onClick={() => onSelectBarcode(copy.barcode)}
+                                          className="px-2 py-0.5 rounded border border-[var(--otzar-border)] bg-[var(--otzar-bg)] text-[var(--otzar-accent)] hover:bg-[var(--otzar-surface)] cursor-pointer"
+                                        >
+                                          הצג עותק
+                                        </button>
+                                      )}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
 
               {book.tagsList?.length > 0 && (
                 <div className="text-xs text-[var(--otzar-text-muted)] border-t border-[var(--otzar-border-muted)] pt-3">

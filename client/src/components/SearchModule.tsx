@@ -350,6 +350,7 @@ export const SearchModule: React.FC<SearchModuleProps> = ({
                       {b.volume ? <span className="text-[var(--otzar-text-muted)] font-normal"> · {b.volume}</span> : null}
                     </div>
                     <div className="text-xs text-[var(--otzar-text-muted)] mt-0.5 tabular-nums">
+                      {b.set_name ? `סט: ${b.set_name} · ` : ""}
                       {b.category || "כללי"}
                       {b.edition ? ` · מהדורה: ${b.edition}` : ""}
                       {b.pub_year ? ` · שנת הוצאה: ${b.pub_year}` : ""}
@@ -434,6 +435,10 @@ export const SearchModule: React.FC<SearchModuleProps> = ({
           isAdmin={isAdmin}
           initialEditMode={isAdmin && openInEditMode}
           onBookUpdated={onReload}
+          onSelectBarcode={(bc) => {
+            setOpenInEditMode(false);
+            setSelectedBarcode(bc);
+          }}
           onClose={() => {
             setSelectedBarcode(null);
             setOpenInEditMode(false);
