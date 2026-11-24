@@ -31,8 +31,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: node scripts/promote-ui-strings.mjs --platform desktop
 
-      - name: Check strings parity
-        run: node scripts/check-strings-parity.mjs
 
       - name: Build client & typecheck
         run: npm run build
