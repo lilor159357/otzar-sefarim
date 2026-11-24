@@ -162,16 +162,59 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
   const [compressionStats, setCompressionStats] = useState<string | null>(null);
   const [aiError, setAiError] = useState<string | null>(null);
 
-  // Sticky Set & Shelf-Set Capture modes
+  // Sticky Set & Shelf-Set Capture modes (Sticky Set persisted across sessions)
   const [scanMode, setScanMode] = useState<"standard" | "shelf-set">("standard");
-  const [stickySetEnabled, setStickySetEnabled] = useState(false);
-  const [stickyBatchId, setStickyBatchId] = useState<string>(() => `batch_${Date.now()}`);
-  const [stickyPresetSetName, setStickyPresetSetName] = useState("");
-  const [shelfTitleImage, setShelfTitleImage] = useState<{ dataUrl: string; base64: string; compKb: number } | null>(null);
+  const [stickySetEnabled, setStickySetEnabled] = useState<boolean>(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem("otzar_desktop_sticky_set_v1") || "null");
+      return Boolean(saved?.enabled);
+    } catch {
+      return false;
+    }
+  });
+  const [stickyBatchId, setStickyBatchId] = useState<string>(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem("otzar_desktop_sticky_set_v1") || "null");
+      return saved?.batchId ? String(saved.batchId) : `batch_${Date.now()}`;
+    } catch {
+      return `batch_${Date.now()}`;
+    }
+  });
+  const [stickyPresetSetName, setStickyPresetSetName] = useState<string>(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem("otzar_desktop_sticky_set_v1") || "null");
+      return saved?.presetSetName ? String(saved.presetSetName) : "";
+    } catch {
+      return "";
+    }
+  });
+  const [shelfTitleImages, setShelfTitleImages] = useState<Array<{ dataUrl: string; base64: string; compKb: number }>>([]);
   const [shelfSpineImages, setShelfSpineImages] = useState<Array<{ dataUrl: string; base64: string; compKb: number }>>([]);
   const [shelfCabId, setShelfCabId] = useState<string>(() => (cabinets[0] ? String(cabinets[0].id) : ""));
   const [shelfNum, setShelfNum] = useState<number>(1);
   const [shelfPresetSetName, setShelfPresetSetName] = useState("");
+  const [shelfExistingSet, setShelfExistingSet] = useState<{
+    set_name: string;
+    count: number;
+    author: string;
+    publisher: string;
+    cabinet_id: number | null;
+    cabinet_code: string;
+    shelf_number: number | null;
+  } | null>(null);
+  const [revExistingSet, setRevExistingSet] = useState<{
+    set_name: string;
+    count: number;
+    author: string;
+    publisher: string;
+    pub_year: string;
+    edition: string;
+    category: string;
+    format_size: string;
+    cabinet_id: number | null;
+    cabinet_code: string;
+    shelf_number: number | null;
+  } | null>(null);
   const shelfTitleInputRef = useRef<HTMLInputElement>(null);
   const shelfSpineInputRef = useRef<HTMLInputElement>(null);
 
@@ -218,6 +261,89 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
     if (!revCabinetId && cabinets[0]) setRevCabinetId(String(cabinets[0].id));
     if (!shelfCabId && cabinets[0]) setShelfCabId(String(cabinets[0].id));
   }, [cabinets]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        "otzar_desktop_sticky_set_v1",
+        JSON.stringify({
+          enabled: stickySetEnabled,
+          batchId: stickyBatchId,
+          presetSetName: stickyPresetSetName,
+        })
+      );
+    } catch {}
+  }, [stickySetEnabled, stickyBatchId, stickyPresetSetName]);
+
+  useEffect(() => {
+    const q = shelfPresetSetName.trim();
+    if (!q) {
+      setShelfExistingSet(null);
+      return;
+    }
+    const t = setTimeout(async () => {
+      try {
+        const res = await fetch(`/api/books/set/${encodeURIComponent(q)}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        const books = Array.isArray(data.books) ? data.books : [];
+        if (books.length > 0) {
+          const sample = books[books.length - 1];
+          setShelfExistingSet({
+            set_name: q,
+            count: books.length,
+            author: String(sample.author || ""),
+            publisher: String(sample.publisher || ""),
+            cabinet_id: sample.cabinet_id ? Number(sample.cabinet_id) : null,
+            cabinet_code: String(sample.cabinet_code || ""),
+            shelf_number: sample.shelf_number ? Number(sample.shelf_number) : null,
+          });
+        } else {
+          setShelfExistingSet(null);
+        }
+      } catch {
+        setShelfExistingSet(null);
+      }
+    }, 260);
+    return () => clearTimeout(t);
+  }, [shelfPresetSetName]);
+
+  useEffect(() => {
+    const q = revSetName.trim();
+    if (!q) {
+      setRevExistingSet(null);
+      return;
+    }
+    const t = setTimeout(async () => {
+      try {
+        const res = await fetch(`/api/books/set/${encodeURIComponent(q)}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        const books = Array.isArray(data.books) ? data.books : [];
+        if (books.length > 0) {
+          const sample = books[books.length - 1];
+          setRevExistingSet({
+            set_name: q,
+            count: books.length,
+            author: String(sample.author || ""),
+            publisher: String(sample.publisher || ""),
+            pub_year: String(sample.pub_year || ""),
+            edition: String(sample.edition || ""),
+            category: String(sample.category || ""),
+            format_size: String(sample.format_size || ""),
+            cabinet_id: sample.cabinet_id ? Number(sample.cabinet_id) : null,
+            cabinet_code: String(sample.cabinet_code || ""),
+            shelf_number: sample.shelf_number ? Number(sample.shelf_number) : null,
+          });
+        } else {
+          setRevExistingSet(null);
+        }
+      } catch {
+        setRevExistingSet(null);
+      }
+    }, 280);
+    return () => clearTimeout(t);
+  }, [revSetName]);
 
   const selectedManualCab = cabinets.find((c) => String(c.id) === cabinetId) || cabinets[0];
   const selectedRevCab = cabinets.find((c) => String(c.id) === revCabinetId) || cabinets[0];
@@ -534,15 +660,26 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
 
   const handlePickShelfTitleFiles = async (fileList: FileList | null) => {
     if (!fileList || fileList.length === 0) return;
-    const file = Array.from(fileList).find((f) => f.type.startsWith("image/"));
-    if (!file) return;
+    const remaining = Math.max(0, 4 - shelfTitleImages.length);
+    if (remaining === 0) {
+      setAiError("ניתן לצרף עד 4 תמונות שער ופרטים לכל היותר");
+      return;
+    }
+    const files = Array.from(fileList)
+      .filter((f) => f.type.startsWith("image/"))
+      .slice(0, remaining);
+    if (files.length === 0) return;
     setUploadingAi(true);
     setAiError(null);
     try {
-      const res = await compressImageToJpeg(file, 1400, 0.82);
-      setShelfTitleImage({ dataUrl: `data:image/jpeg;base64,${res.base64}`, base64: res.base64, compKb: res.compKb });
+      const next: Array<{ dataUrl: string; base64: string; compKb: number }> = [];
+      for (const f of files) {
+        const res = await compressImageToJpeg(f, 1400, 0.82);
+        next.push({ dataUrl: `data:image/jpeg;base64,${res.base64}`, base64: res.base64, compKb: res.compKb });
+      }
+      setShelfTitleImages((prev) => [...prev, ...next].slice(0, 4));
     } catch (err: any) {
-      setAiError(err?.message || "שגיאה בטעינת תמונת השער");
+      setAiError(err?.message || "שגיאה בטעינת תמונות השער");
     } finally {
       setUploadingAi(false);
       if (shelfTitleInputRef.current) shelfTitleInputRef.current.value = "";
@@ -571,8 +708,13 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
   };
 
   const handleSubmitShelfSet = async () => {
-    if (!shelfTitleImage) {
-      setAiError("יש לצרף תמונת שער מייצגת עבור הסט");
+    const hasPreset = shelfPresetSetName.trim().length > 0;
+    if (shelfTitleImages.length === 0 && !hasPreset) {
+      setAiError("יש לצרף לפחות תמונת שער אחת, או לבחור שם סט קיים להמשך");
+      return;
+    }
+    if (shelfTitleImages.length === 0 && shelfSpineImages.length === 0) {
+      setAiError("בהמשך סט קיים ללא שער יש לצרף לפחות תמונת שדרות אחת");
       return;
     }
     setUploadingAi(true);
@@ -583,8 +725,8 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          titleImage: { imageBase64: shelfTitleImage.base64, mimeType: "image/jpeg" },
-          spineImages: shelfSpineImages.map((s) => ({ imageBase64: s.base64, mimeType: "image/jpeg" })),
+          titleImages: shelfTitleImages.map((t) => ({ imageBase64: t.base64, mimeType: "image/jpeg" })),
+          spineImages: shelfSpineImages.map((sp) => ({ imageBase64: sp.base64, mimeType: "image/jpeg" })),
           default_cabinet_id: shelfCabId ? Number(shelfCabId) : null,
           default_shelf_number: shelfNum,
           set_batch_id: stickySetEnabled ? stickyBatchId : null,
@@ -593,8 +735,10 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "שגיאה בשליחת הסט לתור");
-      setCompressionStats(`סט מהמדף נשלח לפענוח (שער + ${shelfSpineImages.length} תמונות שדרות)`);
-      setShelfTitleImage(null);
+      setCompressionStats(
+        `סט מהמדף נשלח לפענוח (${shelfTitleImages.length} שער/פרטים + ${shelfSpineImages.length} תמונות שדרות)`
+      );
+      setShelfTitleImages([]);
       setShelfSpineImages([]);
       setShelfPresetSetName("");
       await Promise.all([loadQueue(), onReload()]);
@@ -1122,51 +1266,64 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
                 <div>
                   <h3 className="font-bold text-base flex items-center gap-2">
                     <BookCopy className="w-5 h-5 text-[var(--otzar-accent)]" />
-                    מצב סט מהמדף — זיהוי סדרה שלמה מ-2 תמונות (שער + שדרות)
+                    מצב סט מהמדף — זיהוי סדרה שלמה משערים ושדרות
                   </h3>
                   <p className="text-xs text-[var(--otzar-text-muted)] mt-0.5">
-                    העלה 1) שער מייצג לפרטי הספר, מחבר והוצאה, ו-2) צילומי שדרות מהמדף לזיהוי כל הכרכים והעותקים במכה אחת.
+                    העלה 1) תמונת שער אחת או יותר (למשל שער ראשי + גב השער לשנה/מהדורה), ו-2) צילומי שדרות מהמדף. בהמשך לסט קיים מהמאגר ניתן לצלם שדרות בלבד!
                   </p>
                 </div>
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div className="rounded-xl border border-[var(--otzar-border-muted)] bg-[var(--otzar-surface-alt)] p-4 space-y-3">
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm font-bold">1. תמונת שער מייצגת *</span>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-sm font-bold">
+                      1. תמונות שער ופרטים ({shelfTitleImages.length}/4)
+                      {shelfExistingSet ? " · אופציונלי" : " *"}
+                    </span>
                     <input
                       ref={shelfTitleInputRef}
                       type="file"
                       accept="image/*"
+                      multiple
                       onChange={(e) => handlePickShelfTitleFiles(e.target.files)}
                       className="hidden"
                     />
                     <button
                       type="button"
-                      disabled={uploadingAi}
+                      disabled={uploadingAi || shelfTitleImages.length >= 4}
                       onClick={() => shelfTitleInputRef.current?.click()}
-                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-[var(--otzar-accent)] text-white cursor-pointer"
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-[var(--otzar-accent)] text-white cursor-pointer disabled:opacity-40"
                     >
-                      <Upload className="w-3.5 h-3.5" />
-                      בחר תמונת שער
+                      <Plus className="w-3.5 h-3.5" />
+                      הוסף שער / גב שער
                     </button>
                   </div>
-                  {shelfTitleImage ? (
-                    <div className="relative h-44 rounded-lg border border-[var(--otzar-border-muted)] bg-black/5 overflow-hidden flex items-center justify-center">
-                      <img src={shelfTitleImage.dataUrl} alt="שער הסט" className="max-h-full max-w-full object-contain" />
-                      <button
-                        type="button"
-                        onClick={() => setShelfTitleImage(null)}
-                        className="absolute top-2 left-2 p-1 rounded-full bg-red-600 text-white cursor-pointer"
-                        title="הסר"
-                      >
-                        <X className="w-3.5 h-3.5" />
-                      </button>
+                  {shelfTitleImages.length > 0 ? (
+                    <div className="grid grid-cols-2 gap-2 max-h-44 overflow-y-auto p-1">
+                      {shelfTitleImages.map((tp, idx) => (
+                        <div key={idx} className="relative h-28 rounded-lg border border-[var(--otzar-border-muted)] bg-black/5 overflow-hidden flex items-center justify-center">
+                          <img src={tp.dataUrl} alt={`שער ${idx + 1}`} className="max-h-full max-w-full object-contain" />
+                          <span className="absolute bottom-1 right-1 px-1.5 py-0.5 rounded bg-black/65 text-white text-[10px]">
+                            {idx === 0 ? "שער ראשי" : `פרטים ${idx + 1}`}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => setShelfTitleImages((prev) => prev.filter((_, i) => i !== idx))}
+                            className="absolute top-1 left-1 p-0.5 rounded-full bg-red-600 text-white cursor-pointer"
+                            title="הסר"
+                          >
+                            <X className="w-3 h-3" />
+                          </button>
+                        </div>
+                      ))}
                     </div>
                   ) : (
-                    <div className="h-44 rounded-lg border-2 border-dashed border-[var(--otzar-border-muted)] flex flex-col items-center justify-center text-xs text-[var(--otzar-text-muted)]">
+                    <div className="h-44 rounded-lg border-2 border-dashed border-[var(--otzar-border-muted)] flex flex-col items-center justify-center text-xs text-[var(--otzar-text-muted)] text-center px-3">
                       <ImagePlus className="w-7 h-7 mb-1.5 opacity-60" />
-                      לחץ על &quot;בחר תמונת שער&quot; (דף השער של כרך אחד מהסט)
+                      {shelfExistingSet
+                        ? `נבחר סט קיים ("${shelfExistingSet.set_name}") — ניתן להוסיף תמונות שער או להמשיך עם שדרות בלבד`
+                        : 'לחץ על "הוסף שער / גב שער" (ניתן לבחור עד 4 תמונות להשלמת שנה, מהדורה והוצאה)'}
                     </div>
                   )}
                 </div>
@@ -1219,11 +1376,11 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
               <div className="grid grid-cols-1 md:grid-cols-12 gap-3 pt-2 border-t border-[var(--otzar-border-muted)] items-end text-sm">
                 <div className="md:col-span-4">
                   <AutocompleteInput
-                    label="שם הסט (אופציונלי)"
+                    label="שם הסט / המשך סט קיים מהמאגר"
                     field="set_name"
                     value={shelfPresetSetName}
                     onChange={setShelfPresetSetName}
-                    placeholder="ייקבע אוטומטית מהשער אם ריק"
+                    placeholder="חפש סט קיים להמשך, או השאר ריק לזיהוי מהשער"
                   />
                 </div>
                 <div className="md:col-span-3">
@@ -1257,15 +1414,49 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
                 <div className="md:col-span-3 flex justify-end">
                   <button
                     type="button"
-                    disabled={uploadingAi || !shelfTitleImage}
+                    disabled={
+                      uploadingAi ||
+                      (shelfTitleImages.length === 0 && (!shelfPresetSetName.trim() || shelfSpineImages.length === 0))
+                    }
                     onClick={handleSubmitShelfSet}
                     className="w-full inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-sm font-bold text-white bg-[var(--otzar-accent)] hover:bg-[var(--otzar-accent-hover)] cursor-pointer disabled:opacity-40"
                   >
                     <CheckCircle2 className="w-4 h-4" />
-                    {uploadingAi ? "שולח..." : "שלח סט שלם לפענוח AI"}
+                    {uploadingAi ? "שולח..." : shelfTitleImages.length === 0 && shelfPresetSetName.trim() ? "שלח המשך סט לפענוח AI" : "שלח סט שלם לפענוח AI"}
                   </button>
                 </div>
               </div>
+
+              {shelfExistingSet && (
+                <div className="rounded-lg border border-emerald-400/50 bg-emerald-500/10 px-3 py-2 text-xs flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <span className="font-bold text-emerald-700 dark:text-emerald-300">
+                      סט קיים במאגר ({shelfExistingSet.count} כרכים)
+                    </span>
+                    {shelfExistingSet.author && <span className="mr-2">· {shelfExistingSet.author}</span>}
+                    {shelfExistingSet.cabinet_code && (
+                      <span className="mr-2">
+                        · ארון {shelfExistingSet.cabinet_code} מדף {shelfExistingSet.shelf_number || 1}
+                      </span>
+                    )}
+                    <span className="mr-2 text-[var(--otzar-text-muted)]">
+                      — תמונות השער אופציונליות (ניתן לשלוח שדרות בלבד)
+                    </span>
+                  </div>
+                  {shelfExistingSet.cabinet_id && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (shelfExistingSet.cabinet_id) setShelfCabId(String(shelfExistingSet.cabinet_id));
+                        if (shelfExistingSet.shelf_number) setShelfNum(shelfExistingSet.shelf_number);
+                      }}
+                      className="px-2.5 py-1 rounded-md text-xs font-semibold bg-emerald-600 text-white hover:bg-emerald-700 cursor-pointer"
+                    >
+                      השתמש במיקום המדף מהמאגר
+                    </button>
+                  )}
+                </div>
+              )}
             </div>
           ) : (
             /* Upload Dropzone & Webcam */
@@ -1796,6 +1987,29 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
                         onChange={setRevSetName}
                         placeholder="למשל: משנה ברורה / שו״ת יביע אומר"
                       />
+                      {revExistingSet && (
+                        <div className="mt-1 flex flex-wrap items-center justify-between gap-1.5 text-[11px] text-emerald-700 dark:text-emerald-300 bg-emerald-500/10 border border-emerald-400/40 rounded-md px-2 py-1">
+                          <span>נמצא במאגר ({revExistingSet.count} כרכים)</span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (!revTitle.trim()) setRevTitle(revExistingSet.set_name);
+                              if (revExistingSet.author) setRevAuthor(revExistingSet.author);
+                              if (revExistingSet.publisher) setRevPublisher(revExistingSet.publisher);
+                              if (revExistingSet.pub_year) setRevPubYear(revExistingSet.pub_year);
+                              if (revExistingSet.edition) setRevEdition(revExistingSet.edition);
+                              if (revExistingSet.category) setRevCategory(revExistingSet.category);
+                              if (revExistingSet.format_size) setRevFormatSize(revExistingSet.format_size);
+                              if (revExistingSet.cabinet_id) setRevCabinetId(String(revExistingSet.cabinet_id));
+                              if (revExistingSet.shelf_number) setRevShelf(revExistingSet.shelf_number);
+                              setReviewNotice(`הושלמו פרטי הסט ומיקום המדף מתוך "${revExistingSet.set_name}"`);
+                            }}
+                            className="font-bold underline cursor-pointer"
+                          >
+                            משוך פרטי סט ומיקום מהמאגר
+                          </button>
+                        </div>
+                      )}
                     </div>
                     <div>
                       {(() => {

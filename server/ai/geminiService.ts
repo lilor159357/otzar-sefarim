@@ -679,23 +679,39 @@ export async function analyzeBookCoverImage(
 }
 
 
+export interface ExistingSetContext {
+  set_name?: string;
+  author?: string;
+  publisher?: string;
+  pub_year?: string;
+  edition?: string;
+  category?: string;
+  tags?: string[];
+}
+
 export async function analyzeShelfSetImages(
   db: DbClient,
-  titlePagePart: CoverImagePart,
-  spineImageParts: CoverImagePart[]
+  titlePageInput: CoverImagePart | CoverImagePart[],
+  spineImageParts: CoverImagePart[],
+  existingSetContext?: ExistingSetContext
 ): Promise<ExtractedShelfSet> {
   const cfg = getAiConfig(db);
   if (!cfg.hasAnyKey) {
     throw new Error("לא הוגדר מפתח Gemini API בהגדרות המערכת");
   }
 
+  const titleParts = Array.isArray(titlePageInput)
+    ? titlePageInput
+    : titlePageInput
+    ? [titlePageInput]
+    : [];
   const allParts = [
-    {
+    ...titleParts.map((p) => ({
       inlineData: {
-        mimeType: titlePagePart.mimeType || "image/jpeg",
-        data: titlePagePart.buffer.toString("base64"),
+        mimeType: p.mimeType || "image/jpeg",
+        data: p.buffer.toString("base64"),
       },
-    },
+    })),
     ...spineImageParts.map((p) => ({
       inlineData: {
         mimeType: p.mimeType || "image/jpeg",
@@ -703,16 +719,17 @@ export async function analyzeShelfSetImages(
       },
     })),
   ];
-
+  if (allParts.length === 0) {
+    throw new Error("לא סופקו תמונות לפענוח הסט");
+  }
   const systemPrompt =
-    "אתה ספרן תורני מומחה בישיבה. לפניך צילומים של סט ספרים: התמונה הראשונה היא עמוד שער מייצג של הסט, ושאר התמונות הן צילום שדרות כרכי הסט העומדים על המדף בספרייה.\n" +
-    "תפקידך:\n" +
-    "1. חלץ מעמוד השער את פרטי הסט הכלליים: שם הסט (set_name), שם המחבר/מפרש (author), הוצאה/מכון (publisher), שנת הוצאה (pub_year), מהדורה (edition), קטגוריה ראשית (category), הערות (notes) ותגיות (tags).\n" +
-    "2. זהה בעיון מתוך שדרות הספרים שעל המדף את רשימת כל הכרכים/החלקים המופיעים (volumes), בסדר כרכים נכון (למשל: חלק א, חלק ב, או ברכות, שבת חלק א). אם כרך מסוים מופיע פעמיים על המדף, ציין copiesCount: 2.";
-
+    titleParts.length === 0 && existingSetContext?.set_name
+      ? `אתה ספרן תורני מומחה בישיבה. לפניך ${spineImageParts.length} תמונות של שדרות כרכים נוספים מהסט הקיים "${existingSetContext.set_name}" (מחבר: ${existingSetContext.author || "לא צוין"}, הוצאה: ${existingSetContext.publisher || "לא צוינה"}). פרטי הסט הכלליים כבר שמורים במאגר ואין תמונת שער מצורפת.\nתפקידך:\n1. השאר את פרטי הסט הכלליים כפי שסופקו (או השלם קטגוריה ותגיות אם חסר).\n2. זהה בעיון מתוך שדרות הספרים שעל המדף את רשימת כל הכרכים/החלקים המופיעים בתמונות אלו (volumes), בסדר כרכים נכון (למשל: חלק ג, חלק ד, או ברכות, שבת חלק א). אם כרך מסוים מופיע פעמיים על המדף, ציין copiesCount: 2.`
+      : `אתה ספרן תורני מומחה בישיבה. לפניך ${allParts.length} צילומים של סט ספרים: ${titleParts.length === 1 ? "התמונה הראשונה היא עמוד שער מייצג של הסט" : `${titleParts.length} התמונות הראשונות הן צילומי השער ופרטי המהדורה/ההוצאה של הסט (כגון עמוד שער ראשי, גב השער, דף הסכמות)`}, ושאר ${spineImageParts.length} התמונות הן צילום שדרות כרכי הסט העומדים על המדף בספרייה.\nתפקידך:\n1. מזג את המידע מכל תמונות השער והפרטים וחלץ את פרטי הסט הכלליים: שם הסט (set_name), שם המחבר/מפרש (author), הוצאה/מכון (publisher), שנת הוצאה (pub_year), מהדורה (edition), קטגוריה ראשית (category), הערות (notes) ותגיות (tags).\n2. זהה בעיון מתוך שדרות הספרים שעל המדף את רשימת כל הכרכים/החלקים המופיעים (volumes), בסדר כרכים נכון (למשל: חלק א, חלק ב, או ברכות, שבת חלק א). אם כרך מסוים מופיע פעמיים על המדף, ציין copiesCount: 2.`;
   const userPrompt =
-    "פענח את צילום השער וצילום השדרות של הסט, וחלץ את פרטי הסט ורשימת כל הכרכים שעל המדף בפורמט JSON מדויק.";
-
+    titleParts.length === 0 && existingSetContext?.set_name
+      ? `פענח את תמונות השדרות של הסט הקיים "${existingSetContext.set_name}" וחלץ את רשימת כל הכרכים והעותקים שעל המדף בפורמט JSON מדויק.`
+      : "פענח את צילומי השער והפרטים ואת צילומי השדרות של הסט, וחלץ את פרטי הסט ורשימת כל הכרכים שעל המדף בפורמט JSON מדויק.";
   const { result: response } = await executeWithModelAndKeyFallback(
     db,
     cfg.aiModel,
@@ -767,11 +784,11 @@ export async function analyzeShelfSetImages(
   const parsed = JSON.parse(rawText) as Partial<ExtractedShelfSet>;
   const rawVolumes = Array.isArray(parsed.volumes) ? parsed.volumes : [];
   return {
-    set_name: String(parsed.set_name || "").trim(),
-    author: String(parsed.author || "").trim(),
-    publisher: String(parsed.publisher || "").trim(),
-    pub_year: String(parsed.pub_year || "").trim(),
-    edition: String(parsed.edition || "").trim(),
+    set_name: String(parsed.set_name || existingSetContext?.set_name || "").trim(),
+    author: String(parsed.author || existingSetContext?.author || "").trim(),
+    publisher: String(parsed.publisher || existingSetContext?.publisher || "").trim(),
+    pub_year: String(parsed.pub_year || existingSetContext?.pub_year || "").trim(),
+    edition: String(parsed.edition || existingSetContext?.edition || "").trim(),
     category: String(parsed.category || "").trim() || "כללי",
     notes: String(parsed.notes || "").trim(),
     tags: Array.isArray(parsed.tags) ? parsed.tags.map((t) => String(t).trim()).filter(Boolean) : [],

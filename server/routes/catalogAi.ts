@@ -16,6 +16,7 @@ import {
   saveAiKeyPool,
   testGeminiConnection,
   testSinglePoolKey,
+  type ExistingSetContext,
   type ExtractedBookMetadata,
   type ExtractedShelfSet,
 } from "../ai/geminiService.ts";
@@ -72,6 +73,33 @@ function getItemImagePaths(row: { image_path?: unknown; extra_images_json?: unkn
   return [first, ...extras].filter(Boolean);
 }
 
+function lookupExistingSetContext(db: DbClient, setName: string): ExistingSetContext | undefined {
+  const clean = String(setName || "").trim();
+  if (!clean) return undefined;
+  const row = db.get<{
+    set_name: string;
+    author: string;
+    publisher: string;
+    pub_year: string;
+    edition: string;
+    category: string;
+    tags: string;
+  }>(
+    "SELECT set_name, author, publisher, pub_year, edition, category, tags FROM books WHERE set_name = ? AND deleted_at IS NULL ORDER BY updated_at DESC LIMIT 1",
+    clean
+  );
+  if (!row) return undefined;
+  return {
+    set_name: String(row.set_name || clean).trim(),
+    author: String(row.author || "").trim(),
+    publisher: String(row.publisher || "").trim(),
+    pub_year: String(row.pub_year || "").trim(),
+    edition: String(row.edition || "").trim(),
+    category: String(row.category || "").trim(),
+    tags: parseTags(row.tags),
+  };
+}
+
 export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: string, onSyncTrigger?: () => void) {
   const aiImagesDir = path.join(dataDir, "ai_images");
   fs.mkdirSync(aiImagesDir, { recursive: true });
@@ -104,24 +132,58 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
             throw new Error("קובץ התמונה לא נמצא בדיסק");
           }
 
+          let preMeta: Record<string, unknown> = {};
+          try {
+            preMeta = JSON.parse(nextItem.extracted_json || "{}") || {};
+          } catch {}
+          const presetSetName = preMeta?.set_name ? String(preMeta.set_name).trim() : "";
+          const existingSetCtx = presetSetName ? lookupExistingSetContext(db, presetSetName) : undefined;
+
           if (Number(nextItem.is_shelf_set) === 1) {
-            const [titlePath, ...spinePaths] = paths;
-            const titlePart = {
-              buffer: fs.readFileSync(titlePath),
-              mimeType: detectMimeFromExt(titlePath),
-            };
+            const rawTitleCount =
+              typeof preMeta._title_images_count === "number" && Number.isFinite(preMeta._title_images_count)
+                ? Math.max(0, Math.min(paths.length, Math.round(preMeta._title_images_count)))
+                : 1;
+            const titlePaths = paths.slice(0, rawTitleCount);
+            const spinePaths = paths.slice(rawTitleCount);
+
+            if (titlePaths.length === 0 && !presetSetName) {
+              throw new Error("נדרשת תמונת שער או בחירת סט קיים להמשך");
+            }
+            if (titlePaths.length === 0 && spinePaths.length === 0) {
+              throw new Error("לא סופקו תמונות לפענוח הסט");
+            }
+
+            const titleParts = titlePaths.map((p) => ({
+              buffer: fs.readFileSync(p),
+              mimeType: detectMimeFromExt(p),
+            }));
             const spineParts = spinePaths.map((p) => ({
               buffer: fs.readFileSync(p),
               mimeType: detectMimeFromExt(p),
             }));
 
-            const setExtracted: ExtractedShelfSet = await analyzeShelfSetImages(db, titlePart, spineParts);
-            try {
-              const pre = JSON.parse(nextItem.extracted_json || "{}");
-              if (pre?.set_name && String(pre.set_name).trim()) {
-                setExtracted.set_name = String(pre.set_name).trim();
+            const setExtracted: ExtractedShelfSet = await analyzeShelfSetImages(
+              db,
+              titleParts,
+              spineParts,
+              existingSetCtx
+            );
+            if (presetSetName) {
+              setExtracted.set_name = presetSetName;
+            }
+            if (existingSetCtx) {
+              if (!setExtracted.author && existingSetCtx.author) setExtracted.author = existingSetCtx.author;
+              if (!setExtracted.publisher && existingSetCtx.publisher) setExtracted.publisher = existingSetCtx.publisher;
+              if (!setExtracted.pub_year && existingSetCtx.pub_year) setExtracted.pub_year = existingSetCtx.pub_year;
+              if (!setExtracted.edition && existingSetCtx.edition) setExtracted.edition = existingSetCtx.edition;
+              if ((!setExtracted.category || setExtracted.category === "כללי") && existingSetCtx.category) {
+                setExtracted.category = existingSetCtx.category;
               }
-            } catch {}
+              if ((!setExtracted.tags || setExtracted.tags.length === 0) && existingSetCtx.tags?.length) {
+                setExtracted.tags = existingSetCtx.tags;
+              }
+            }
 
             // Local authority normalization on extracted set
             if (setExtracted.author) {
@@ -155,12 +217,18 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
               mimeType: detectMimeFromExt(p),
             }));
             const extracted: ExtractedBookMetadata = await analyzeBookCoverImage(db, imageBuffers);
-            try {
-              const pre = JSON.parse(nextItem.extracted_json || "{}");
-              if (pre?.set_name && String(pre.set_name).trim()) {
-                extracted.set_name = String(pre.set_name).trim();
+            if (presetSetName) {
+              extracted.set_name = presetSetName;
+            }
+            if (existingSetCtx) {
+              if (!extracted.author && existingSetCtx.author) extracted.author = existingSetCtx.author;
+              if (!extracted.publisher && existingSetCtx.publisher) extracted.publisher = existingSetCtx.publisher;
+              if (!extracted.pub_year && existingSetCtx.pub_year) extracted.pub_year = existingSetCtx.pub_year;
+              if (!extracted.edition && existingSetCtx.edition) extracted.edition = existingSetCtx.edition;
+              if ((!extracted.category || extracted.category === "כללי") && existingSetCtx.category) {
+                extracted.category = existingSetCtx.category;
               }
-            } catch {}
+            }
 
             // Local Authority Normalization (0 tokens, 100% database consistency)
             if (extracted.author) {
@@ -482,34 +550,61 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
     res.status(201).json({ ok: true, count: createdIds.length, ids: createdIds });
   });
 
-  // Upload whole Shelf Set: Title page + Spine shelf photos
+  // Upload whole Shelf Set: 0..4 Title/Detail pages + Spine shelf photos
   app.post("/api/ai-queue/upload-shelf-set", requireAdmin, (req, res) => {
-    const { titleImage, spineImages = [], default_cabinet_id, default_shelf_number, set_batch_id, preset_set_name } = req.body || {};
-    if (!titleImage || (!titleImage.imageBase64 && typeof titleImage !== "string")) {
-      return res.status(400).json({ error: "נדרשת תמונת שער מייצגת עבור הסט" });
+    const {
+      titleImage,
+      titleImages,
+      spineImages = [],
+      default_cabinet_id,
+      default_shelf_number,
+      set_batch_id,
+      preset_set_name,
+    } = req.body || {};
+    const cleanPreset = preset_set_name ? String(preset_set_name).trim() : "";
+    const rawTitleList = Array.isArray(titleImages)
+      ? titleImages.slice(0, 4)
+      : titleImage
+      ? [titleImage]
+      : [];
+
+    const titlePaths: string[] = [];
+    for (const tp of rawTitleList) {
+      const p = saveBase64ToFile(tp?.imageBase64 || tp, tp?.mimeType);
+      if (p) titlePaths.push(p);
     }
 
-    const titlePath = saveBase64ToFile(titleImage.imageBase64 || titleImage, titleImage.mimeType);
-    if (!titlePath) return res.status(400).json({ error: "שמירת תמונת השער נכשלה" });
-
     const spinePaths: string[] = [];
-    for (const sp of spineImages) {
+    for (const sp of Array.isArray(spineImages) ? spineImages : []) {
       const p = saveBase64ToFile(sp?.imageBase64 || sp, sp?.mimeType);
       if (p) spinePaths.push(p);
     }
 
+    if (titlePaths.length === 0 && !cleanPreset) {
+      return res.status(400).json({ error: "נדרשת לפחות תמונת שער אחת, או הזנת שם סט קיים להמשך" });
+    }
+    if (titlePaths.length === 0 && spinePaths.length === 0) {
+      return res.status(400).json({ error: "יש לצרף לפחות תמונת שדרות אחת להמשך הסט" });
+    }
+
+    const allPaths = [...titlePaths, ...spinePaths];
+    const [firstPath, ...extraPaths] = allPaths;
     const now = new Date().toISOString();
-    const initialExtractedJson = preset_set_name && String(preset_set_name).trim()
-      ? JSON.stringify({ set_name: String(preset_set_name).trim() })
-      : "";
+    const initialMeta: Record<string, unknown> = {
+      _title_images_count: titlePaths.length,
+    };
+    if (cleanPreset) {
+      initialMeta.set_name = cleanPreset;
+    }
+
     const info = db.run(
       "INSERT INTO ai_catalog_queue (image_path, extra_images_json, default_cabinet_id, default_shelf_number, set_batch_id, is_shelf_set, extracted_json, processing_status, approval_status, created_at) VALUES (?, ?, ?, ?, ?, 1, ?, 'pending', 'pending', ?)",
-      titlePath,
-      JSON.stringify(spinePaths),
+      firstPath,
+      JSON.stringify(extraPaths),
       default_cabinet_id ? Number(default_cabinet_id) : null,
       default_shelf_number ? Number(default_shelf_number) : 1,
       set_batch_id ? String(set_batch_id).trim() : null,
-      initialExtractedJson,
+      JSON.stringify(initialMeta),
       now
     );
 

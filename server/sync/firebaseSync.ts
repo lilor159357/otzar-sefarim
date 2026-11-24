@@ -920,7 +920,12 @@ export class OtzarFirebaseSyncService {
       const setBatchId = data.set_batch_id ? String(data.set_batch_id).trim() : null;
       const isShelfSet = data.is_shelf_set ? 1 : 0;
       const presetSetName = data.preset_set_name ? String(data.preset_set_name).trim() : "";
-      const initialExtractedJson = presetSetName ? JSON.stringify({ set_name: presetSetName }) : "";
+      const initialMeta: Record<string, unknown> = {};
+      if (presetSetName) initialMeta.set_name = presetSetName;
+      if (isShelfSet === 1 && typeof data.title_images_count === "number" && Number.isFinite(data.title_images_count)) {
+        initialMeta._title_images_count = Math.max(0, Math.round(data.title_images_count));
+      }
+      const initialExtractedJson = Object.keys(initialMeta).length > 0 ? JSON.stringify(initialMeta) : "";
 
       this.db.run(
         `INSERT INTO ai_catalog_queue
