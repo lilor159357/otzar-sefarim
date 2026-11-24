@@ -70,8 +70,34 @@ export function cleanReleaseNotes(raw: unknown, fallbackVersion?: string | null)
     text = decodeHtmlEntities(text);
   }
 
-  const rawLines = text
-    .split(/\r?\n/)
+  const allLines = text.split(/\r?\n/);
+  const cleanTargetVer = fallbackVersion ? String(fallbackVersion).replace(/^v/i, "").trim() : "";
+
+  // If RELEASE_NOTES.md contains multiple version headings (e.g. ## מה חדש בגרסה 1.0.12 ... ## מה חדש בגרסה 1.0.11),
+  // isolate ONLY the target version section (or the first/latest version section).
+  const isVersionHeading = (rawLine: string): string | null => {
+    const t = rawLine.trim().replace(/^#{1,6}\s+/, "").trim();
+    const m = t.match(/^(?:מה חדש בגרסה|גרסה|version)\s+v?(\d+\.\d+\.\d+)/i);
+    return m ? m[1] : null;
+  };
+
+  let scopedLines = allLines;
+  const headingIndices: Array<{ idx: number; ver: string }> = [];
+  for (let i = 0; i < allLines.length; i++) {
+    const v = isVersionHeading(allLines[i]);
+    if (v) headingIndices.push({ idx: i, ver: v });
+  }
+  if (headingIndices.length > 0) {
+    const exactIdx = cleanTargetVer
+      ? headingIndices.findIndex((h) => h.ver === cleanTargetVer)
+      : -1;
+    const chosen = exactIdx >= 0 ? exactIdx : 0;
+    const startIdx = headingIndices[chosen].idx + 1;
+    const endIdx = chosen + 1 < headingIndices.length ? headingIndices[chosen + 1].idx : allLines.length;
+    scopedLines = allLines.slice(startIdx, endIdx);
+  }
+
+  const rawLines = scopedLines
     .map((line) => line.trim())
     .filter(Boolean);
 
@@ -91,6 +117,7 @@ export function cleanReleaseNotes(raw: unknown, fallbackVersion?: string | null)
       .trim();
 
     if (!line) continue;
+    if (/^(?:מה חדש בגרסה|גרסה|version)\s+v?\d+\.\d+\.\d+/i.test(line)) continue;
     if (/^what'?s changed:?$/i.test(line)) continue;
     if (/^new contributors:?$/i.test(line)) continue;
     if (/^full changelog\s*:?$/i.test(line)) continue;
@@ -105,7 +132,7 @@ export function cleanReleaseNotes(raw: unknown, fallbackVersion?: string | null)
       seen.add(line);
       highlights.push(line);
     }
-    if (highlights.length >= 8) break;
+    if (highlights.length >= 20) break;
   }
 
   if (highlights.length === 0 && fallbackVersion) {
@@ -123,6 +150,29 @@ export function cleanReleaseNotes(raw: unknown, fallbackVersion?: string | null)
     summary: highlights.join(" · "),
     highlights,
   };
+}
+
+
+export function filterHighlightsForVersion(highlights: string[], targetVersion?: string | null): string[] {
+  if (!Array.isArray(highlights) || highlights.length === 0) return [];
+  const cleanTarget = targetVersion ? String(targetVersion).replace(/^v/i, "").trim() : "";
+  const isVerLine = (line: string): string | null => {
+    const m = String(line || "")
+      .trim()
+      .match(/^(?:מה חדש בגרסה|גרסה|version)\s+v?(\d+\.\d+\.\d+)/i);
+    return m ? m[1] : null;
+  };
+  const headers: Array<{ idx: number; ver: string }> = [];
+  for (let i = 0; i < highlights.length; i++) {
+    const v = isVerLine(highlights[i]);
+    if (v) headers.push({ idx: i, ver: v });
+  }
+  if (headers.length === 0) return highlights;
+  const matchIdx = cleanTarget ? headers.findIndex((h) => h.ver === cleanTarget) : -1;
+  const chosen = matchIdx >= 0 ? matchIdx : 0;
+  const start = headers[chosen].idx + 1;
+  const end = chosen + 1 < headers.length ? headers[chosen + 1].idx : highlights.length;
+  return highlights.slice(start, end).filter((x) => !isVerLine(x));
 }
 
 export function getBuiltinHighlightsForVersion(version: string): string[] {

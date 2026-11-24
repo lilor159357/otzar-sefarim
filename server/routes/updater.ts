@@ -9,6 +9,7 @@ import { requireAdmin } from "../auth/adminAuth.ts";
 import {
   cleanReleaseNotes,
   clearPendingUpdateNotes,
+  filterHighlightsForVersion,
   compareSemver,
   getBuiltinHighlightsForVersion,
   readPendingUpdateNotes,
@@ -526,9 +527,13 @@ export function registerUpdaterRoutes(
     const lastSeen = getSetting(db, "last_seen_app_version", "").trim();
 
     if (pending && compareSemver(currentVersion, pending.targetVersion) >= 0) {
-      const highlights =
+      const filteredPending =
         Array.isArray(pending.highlights) && pending.highlights.length > 0
-          ? pending.highlights
+          ? filterHighlightsForVersion(pending.highlights, currentVersion)
+          : [];
+      const highlights =
+        filteredPending.length > 0
+          ? filteredPending
           : getBuiltinHighlightsForVersion(currentVersion);
       return res.json({
         hasRecentUpdate: true,

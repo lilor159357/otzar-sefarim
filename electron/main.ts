@@ -204,7 +204,7 @@ function createDesktopUpdaterBridge(): DesktopUpdaterBridge {
           });
 
           // Allow splash window to render visibly before closing main window
-          await new Promise((resolve) => setTimeout(resolve, 550));
+          await new Promise((resolve) => setTimeout(resolve, 850));
 
           if (mainWindow && !mainWindow.isDestroyed()) {
             mainWindow.destroy();

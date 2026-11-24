@@ -38,7 +38,7 @@ export function launchStandaloneUpdaterSplash(opts: UpdaterSplashOptions): strin
   const textMuted = isDark ? "#94A3B8" : "#64748B";
   const progressBg = isDark ? "#334155" : "#E2E8F0";
 
-  const headlineText = version ? `מעדכן את התוכנה לגרסה v${version}...` : "מעדכן את התוכנה לגרסה חדשה...";
+  const headlineText = version ? `מעדכן את התוכנה לגרסה v${version}` : "מעדכן את התוכנה לגרסה חדשה";
 
   const ps1 = `
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
@@ -116,8 +116,14 @@ $timer.Add_Tick({
         return
     }
 
-    # Only test server port after 3.5 seconds (ensuring old server has fully stopped)
-    if ($elapsed -ge 3.5) {
+    # Ensure the old Electron process has exited (or 12s elapsed) before probing port
+    $oldExited = $false
+    try {
+        $null = [System.Diagnostics.Process]::GetProcessById($oldPid)
+    } catch {
+        $oldExited = $true
+    }
+    if (($oldExited -and $elapsed -ge 2.0) -or $elapsed -ge 12.0) {
         try {
             $tcp = New-Object System.Net.Sockets.TcpClient
             $iar = $tcp.BeginConnect("127.0.0.1", $port, $null, $null)
@@ -125,8 +131,8 @@ $timer.Add_Tick({
             if ($wait -and $tcp.Connected) {
                 $tcp.EndConnect($iar)
                 $tcp.Close()
-                # Server is up! Wait 700ms so new main window renders visibly
-                Start-Sleep -Milliseconds 700
+                # New server is up! Wait 750ms so new main window renders visibly
+                Start-Sleep -Milliseconds 750
                 $timer.Stop()
                 $win.Close()
                 return
@@ -141,13 +147,19 @@ $win.ShowDialog() | Out-Null
 `;
 
   const scriptPath = path.join(os.tmpdir(), "otzar-updater-splash.ps1");
-  fs.writeFileSync(scriptPath, "﻿" + ps1, "utf8");
+  fs.writeFileSync(scriptPath, "\uFEFF" + ps1, "utf8");
+
+  // Launch PowerShell via GUI-subsystem wscript.exe so Windows does NOT terminate
+  // detached console-less PowerShell before it creates the WPF splash window.
+  const vbsPath = path.join(os.tmpdir(), "otzar-updater-splash.vbs");
+  const vbsBody = 'CreateObject("WScript.Shell").Run "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File """ & WScript.Arguments(0) & """", 0, False\r\n';
+  fs.writeFileSync(vbsPath, vbsBody, "utf8");
 
   try {
     const child = spawn(
-      "powershell.exe",
-      ["-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", scriptPath],
-      { detached: true, stdio: "ignore" }
+      "wscript.exe",
+      [vbsPath, scriptPath],
+      { detached: true, stdio: "ignore", windowsHide: true }
     );
     child.unref();
   } catch (err) {
