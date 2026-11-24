@@ -102,7 +102,9 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
         );
         if ((more?.c ?? 0) > 0) {
           const cfg = getAiConfig(db);
-          await sleep(cfg.delayMs);
+          const readyKeys = getAiKeyPoolPublicStatus(db).filter((k) => k.enabled && k.status === "ready").length;
+          const effectiveDelay = readyKeys > 1 ? Math.max(1000, Math.round(cfg.delayMs / Math.min(readyKeys, 4))) : cfg.delayMs;
+          await sleep(effectiveDelay);
         }
       }
     } finally {
@@ -344,6 +346,15 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
   app.post("/api/ai-queue/process", requireAdmin, (_req, res) => {
     void processPendingQueue();
     res.json({ ok: true, started: true });
+  });
+
+  // Retry all failed items in queue
+  app.post("/api/ai-queue/retry-errors", requireAdmin, (_req, res) => {
+    const info = db.run(
+      "UPDATE ai_catalog_queue SET processing_status = 'pending', error_message = NULL WHERE processing_status = 'error' AND approval_status = 'pending'"
+    );
+    void processPendingQueue();
+    res.json({ ok: true, requeued: info.changes });
   });
 
   // Retry failed item

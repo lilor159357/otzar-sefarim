@@ -15,6 +15,7 @@ export const TRANSFER_SETTINGS_KEYS = [
   "ai_api_key",
   "ai_keys_pool",
   "ai_model",
+  "ai_auto_fallback",
   "embedding_model",
   "ai_delay_ms",
   "library_name",

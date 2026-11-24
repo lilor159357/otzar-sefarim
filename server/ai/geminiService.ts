@@ -39,9 +39,19 @@ export interface AiRuntimeConfig {
   apiKey: string;
   hasAnyKey: boolean;
   aiModel: string;
+  autoFallback: boolean;
   embeddingModel: string;
   delayMs: number;
 }
+
+const DEFAULT_VISION_FALLBACK_MODELS = [
+  "gemini-3.5-flash",
+  "gemini-2.5-flash",
+  "gemini-3.5-flash-lite",
+  "gemini-2.5-flash-lite",
+  "gemini-3.8-flash",
+  "gemini-4-hydrogen",
+];
 
 interface KeyRuntimeState {
   activeInFlight: number;
@@ -211,7 +221,8 @@ export function getAiConfig(db: DbClient): AiRuntimeConfig {
   return {
     apiKey: primaryCandidate,
     hasAnyKey: entries.length > 0 || Boolean(envKey),
-    aiModel: getSetting(db, "ai_model", "gemini-4-hydrogen").trim() || "gemini-4-hydrogen",
+    aiModel: getSetting(db, "ai_model", "gemini-3.5-flash").trim() || "gemini-3.5-flash",
+    autoFallback: getSetting(db, "ai_auto_fallback", "true").trim() !== "false",
     embeddingModel: getSetting(db, "embedding_model", "gemini-embedding-001").trim() || "gemini-embedding-001",
     delayMs: Math.max(500, Number(getSetting(db, "ai_delay_ms", "4200")) || 4200),
   };
@@ -228,7 +239,9 @@ function createClient(apiKey: string): GoogleGenAI {
   });
 }
 
-function classifyGeminiError(err: unknown): "quota" | "invalid_key" | "network" | "model" | "other" {
+export type GeminiErrorKind = "quota" | "overloaded" | "invalid_key" | "network" | "model" | "other";
+
+export function classifyGeminiError(err: unknown): GeminiErrorKind {
   const msg = String((err as { message?: string })?.message || err || "").toLowerCase();
   if (
     msg.includes("fetch failed") ||
@@ -240,6 +253,19 @@ function classifyGeminiError(err: unknown): "quota" | "invalid_key" | "network" 
     msg.includes("network")
   ) {
     return "network";
+  }
+  if (
+    msg.includes("503") ||
+    msg.includes("unavailable") ||
+    msg.includes("high demand") ||
+    msg.includes("overloaded") ||
+    msg.includes("temporarily unavailable") ||
+    msg.includes("try again later") ||
+    msg.includes("500") ||
+    msg.includes("internal error") ||
+    msg.includes("deadline_exceeded")
+  ) {
+    return "overloaded";
   }
   if (msg.includes("429") || msg.includes("resource_exhausted") || msg.includes("quota") || msg.includes("rate limit")) {
     return "quota";
@@ -265,11 +291,14 @@ export function formatGeminiError(err: unknown): string {
   if (kind === "invalid_key") {
     return "מפתח ה-API אינו תקין או שנדחתה ההרשאה (403). בדוק את המפתחות ברולטה בהגדרות.";
   }
+  if (kind === "overloaded") {
+    return "עומס זמני בשרתי המודל (503). המערכת ניסתה אוטומטית גם מפתחות ומודלי גיבוי — לחץ \"נסה שנית\" בעוד מספר רגעים.";
+  }
   if (kind === "quota") {
     return "חריגה ממגבלת הבקשות הזמנית (429). המפתחות בהשהיה זמנית — המתן מעט או הוסף מפתח נוסף מחשבון אחר.";
   }
   if (kind === "model") {
-    return "שם המודל שהוגדר אינו זמין (404). ניתן להחליף מודל בהגדרות (למשל gemini-4-hydrogen).";
+    return "שם המודל שהוגדר אינו זמין (404). ניתן לבחור מודל אחר בהגדרות (למשל gemini-3.5-flash או gemini-2.5-flash).";
   }
   if (kind === "network") {
     return "אין חיבור זמין לשרתי Gemini (מצב אופליין או חסימת/תעודת סינון רשת כמו אתרוג).";
@@ -303,9 +332,14 @@ function selectLeastLoadedKey(entries: AiKeyEntry[], excludedKeys: Set<string>):
   return candidates[0];
 }
 
+function waitMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export async function executeWithKeyRoulette<T>(
   db: DbClient,
-  task: (apiKey: string, entry: AiKeyEntry) => Promise<T>
+  task: (apiKey: string, entry: AiKeyEntry) => Promise<T>,
+  options?: { maxOverloadRetries?: number }
 ): Promise<{ result: T; usedEntry: AiKeyEntry }> {
   const entries = getAiKeyPoolEntries(db).filter((k) => k.enabled);
   if (entries.length === 0) {
@@ -314,6 +348,8 @@ export async function executeWithKeyRoulette<T>(
 
   const tried = new Set<string>();
   let lastErr: unknown = null;
+  let overloadAttempts = 0;
+  const maxOverloadRetries = options?.maxOverloadRetries ?? 2;
 
   while (tried.size < entries.length) {
     const picked = selectLeastLoadedKey(entries, tried);
@@ -346,6 +382,15 @@ export async function executeWithKeyRoulette<T>(
         st.lastError = "מפתח לא תקין או חסר הרשאה (403)";
         continue; // Try next key in the roulette
       }
+      if (kind === "overloaded") {
+        overloadAttempts += 1;
+        st.lastError = "עומס רגעי בשרת המודל (503)";
+        if (overloadAttempts < maxOverloadRetries && tried.size < entries.length) {
+          await waitMs(650 + Math.round(Math.random() * 550));
+          continue;
+        }
+        throw err;
+      }
       if (kind === "network" || kind === "model") {
         // Network/Etrog SSL or invalid model affects all keys equally — fail fast
         st.lastError = formatGeminiError(err);
@@ -374,6 +419,47 @@ export async function executeWithKeyRoulette<T>(
   throw new Error("אין מפתח API תקין זמין ברולטה כרגע. בדוק את תקינות המפתחות בהגדרות.");
 }
 
+export async function executeWithModelAndKeyFallback<T>(
+  db: DbClient,
+  primaryModel: string,
+  allowFallback: boolean,
+  task: (apiKey: string, modelName: string, entry: AiKeyEntry) => Promise<T>
+): Promise<{ result: T; usedEntry: AiKeyEntry; usedModel: string; usedFallback: boolean }> {
+  const cleanPrimary = primaryModel.trim() || "gemini-3.5-flash";
+  const modelChain = allowFallback
+    ? [cleanPrimary, ...DEFAULT_VISION_FALLBACK_MODELS.filter((m) => m !== cleanPrimary)]
+    : [cleanPrimary];
+
+  let lastErr: unknown = null;
+  for (let i = 0; i < modelChain.length; i++) {
+    const modelName = modelChain[i];
+    const hasNext = i < modelChain.length - 1;
+    try {
+      const { result, usedEntry } = await executeWithKeyRoulette(
+        db,
+        (apiKey, entry) => task(apiKey, modelName, entry),
+        { maxOverloadRetries: hasNext ? 1 : 2 }
+      );
+      return {
+        result,
+        usedEntry,
+        usedModel: modelName,
+        usedFallback: modelName !== cleanPrimary,
+      };
+    } catch (err) {
+      lastErr = err;
+      const kind = classifyGeminiError(err);
+      if (allowFallback && hasNext && (kind === "overloaded" || kind === "model")) {
+        console.warn(`[AI] Model ${modelName} failed (${kind}); failing over to ${modelChain[i + 1]}`);
+        await waitMs(400);
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastErr || new Error("שגיאה בפנייה למודל ה-AI");
+}
+
 export async function testSinglePoolKey(
   db: DbClient,
   idOrRawKey: string
@@ -387,32 +473,48 @@ export async function testSinglePoolKey(
   }
   const t0 = Date.now();
   const st = getRuntimeState(keyToTest);
-  try {
-    const ai = createClient(keyToTest);
-    const resp = await ai.models.generateContent({
-      model: cfg.aiModel,
-      contents: "השב במילה אחת בעברית: תקין",
-    });
-    const reply = (resp.text || "").trim();
-    st.disabledInvalid = false;
-    st.cooldownUntil = 0;
-    st.lastError = null;
-    st.lastUsedAt = Date.now();
-    st.totalRequests += 1;
-    return {
-      ok: true,
-      model: cfg.aiModel,
-      latencyMs: Date.now() - t0,
-      message: `${found?.label || "המפתח"} תקין ומחובר (תגובה: ${reply || "OK"})`,
-    };
-  } catch (err) {
-    const kind = classifyGeminiError(err);
-    const msg = formatGeminiError(err);
-    if (kind === "invalid_key") st.disabledInvalid = true;
-    if (kind === "quota") st.cooldownUntil = Date.now() + 60_000;
-    st.lastError = msg;
-    return { ok: false, model: cfg.aiModel, latencyMs: Date.now() - t0, message: msg };
+  const modelsToTry = cfg.autoFallback
+    ? [cfg.aiModel, ...DEFAULT_VISION_FALLBACK_MODELS.filter((m) => m !== cfg.aiModel).slice(0, 2)]
+    : [cfg.aiModel];
+
+  let lastErr: unknown = null;
+  for (let i = 0; i < modelsToTry.length; i++) {
+    const modelName = modelsToTry[i];
+    try {
+      const ai = createClient(keyToTest);
+      const resp = await ai.models.generateContent({
+        model: modelName,
+        contents: "השב במילה אחת בעברית: תקין",
+      });
+      const reply = (resp.text || "").trim();
+      st.disabledInvalid = false;
+      st.cooldownUntil = 0;
+      st.lastError = null;
+      st.lastUsedAt = Date.now();
+      st.totalRequests += 1;
+      const fallbackNote = modelName !== cfg.aiModel ? ` (נבדק דרך מודל גיבוי ${modelName} עקב עומס ב-${cfg.aiModel})` : "";
+      return {
+        ok: true,
+        model: modelName,
+        latencyMs: Date.now() - t0,
+        message: `${found?.label || "המפתח"} תקין ומחובר${fallbackNote} (תגובה: ${reply || "OK"})`,
+      };
+    } catch (err) {
+      lastErr = err;
+      const kind = classifyGeminiError(err);
+      if (i < modelsToTry.length - 1 && (kind === "overloaded" || kind === "model")) {
+        continue;
+      }
+      break;
+    }
   }
+
+  const kind = classifyGeminiError(lastErr);
+  const msg = formatGeminiError(lastErr);
+  if (kind === "invalid_key") st.disabledInvalid = true;
+  if (kind === "quota") st.cooldownUntil = Date.now() + 60_000;
+  st.lastError = msg;
+  return { ok: false, model: cfg.aiModel, latencyMs: Date.now() - t0, message: msg };
 }
 
 export async function testGeminiConnection(
@@ -429,20 +531,26 @@ export async function testGeminiConnection(
   }
   const t0 = Date.now();
   try {
-    const { result, usedEntry } = await executeWithKeyRoulette(db, async (apiKey) => {
-      const ai = createClient(apiKey);
-      const resp = await ai.models.generateContent({
-        model: cfg.aiModel,
-        contents: "השב במילה אחת בעברית: תקין",
-      });
-      return (resp.text || "").trim();
-    });
+    const { result, usedEntry, usedModel, usedFallback } = await executeWithModelAndKeyFallback(
+      db,
+      cfg.aiModel,
+      cfg.autoFallback,
+      async (apiKey, modelName) => {
+        const ai = createClient(apiKey);
+        const resp = await ai.models.generateContent({
+          model: modelName,
+          contents: "השב במילה אחת בעברית: תקין",
+        });
+        return (resp.text || "").trim();
+      }
+    );
+    const fallbackNote = usedFallback ? ` · מודל גיבוי: ${usedModel}` : "";
     return {
       ok: true,
-      model: cfg.aiModel,
+      model: usedModel,
       latencyMs: Date.now() - t0,
       usedLabel: usedEntry.label,
-      message: `החיבור תקין דרך ${usedEntry.label} (תגובה: ${result || "OK"})`,
+      message: `החיבור תקין דרך ${usedEntry.label}${fallbackNote} (תגובה: ${result || "OK"})`,
     };
   } catch (err) {
     return {
@@ -488,10 +596,14 @@ export async function analyzeBookCoverImage(
     },
   }));
 
-  const { result: response } = await executeWithKeyRoulette(db, async (apiKey) => {
-    const ai = createClient(apiKey);
-    return ai.models.generateContent({
-      model: cfg.aiModel,
+  const { result: response } = await executeWithModelAndKeyFallback(
+    db,
+    cfg.aiModel,
+    cfg.autoFallback,
+    async (apiKey, activeModel) => {
+      const ai = createClient(apiKey);
+      return ai.models.generateContent({
+        model: activeModel,
       contents: {
         parts: [
           ...imageParts,

@@ -1069,6 +1069,19 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
                   {workerRunning ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
                   הפעל עיבוד תור
                 </button>
+                {errorCount > 0 && (
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      await fetch("/api/ai-queue/retry-errors", { method: "POST" });
+                      loadQueue();
+                    }}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold border border-red-300 text-red-700 hover:bg-red-50 dark:border-red-800 dark:text-red-300 dark:hover:bg-red-950/30 cursor-pointer"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    נסה שנית שגיאות ({errorCount})
+                  </button>
+                )}
                 {doneCount > 0 && (
                   <button
                     type="button"

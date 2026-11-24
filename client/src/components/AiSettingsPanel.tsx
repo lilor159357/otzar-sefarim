@@ -22,8 +22,10 @@ interface AiSettingsPanelProps {
 }
 
 const PRESET_MODELS = [
-  { id: "gemini-4-hydrogen", label: "gemini-4-hydrogen (מומלץ)" },
+  { id: "gemini-3.5-flash", label: "gemini-3.5-flash (יציב ומהיר — מומלץ)" },
+  { id: "gemini-2.5-flash", label: "gemini-2.5-flash (גיבוי אמין)" },
   { id: "gemini-3.8-flash", label: "gemini-3.8-flash" },
+  { id: "gemini-4-hydrogen", label: "gemini-4-hydrogen" },
   { id: "gemini-3.5-flash-lite", label: "gemini-3.5-flash-lite" },
 ];
 
@@ -154,7 +156,8 @@ export const AiSettingsPanel: React.FC<AiSettingsPanelProps> = ({ settings, setS
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          ai_model: settings.ai_model || "gemini-4-hydrogen",
+          ai_model: settings.ai_model || "gemini-3.5-flash",
+          ai_auto_fallback: settings.ai_auto_fallback === "false" ? "false" : "true",
           embedding_model: settings.embedding_model || "gemini-embedding-001",
           ai_delay_ms: settings.ai_delay_ms || "4200",
         }),
@@ -422,7 +425,7 @@ export const AiSettingsPanel: React.FC<AiSettingsPanelProps> = ({ settings, setS
                   type="button"
                   onClick={() => setSettings((p) => ({ ...p, ai_model: m.id }))}
                   className={`px-3 py-1.5 rounded-lg text-xs font-mono border cursor-pointer whitespace-nowrap ${
-                    (settings.ai_model || "gemini-4-hydrogen") === m.id
+                    (settings.ai_model || "gemini-3.5-flash") === m.id
                       ? "border-[var(--otzar-accent)] bg-[var(--otzar-surface)] text-[var(--otzar-accent)] font-semibold"
                       : "border-[var(--otzar-border-muted)]"
                   }`}
@@ -434,10 +437,26 @@ export const AiSettingsPanel: React.FC<AiSettingsPanelProps> = ({ settings, setS
             <input
               type="text"
               dir="ltr"
-              value={settings.ai_model || "gemini-4-hydrogen"}
+              value={settings.ai_model || "gemini-3.5-flash"}
               onChange={(e) => setSettings((p) => ({ ...p, ai_model: e.target.value }))}
               className="w-full px-3 py-2 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] font-mono text-xs"
             />
+            <label className="mt-2.5 flex items-start gap-2 text-xs cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={settings.ai_auto_fallback !== "false"}
+                onChange={(e) =>
+                  setSettings((p) => ({ ...p, ai_auto_fallback: e.target.checked ? "true" : "false" }))
+                }
+                className="mt-0.5 rounded accent-[var(--otzar-accent)]"
+              />
+              <span>
+                <strong>מעבר אוטומטי למודל גיבוי בזמן עומס שרת (שגיאת 503):</strong>{" "}
+                <span className="text-[var(--otzar-text-muted)]">
+                  חלוקת המפתחות פותרת מגבלת מכסה (429), ואילו בעומס 503 על מודל מסוים המערכת עוברת אוטומטית למודל גיבוי יציב (gemini-3.5-flash / gemini-2.5-flash) בלי לעצור את התור.
+                </span>
+              </span>
+            </label>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
