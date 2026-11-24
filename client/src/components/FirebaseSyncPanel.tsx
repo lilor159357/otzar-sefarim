@@ -14,6 +14,9 @@ import {
   Smartphone,
   Loader2,
   ShieldCheck,
+  Sparkles,
+  Trash2,
+  KeyRound,
 } from "lucide-react";
 import type { FirebaseSyncStatus } from "../types.ts";
 import { MobileQrPairingBox } from "./MobileQrPairingBox.tsx";
@@ -64,6 +67,13 @@ export const FirebaseSyncPanel: React.FC<FirebaseSyncPanelProps> = ({ onReload }
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [createUserIfMissing, setCreateUserIfMissing] = useState(false);
+  const [clearDemoData, setClearDemoData] = useState(true);
+  const [cleaningDemo, setCleaningDemo] = useState(false);
+  const [aiBackupStatus, setAiBackupStatus] = useState<{ connected: boolean; exists: boolean; keysCount: number; updatedAt: string | null } | null>(null);
+  const [aiBackupPass, setAiBackupPass] = useState("");
+  const [showAiBackupPass, setShowAiBackupPass] = useState(false);
+  const [aiBackupBusy, setAiBackupBusy] = useState<"backup" | "restore" | null>(null);
+  const [aiBackupNotice, setAiBackupNotice] = useState<{ ok: boolean; text: string } | null>(null);
 
   const [saving, setSaving] = useState(false);
   const [syncing, setSyncing] = useState(false);
@@ -81,6 +91,12 @@ export const FirebaseSyncPanel: React.FC<FirebaseSyncPanelProps> = ({ onReload }
       if (!res.ok) return;
       const data: FirebaseSyncStatus = await res.json();
       setStatus(data);
+      if (data.connected) {
+        fetch("/api/sync/ai-keys-backup/status")
+          .then((r) => (r.ok ? r.json() : null))
+          .then((b) => { if (b) setAiBackupStatus(b); })
+          .catch(() => {});
+      }
       if (hydrateForm) {
         setEnabled(data.enabled);
         setSyncEmbeddings(data.syncEmbeddings);
@@ -143,6 +159,7 @@ export const FirebaseSyncPanel: React.FC<FirebaseSyncPanelProps> = ({ onReload }
           email: email.trim(),
           password: password || undefined,
           createUserIfMissing,
+          clearDemoData,
         }),
       });
       const data = await res.json();
@@ -195,6 +212,66 @@ export const FirebaseSyncPanel: React.FC<FirebaseSyncPanelProps> = ({ onReload }
       setNotice({ ok: false, text: err?.message || "שגיאה בהעלאת המאגר" });
     } finally {
       setSeeding(false);
+    }
+  };
+
+  const handleCleanupDemo = async () => {
+    setCleaningDemo(true);
+    setNotice(null);
+    try {
+      const res = await fetch("/api/sync/cleanup-demo", { method: "POST" });
+      const data = await res.json();
+      if (data.status) setStatus(data.status);
+      if (!res.ok) throw new Error(data.error || "שגיאה בניקוי נתוני הדמו");
+      const total = (data.deletedDemoBooks ?? 0) + (data.deletedDuplicateBooks ?? 0);
+      setNotice({
+        ok: true,
+        text:
+          total > 0
+            ? `נוקו בהצלחה ${data.deletedDemoBooks ?? 0} ספרי דמו, ${data.deletedDuplicateBooks ?? 0} כפילויות MOB, ${data.deletedDemoBorrowers ?? 0} שואלי דמו ו-${data.deletedDemoCabinets ?? 0} ארונות דמו ריקים.`
+            : "לא נמצאו ספרי דמו או כפילויות להסרה (ספרים עם השאלות פעילות נשמרים אוטומטית).",
+      });
+      await onReload();
+    } catch (err: any) {
+      setNotice({ ok: false, text: err?.message || "שגיאה בניקוי נתוני הדמו" });
+    } finally {
+      setCleaningDemo(false);
+    }
+  };
+
+  const handleAiKeysCloudAction = async (mode: "backup" | "restore") => {
+    setAiBackupNotice(null);
+    if (!aiBackupPass.trim()) {
+      setAiBackupNotice({ ok: false, text: "יש להזין סיסמת הצפנה (לפחות 4 תווים)." });
+      return;
+    }
+    setAiBackupBusy(mode);
+    try {
+      const res = await fetch(mode === "backup" ? "/api/sync/ai-keys-backup" : "/api/sync/ai-keys-restore", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ passcode: aiBackupPass.trim() }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "הפעולה נכשלה");
+      setAiBackupStatus({
+        connected: true,
+        exists: true,
+        keysCount: data.keysCount ?? 0,
+        updatedAt: data.updatedAt || new Date().toISOString(),
+      });
+      setAiBackupNotice({
+        ok: true,
+        text:
+          mode === "backup"
+            ? `גובו בהצלחה ${data.keysCount} מפתחות Gemini לענן בצורה מוצפנת (AES-256).`
+            : `שוחזרו בהצלחה ${data.keysCount} מפתחות Gemini מהענן להגדרות המחשב הנוכחי!`,
+      });
+      if (mode === "restore") await onReload();
+    } catch (err: any) {
+      setAiBackupNotice({ ok: false, text: err?.message || "שגיאה בטיפול במפתחות בענן" });
+    } finally {
+      setAiBackupBusy(null);
     }
   };
 
@@ -389,6 +466,29 @@ export const FirebaseSyncPanel: React.FC<FirebaseSyncPanelProps> = ({ onReload }
         </div>
       )}
 
+      {status?.demoStatus && (status.demoStatus.demoBooksCount > 0 || status.demoStatus.duplicateDemoCount > 0) && (
+        <div className="flex flex-wrap items-center justify-between gap-3 p-3.5 rounded-xl border border-amber-300 bg-amber-50/70 dark:border-amber-800 dark:bg-amber-950/25 text-xs">
+          <div className="space-y-0.5">
+            <div className="font-semibold text-amber-900 dark:text-amber-200">
+              זוהו {status.demoStatus.demoBooksCount} ספרי דמו
+              {status.demoStatus.duplicateDemoCount > 0 ? ` ו-${status.demoStatus.duplicateDemoCount} כפילויות MOB` : ""} במאגר
+            </div>
+            <p className="text-amber-800/90 dark:text-amber-300/90">
+              לחיצה תסיר את ספרי הדמו המקוריים וכפילויות הדמו (מבלי לפגוע בספרים שקוטלגו באמת או בספרים מושאלים).
+            </p>
+          </div>
+          <button
+            type="button"
+            disabled={cleaningDemo}
+            onClick={handleCleanupDemo}
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg font-semibold border border-amber-400 bg-white text-amber-900 hover:bg-amber-100 dark:bg-amber-900/40 dark:text-amber-100 dark:border-amber-700 cursor-pointer shrink-0"
+          >
+            {cleaningDemo ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
+            נקה ספרי דמו וכפילויות
+          </button>
+        </div>
+      )}
+
       {/* Configuration Form */}
       <form onSubmit={handleSaveAndConnect} className="space-y-4 pt-2 border-t border-[var(--otzar-border-muted)] text-sm">
         <div className="flex flex-wrap items-center justify-between gap-2">
@@ -576,6 +676,15 @@ export const FirebaseSyncPanel: React.FC<FirebaseSyncPanelProps> = ({ onReload }
             />
             <span>צור את משתמש המנהל ב-Firebase Auth אוטומטית אם עדיין לא נוצר</span>
           </label>
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={clearDemoData}
+              onChange={(e) => setClearDemoData(e.target.checked)}
+              className="rounded border-[var(--otzar-border-muted)]"
+            />
+            <span>נקה נתוני דמו מקומיים אוטומטית בעת חיבור לענן קיים (מונע כפילויות במחשב חדש)</span>
+          </label>
         </div>
 
         <button
@@ -587,6 +696,76 @@ export const FirebaseSyncPanel: React.FC<FirebaseSyncPanelProps> = ({ onReload }
           {saving ? "מאמת ומתחבר..." : "שמור הגדרות, אמת והתחבר לענן"}
         </button>
       </form>
+
+      {status?.configured && (
+        <div className="p-4 rounded-xl border border-[var(--otzar-border-muted)] bg-[var(--otzar-surface-alt)]/60 space-y-3 text-xs">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2 font-semibold text-sm">
+              <Sparkles className="w-4 h-4 text-[var(--otzar-accent)]" />
+              <span>גיבוי ושחזור מוצפן של מפתחות Gemini לענן (AES-256)</span>
+            </div>
+            {aiBackupStatus?.connected && (
+              <span className="text-[11px] text-[var(--otzar-text-muted)]">
+                {aiBackupStatus.exists
+                  ? `קיים גיבוי בענן (${aiBackupStatus.keysCount} מפתחות${aiBackupStatus.updatedAt ? " · " + new Date(aiBackupStatus.updatedAt).toLocaleDateString("he-IL") : ""})`
+                  : "טרם נשמר גיבוי מפתחות בענן"}
+              </span>
+            )}
+          </div>
+          <p className="text-[var(--otzar-text-muted)]">
+            מפתחות ה-Gemini מוצפנים בסיסמה שתבחר לפני השליחה ל-Firebase (אינם נשמרים בענן בטקסט גלוי), כדי שתוכל לשחזר אותם בלחיצת כפתור במחשב אחר.
+          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="relative flex-1 min-w-[200px]">
+              <KeyRound className="w-3.5 h-3.5 text-[var(--otzar-text-muted)] absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+              <input
+                type={showAiBackupPass ? "text" : "password"}
+                dir="ltr"
+                value={aiBackupPass}
+                onChange={(e) => setAiBackupPass(e.target.value)}
+                placeholder="סיסמת הצפנה למפתחות (4+ תווים)"
+                className="w-full pr-9 pl-9 py-2 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] text-xs"
+              />
+              <button
+                type="button"
+                onClick={() => setShowAiBackupPass((v) => !v)}
+                className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--otzar-text-muted)] cursor-pointer"
+              >
+                {showAiBackupPass ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+              </button>
+            </div>
+            <button
+              type="button"
+              disabled={aiBackupBusy !== null || !status.connected}
+              onClick={() => void handleAiKeysCloudAction("backup")}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg font-semibold text-white bg-[var(--otzar-accent)] hover:bg-[var(--otzar-accent-hover)] disabled:opacity-50 cursor-pointer"
+            >
+              {aiBackupBusy === "backup" ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <UploadCloud className="w-3.5 h-3.5" />}
+              גבה מפתחות לענן
+            </button>
+            <button
+              type="button"
+              disabled={aiBackupBusy !== null || !status.connected}
+              onClick={() => void handleAiKeysCloudAction("restore")}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg font-semibold border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] hover:bg-[var(--otzar-surface)] disabled:opacity-50 cursor-pointer"
+            >
+              {aiBackupBusy === "restore" ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5 text-[var(--otzar-accent)]" />}
+              שחזר מפתחות מהענן
+            </button>
+          </div>
+          {aiBackupNotice && (
+            <div
+              className={`p-2.5 rounded-lg border font-medium ${
+                aiBackupNotice.ok
+                  ? "border-emerald-300 bg-emerald-50 text-emerald-800"
+                  : "border-red-300 bg-red-50 text-red-800"
+              }`}
+            >
+              {aiBackupNotice.text}
+            </div>
+          )}
+        </div>
+      )}
 
       <MobileQrPairingBox />
     </div>

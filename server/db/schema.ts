@@ -14,6 +14,19 @@ export function buildNormalizedBookSearch(parts: Array<string | undefined | null
   return normalizeHebrewText(parts.filter(Boolean).join(" "));
 }
 
+export const DEMO_SEED_TIMESTAMP = "2025-01-01T00:00:00.000Z";
+export const DEMO_CABINET_CODES = ["א-1", "ב-1", "ג-1", "ד-1"] as const;
+export const DEMO_BOOK_BARCODES = ["100001", "100002", "100003", "100004", "100005", "100006"] as const;
+export const DEMO_BOOK_TITLES = [
+  "תלמוד בבלי - מסכת ברכות",
+  "משנה ברורה - חלק א׳ (הלכות הנהגת הבוקר וציצית)",
+  "משנה תורה לרמב״ם - ספר המדע ואהבה",
+  "שולחן ערוך - יורה דעה עם נושאי כלים",
+  "מקראות גדולות - בראשית",
+  "מסילת ישרים",
+] as const;
+export const DEMO_BORROWER_NAMES = ["דוד כהן", "יהודה לוי", "הרב אברהם גולדברג"] as const;
+
 export function newSyncId(): string {
   return crypto.randomUUID();
 }
@@ -267,22 +280,22 @@ export function initSchemaAndSeed(db: DbClient): void {
   const existingCabinets = db.get<{ c: number }>("SELECT COUNT(*) AS c FROM cabinets");
   if ((existingCabinets?.c ?? 0) === 0) {
     db.transaction(() => {
-      const now = new Date().toISOString();
+      const now = DEMO_SEED_TIMESTAMP;
       const cab1 = db.run(
         "INSERT INTO cabinets (code, main_subject, shelves_count, x, y, width, height, rotation, sync_id, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        "א-1", "ש״ס תלמוד בבלי ומפרשים", 6, 40, 40, 180, 60, 0, newSyncId(), now
+        "א-1", "ש״ס תלמוד בבלי ומפרשים", 6, 40, 40, 180, 60, 0, "demo-cabinet-1", now
       ).lastInsertRowid;
       const cab2 = db.run(
         "INSERT INTO cabinets (code, main_subject, shelves_count, x, y, width, height, rotation, sync_id, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        "ב-1", "הלכה, טור, שו״ע ופוסקים", 6, 250, 40, 180, 60, 0, newSyncId(), now
+        "ב-1", "הלכה, טור, שו״ע ופוסקים", 6, 250, 40, 180, 60, 0, "demo-cabinet-2", now
       ).lastInsertRowid;
       const cab3 = db.run(
         "INSERT INTO cabinets (code, main_subject, shelves_count, x, y, width, height, rotation, sync_id, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        "ג-1", "תנ״ך ומפרשים", 5, 40, 160, 180, 60, 0, newSyncId(), now
+        "ג-1", "תנ״ך ומפרשים", 5, 40, 160, 180, 60, 0, "demo-cabinet-3", now
       ).lastInsertRowid;
       const cab4 = db.run(
         "INSERT INTO cabinets (code, main_subject, shelves_count, x, y, width, height, rotation, sync_id, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        "ד-1", "מחשבה, חסידות ומוסר", 5, 250, 160, 180, 60, 0, newSyncId(), now
+        "ד-1", "מחשבה, חסידות ומוסר", 5, 250, 160, 180, 60, 0, "demo-cabinet-4", now
       ).lastInsertRowid;
 
       const sampleBooks = [
@@ -371,19 +384,18 @@ export function initSchemaAndSeed(db: DbClient): void {
           label_printed: 1,
         },
       ];
-
       for (const b of sampleBooks) {
         const norm = buildNormalizedBookSearch([b.barcode, b.title, b.author, b.volume, b.publisher, b.category, b.tags.join(" "), b.notes]);
         db.run(
           `INSERT INTO books (barcode, title, author, volume, publisher, category, tags, normalized_search, cabinet_id, shelf_number, notes, status, label_printed, created_at, barcode_status, sync_id, updated_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'assigned', ?, ?)`,
-          b.barcode, b.title, b.author, b.volume, b.publisher, b.category, JSON.stringify(b.tags), norm, b.cabinet_id, b.shelf_number, b.notes, b.status, b.label_printed, now, newSyncId(), now
+          b.barcode, b.title, b.author, b.volume, b.publisher, b.category, JSON.stringify(b.tags), norm, b.cabinet_id, b.shelf_number, b.notes, b.status, b.label_printed, now, `demo-book-${b.barcode}`, now
         );
       }
 
-      db.run("INSERT INTO borrowers (full_name, shiur_group, phone, notes, created_at, sync_id, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)", "דוד כהן", "שיעור ב׳", "050-1234567", "", now, newSyncId(), now);
-      db.run("INSERT INTO borrowers (full_name, shiur_group, phone, notes, created_at, sync_id, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)", "יהודה לוי", "שיעור ג׳", "052-7654321", "", now, newSyncId(), now);
-      db.run("INSERT INTO borrowers (full_name, shiur_group, phone, notes, created_at, sync_id, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)", "הרב אברהם גולדברג", "כולל אברכים", "054-9876543", "", now, newSyncId(), now);
+      db.run("INSERT INTO borrowers (full_name, shiur_group, phone, notes, created_at, sync_id, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)", "דוד כהן", "שיעור ב׳", "050-1234567", "", now, "demo-borrower-1", now);
+      db.run("INSERT INTO borrowers (full_name, shiur_group, phone, notes, created_at, sync_id, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)", "יהודה לוי", "שיעור ג׳", "052-7654321", "", now, "demo-borrower-2", now);
+      db.run("INSERT INTO borrowers (full_name, shiur_group, phone, notes, created_at, sync_id, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)", "הרב אברהם גולדברג", "כולל אברכים", "054-9876543", "", now, "demo-borrower-3", now);
     });
   }
 }

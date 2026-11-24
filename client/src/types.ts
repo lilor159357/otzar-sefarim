@@ -221,6 +221,11 @@ export interface FirebaseSyncStatus {
   syncEmbeddings: boolean;
   initialSeedDone: boolean;
   deviceId: string;
+  demoStatus?: {
+    demoBooksCount: number;
+    duplicateDemoCount: number;
+    isPureDemo: boolean;
+  };
   config?: {
     apiKey: string;
     authDomain?: string;

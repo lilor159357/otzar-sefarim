@@ -55,6 +55,7 @@ export function registerSyncRoutes(app: Express, db: DbClient, syncService: Otza
         email = "",
         password,
         createUserIfMissing = false,
+        clearDemoData = true,
       } = req.body || {};
       const result = await syncService.testAndSaveConfig({
         enabled: Boolean(enabled),
@@ -63,6 +64,7 @@ export function registerSyncRoutes(app: Express, db: DbClient, syncService: Otza
         email: String(email || ""),
         password: typeof password === "string" ? password : undefined,
         createUserIfMissing: Boolean(createUserIfMissing),
+        clearDemoData: Boolean(clearDemoData),
       });
       res.json(result);
     } catch (err: any) {
@@ -205,6 +207,44 @@ export function registerSyncRoutes(app: Express, db: DbClient, syncService: Otza
       res.json(result);
     } catch (err: any) {
       res.status(400).json({ error: err?.message || "שגיאה בייבוא חבילת ההעברה" });
+    }
+  });
+
+  app.post("/api/sync/cleanup-demo", requireAdmin, async (_req, res) => {
+    try {
+      const result = await syncService.cleanupDemoAndDuplicates();
+      res.json(result);
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "שגיאה בניקוי ספרי הדמו והכפילויות" });
+    }
+  });
+
+  app.get("/api/sync/ai-keys-backup/status", requireAdmin, async (_req, res) => {
+    try {
+      const result = await syncService.getAiKeysBackupStatus();
+      res.json(result);
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "שגיאה בבדיקת גיבוי מפתחות ה-AI בענן" });
+    }
+  });
+
+  app.post("/api/sync/ai-keys-backup", requireAdmin, async (req, res) => {
+    try {
+      const passcode = String(req.body?.passcode || "");
+      const result = await syncService.backupAiKeysToCloud(passcode);
+      res.json(result);
+    } catch (err: any) {
+      res.status(400).json({ error: err?.message || "שגיאה בגיבוי מפתחות ה-AI לענן" });
+    }
+  });
+
+  app.post("/api/sync/ai-keys-restore", requireAdmin, async (req, res) => {
+    try {
+      const passcode = String(req.body?.passcode || "");
+      const result = await syncService.restoreAiKeysFromCloud(passcode);
+      res.json(result);
+    } catch (err: any) {
+      res.status(400).json({ error: err?.message || "שגיאה בשחזור מפתחות ה-AI מהענן" });
     }
   });
 

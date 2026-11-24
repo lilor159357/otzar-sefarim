@@ -86,7 +86,7 @@ function countAiKeys(settingsMap: Record<string, string>): number {
     const arr = JSON.parse(settingsMap.ai_keys_pool || "[]");
     if (Array.isArray(arr)) {
       for (const item of arr) {
-        const k = typeof item === "string" ? item.trim() : String(item?.key || "").trim();
+        const k = typeof item === "string" ? item.trim() : String(item?.apiKey || item?.key || "").trim();
         if (k) seen.add(k);
       }
     }
