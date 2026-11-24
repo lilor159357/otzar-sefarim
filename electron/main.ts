@@ -4,6 +4,7 @@ import fs from "fs";
 import path from "path";
 import { migrateLegacyDataIfNeeded } from "./dataMigration.ts";
 import { loadWindowsRootCertificates } from "./windowsCerts.ts";
+import { launchStandaloneUpdaterSplash } from "./updaterSplash.ts";
 import { startOtzarServer, type StartedOtzarServer } from "../server/index.ts";
 import type { DesktopUpdaterBridge, DesktopUpdaterSnapshot } from "../server/routes/updater.ts";
 import {
@@ -192,25 +193,31 @@ function createDesktopUpdaterBridge(): DesktopUpdaterBridge {
 
       void (async () => {
         try {
-          await createSplashWindow(appRoot, {
-            mode: "updating",
-            version: targetVersion,
-            themePreset: themeSnap.themePreset,
+          // Launch detached native WPF updater splash from %TEMP% before tearing down
+          // This persists on-screen throughout NSIS extraction/install with zero file locks
+          launchStandaloneUpdaterSplash({
+            targetVersion,
             darkMode: themeSnap.darkMode,
+            themePreset: themeSnap.themePreset,
+            serverPort: Number(process.env.PORT || 4747),
+            oldProcessId: process.pid,
           });
+
+          // Allow splash window to render visibly before closing main window
+          await new Promise((resolve) => setTimeout(resolve, 550));
+
           if (mainWindow && !mainWindow.isDestroyed()) {
             mainWindow.destroy();
             mainWindow = null;
           }
-          // Allow splash frame to paint visibly before synchronous teardown
-          await new Promise((resolve) => setTimeout(resolve, 650));
 
           // Mandatory synchronous sequence: WAL Checkpoint -> pre-update backup -> close Express & SQLite
           serverHandle?.prepareAndCloseForUpdate();
           serverHandle = null;
 
-          // Destroy splash so zero windows/listeners block process exit or lock files
+          // Destroy internal splash if any existed
           destroySplashWindow();
+
           autoUpdater.quitAndInstall(true, true);
         } catch (err: any) {
           isQuittingForUpdate = false;
