@@ -7,6 +7,7 @@ import { enqueueSyncOutbox, newSyncId } from "../db/schema.ts";
 import { extractTokenFromRequest, isAdminRequest, issueAdminToken, requireAdmin, revokeAdminToken } from "../auth/adminAuth.ts";
 import { generateLabelsPdfBuffer, type A4TemplateConfig, type LabelBookInput, type LabelDesignConfig } from "../pdf/labelsPdf.ts";
 import { fallbackT, type StringsTranslateFn } from "../../shared/strings/engine.ts";
+import { formatGeminiError, generateSmartShelfPlanWithAi, getAiConfig } from "../ai/geminiService.ts";
 
 function getJsonSetting<T>(db: DbClient, key: string, fallback: T): T {
   const row = db.get<{ value: string }>("SELECT value FROM settings WHERE key = ?", key);
@@ -189,17 +190,22 @@ export function registerLabelsAndAdminRoutes(app: Express, db: DbClient, dataDir
     }
   });
 
-  // --- Shelving & Physical Space Report ---
-  app.get("/api/reports/shelving", requireAdmin, (_req, res) => {
+  // --- Shelving & Physical Space Report + Smart Shelf Organizer ---
+  function buildShelvingReportSnapshot() {
     const cabinets = db.all<{
       id: number;
       code: string;
       main_subject: string;
       shelves_count: number;
-    }>("SELECT id, code, main_subject, shelves_count FROM cabinets WHERE deleted_at IS NULL ORDER BY code ASC");
+      width_cm: number | null;
+      depth_cm: number | null;
+    }>("SELECT id, code, main_subject, shelves_count, width_cm, depth_cm FROM cabinets WHERE deleted_at IS NULL ORDER BY code ASC");
 
     const books = db.all<{
       barcode: string;
+      title: string;
+      set_name: string;
+      category: string;
       cabinet_id: number | null;
       shelf_number: number | null;
       format_size: string;
@@ -207,8 +213,15 @@ export function registerLabelsAndAdminRoutes(app: Express, db: DbClient, dataDir
       pages_count: number | null;
       status: string;
     }>(
-      "SELECT barcode, cabinet_id, shelf_number, format_size, thickness_mm, pages_count, status FROM books WHERE deleted_at IS NULL"
+      "SELECT barcode, title, set_name, category, cabinet_id, shelf_number, format_size, thickness_mm, pages_count, status FROM books WHERE deleted_at IS NULL"
     );
+
+    const roomRaw = getJsonSetting<{ width_m?: number; length_m?: number }>(db, "room_dimensions", { width_m: 6, length_m: 5 });
+    const roomWidthM = Number(roomRaw?.width_m) > 0 ? Number(roomRaw.width_m) : 6;
+    const roomLengthM = Number(roomRaw?.length_m) > 0 ? Number(roomRaw.length_m) : 5;
+    const round1 = (n: number) => Math.round(n * 10) / 10;
+    const round2 = (n: number) => Math.round(n * 100) / 100;
+    const roomAreaSqm = round2(roomWidthM * roomLengthM);
 
     const formatBreakdown: Record<string, number> = {};
     let totalThicknessMm = 0;
@@ -235,6 +248,8 @@ export function registerLabelsAndAdminRoutes(app: Express, db: DbClient, dataDir
         code: string;
         main_subject: string;
         shelves_count: number;
+        width_cm: number | null;
+        depth_cm: number | null;
         booksCount: number;
         totalThicknessMm: number;
         knownThicknessCount: number;
@@ -244,7 +259,15 @@ export function registerLabelsAndAdminRoutes(app: Express, db: DbClient, dataDir
       }
     >();
 
+    let cabinetsFootprintSqm = 0;
+    let cabinetsKnownCount = 0;
     for (const cab of cabinets) {
+      const wCm = cab.width_cm != null && Number(cab.width_cm) > 0 ? Number(cab.width_cm) : null;
+      const dCm = cab.depth_cm != null && Number(cab.depth_cm) > 0 ? Number(cab.depth_cm) : null;
+      if (wCm && dCm) {
+        cabinetsFootprintSqm += (wCm / 100) * (dCm / 100);
+        cabinetsKnownCount += 1;
+      }
       const shelves = new Map<number, ShelfAcc>();
       const count = Math.max(1, Number(cab.shelves_count) || 5);
       for (let s = 1; s <= count; s++) {
@@ -262,6 +285,8 @@ export function registerLabelsAndAdminRoutes(app: Express, db: DbClient, dataDir
         code: cab.code,
         main_subject: cab.main_subject,
         shelves_count: count,
+        width_cm: wCm,
+        depth_cm: dCm,
         booksCount: 0,
         totalThicknessMm: 0,
         knownThicknessCount: 0,
@@ -324,27 +349,43 @@ export function registerLabelsAndAdminRoutes(app: Express, db: DbClient, dataDir
       }
     }
 
-    const round1 = (n: number) => Math.round(n * 10) / 10;
-
     const cabinetReports = Array.from(cabMap.values()).map((cab) => {
+      const estimatedCapacityCm = cab.width_cm && cab.width_cm > 0 ? Math.max(20, round1(cab.width_cm - 4)) : 116;
       const shelfRows = Array.from(cab.shelves.values())
         .sort((a, b) => a.shelfNumber - b.shelfNumber)
-        .map((s) => ({
-          shelfNumber: s.shelfNumber,
-          booksCount: s.booksCount,
-          totalThicknessMm: round1(s.totalThicknessMm),
-          totalThicknessCm: round1(s.totalThicknessMm / 10),
-          avgThicknessMm: s.knownThicknessCount > 0 ? round1(s.totalThicknessMm / s.knownThicknessCount) : null,
-          knownThicknessCount: s.knownThicknessCount,
-          missingThicknessCount: s.missingThicknessCount,
-          formatCounts: s.formatCounts,
-        }));
+        .map((s) => {
+          const usedCm = round1(s.totalThicknessMm / 10);
+          const estUsedCm = usedCm > 0 ? usedCm : s.booksCount > 0 ? round1(s.booksCount * 2.8) : 0;
+          const fillPercent = Math.round((estUsedCm / estimatedCapacityCm) * 100);
+          return {
+            shelfNumber: s.shelfNumber,
+            booksCount: s.booksCount,
+            totalThicknessMm: round1(s.totalThicknessMm),
+            totalThicknessCm: usedCm,
+            estimatedCapacityCm,
+            freeCm: round1(estimatedCapacityCm - estUsedCm),
+            fillPercent,
+            isOverloaded: fillPercent > 100,
+            avgThicknessMm: s.knownThicknessCount > 0 ? round1(s.totalThicknessMm / s.knownThicknessCount) : null,
+            knownThicknessCount: s.knownThicknessCount,
+            missingThicknessCount: s.missingThicknessCount,
+            formatCounts: s.formatCounts,
+          };
+        });
+
+      const footprintSqm = cab.width_cm && cab.depth_cm ? round2((cab.width_cm / 100) * (cab.depth_cm / 100)) : null;
+      const realShelves = shelfRows.filter((s) => s.shelfNumber > 0);
+      const avgFillPercent = realShelves.length > 0 ? Math.round(realShelves.reduce((acc, s) => acc + s.fillPercent, 0) / realShelves.length) : 0;
 
       return {
         id: cab.id,
         code: cab.code,
         main_subject: cab.main_subject,
         shelves_count: cab.shelves_count,
+        width_cm: cab.width_cm,
+        depth_cm: cab.depth_cm,
+        footprintSqm,
+        avgFillPercent,
         booksCount: cab.booksCount,
         totalThicknessMm: round1(cab.totalThicknessMm),
         totalThicknessCm: round1(cab.totalThicknessMm / 10),
@@ -356,25 +397,295 @@ export function registerLabelsAndAdminRoutes(app: Express, db: DbClient, dataDir
       };
     });
 
-    res.json({
-      totals: {
-        totalBooks: books.length,
-        assignedBooks,
-        unassignedBooks,
-        totalThicknessMm: round1(totalThicknessMm),
-        totalThicknessCm: round1(totalThicknessMm / 10),
-        avgThicknessMm: knownThicknessCount > 0 ? round1(totalThicknessMm / knownThicknessCount) : null,
-        knownThicknessCount,
-        missingThicknessCount,
-        formatBreakdown,
+    const roundedCabFootprint = round2(cabinetsFootprintSqm);
+    const aisleFreeSqm = round2(Math.max(0, roomAreaSqm - roundedCabFootprint));
+    const aisleFreePercent = roomAreaSqm > 0 ? Math.round((aisleFreeSqm / roomAreaSqm) * 100) : 0;
+
+    return {
+      report: {
+        room: {
+          width_m: roomWidthM,
+          length_m: roomLengthM,
+          areaSqm: roomAreaSqm,
+          cabinetsFootprintSqm: roundedCabFootprint,
+          cabinetsKnownCount,
+          aisleFreeSqm,
+          aisleFreePercent,
+        },
+        totals: {
+          totalBooks: books.length,
+          assignedBooks,
+          unassignedBooks,
+          totalThicknessMm: round1(totalThicknessMm),
+          totalThicknessCm: round1(totalThicknessMm / 10),
+          avgThicknessMm: knownThicknessCount > 0 ? round1(totalThicknessMm / knownThicknessCount) : null,
+          knownThicknessCount,
+          missingThicknessCount,
+          formatBreakdown,
+        },
+        unassigned: {
+          booksCount: unassignedBooks,
+          totalThicknessCm: round1(unassignedThicknessMm / 10),
+          missingThicknessCount: unassignedMissingThickness,
+        },
+        cabinets: cabinetReports,
       },
-      unassigned: {
-        booksCount: unassignedBooks,
-        totalThicknessCm: round1(unassignedThicknessMm / 10),
-        missingThicknessCount: unassignedMissingThickness,
-      },
-      cabinets: cabinetReports,
+      books,
+    };
+  }
+
+  app.get("/api/reports/shelving", requireAdmin, (_req, res) => {
+    const { report } = buildShelvingReportSnapshot();
+    res.json(report);
+  });
+
+  app.post("/api/shelving/smart-organize", requireAdmin, async (req, res) => {
+    const useAi = Boolean(req.body?.useAi);
+    const { report, books } = buildShelvingReportSnapshot();
+    const cabById = new Map(report.cabinets.map((c) => [c.id, c]));
+    const cabByCode = new Map(report.cabinets.map((c) => [c.code.trim(), c]));
+
+    type SmartMoveOut = {
+      id: string;
+      source: "deterministic" | "ai";
+      title: string;
+      description: string;
+      reason: string;
+      severity: "info" | "warning" | "high";
+      fromCabinetId?: number;
+      fromCabinetCode?: string;
+      fromShelf?: number;
+      toCabinetId?: number;
+      toCabinetCode?: string;
+      toShelf?: number;
+      setName?: string;
+      barcodes: string[];
+    };
+
+    const moves: SmartMoveOut[] = [];
+
+    for (const cab of report.cabinets) {
+      const shelvesReal = cab.shelves.filter((s) => s.shelfNumber > 0);
+      for (const sh of shelvesReal) {
+        if (sh.fillPercent <= 100) continue;
+        const booksOnShelf = books.filter((b) => b.cabinet_id === cab.id && Number(b.shelf_number) === sh.shelfNumber);
+        if (booksOnShelf.length === 0) continue;
+        const excessCm = Math.max(5, Math.abs(sh.freeCm));
+        const movable: string[] = [];
+        let freedCm = 0;
+        for (let i = booksOnShelf.length - 1; i >= 0 && freedCm < excessCm; i--) {
+          const bk = booksOnShelf[i];
+          movable.push(bk.barcode);
+          freedCm += bk.thickness_mm && bk.thickness_mm > 0 ? bk.thickness_mm / 10 : 2.8;
+        }
+        const sameCabTarget = shelvesReal
+          .filter((s) => s.shelfNumber !== sh.shelfNumber && s.freeCm >= Math.min(excessCm, 12))
+          .sort((a, b) => b.freeCm - a.freeCm)[0];
+        const sameSubjTargetCab = !sameCabTarget
+          ? report.cabinets.find(
+              (other) =>
+                other.id !== cab.id &&
+                cab.main_subject &&
+                other.main_subject &&
+                (other.main_subject.includes(cab.main_subject) || cab.main_subject.includes(other.main_subject)) &&
+                other.shelves.some((os) => os.shelfNumber > 0 && os.freeCm >= 12)
+            )
+          : undefined;
+        const destCab = sameCabTarget ? cab : sameSubjTargetCab;
+        const destShelf = sameCabTarget
+          ? sameCabTarget
+          : destCab?.shelves.filter((s) => s.shelfNumber > 0 && s.freeCm >= 12).sort((a, b) => b.freeCm - a.freeCm)[0];
+
+        moves.push({
+          id: `overload-${cab.id}-${sh.shelfNumber}`,
+          source: "deterministic",
+          title: `עומס יתר במדף ${sh.shelfNumber} (ארון ${cab.code})`,
+          description: destCab && destShelf
+            ? `העברת ${movable.length} ספרים (${Math.round(freedCm)} ס״מ) לארון ${destCab.code} מדף ${destShelf.shelfNumber}`
+            : `המדף בתפוסה של ${sh.fillPercent}% (${sh.totalThicknessCm} / ${sh.estimatedCapacityCm} ס״מ) — מומלץ לפנות ${Math.round(excessCm)} ס״מ`,
+          reason: `מניעת דוחק ושחיקה בכריכות — יש ${sh.booksCount} ספרים על מדף ברוחב ${sh.estimatedCapacityCm} ס״מ`,
+          severity: "high",
+          fromCabinetId: cab.id,
+          fromCabinetCode: cab.code,
+          fromShelf: sh.shelfNumber,
+          toCabinetId: destCab?.id,
+          toCabinetCode: destCab?.code,
+          toShelf: destShelf?.shelfNumber,
+          barcodes: destCab && destShelf ? movable : [],
+        });
+      }
+    }
+
+    const bySet = new Map<string, typeof books>();
+    for (const b of books) {
+      const sn = String(b.set_name || "").trim();
+      if (!sn || b.cabinet_id == null) continue;
+      const arr = bySet.get(sn) || [];
+      arr.push(b);
+      bySet.set(sn, arr);
+    }
+    for (const [setName, setBooks] of bySet.entries()) {
+      if (setBooks.length < 2) continue;
+      const locGroups = new Map<string, typeof books>();
+      for (const b of setBooks) {
+        const key = `${b.cabinet_id}:${b.shelf_number || 1}`;
+        const list = locGroups.get(key) || [];
+        list.push(b);
+        locGroups.set(key, list);
+      }
+      if (locGroups.size <= 1) continue;
+      const sortedLocs = Array.from(locGroups.entries()).sort((a, b) => b[1].length - a[1].length);
+      const [primaryKey, primaryList] = sortedLocs[0];
+      const [pCabIdStr, pShelfStr] = primaryKey.split(":");
+      const pCab = cabById.get(Number(pCabIdStr));
+      const pShelfNum = Number(pShelfStr) || 1;
+      if (!pCab) continue;
+      const pShelfInfo = pCab.shelves.find((s) => s.shelfNumber === pShelfNum);
+      const strays = sortedLocs.slice(1).flatMap(([, list]) => list);
+      const straysWidthCm = strays.reduce((acc, b) => acc + (b.thickness_mm && b.thickness_mm > 0 ? b.thickness_mm / 10 : 3), 0);
+      const canFit = !pShelfInfo || pShelfInfo.freeCm >= straysWidthCm * 0.8;
+      const firstStrayCab = cabById.get(Number(strays[0].cabinet_id));
+
+      moves.push({
+        id: `split-${setName}`,
+        source: "deterministic",
+        title: `איחוד סט מפוצל: ${setName}`,
+        description: canFit
+          ? `איחוד ${strays.length} כרכים מפוזרים אל המיקום הראשי בארון ${pCab.code} מדף ${pShelfNum} (${primaryList.length} כרכים)`
+          : `הסט ${setName} מפוצל בין ${locGroups.size} מדפים שונים (${strays.length} כרכים מפוזרים מארון ${firstStrayCab?.code || "?"})`,
+        reason: "שמירה על רצף תורני ואיתור מהיר של כל הסט במקום אחד",
+        severity: "warning",
+        fromCabinetId: firstStrayCab?.id,
+        fromCabinetCode: firstStrayCab?.code,
+        fromShelf: Number(strays[0].shelf_number) || 1,
+        toCabinetId: canFit ? pCab.id : undefined,
+        toCabinetCode: canFit ? pCab.code : undefined,
+        toShelf: canFit ? pShelfNum : undefined,
+        setName,
+        barcodes: canFit ? strays.map((s) => s.barcode) : [],
+      });
+    }
+
+    const unassignedList = books.filter((b) => b.cabinet_id == null);
+    if (unassignedList.length > 0 && report.cabinets.length > 0) {
+      const groupedByTarget = new Map<number, { cab: typeof report.cabinets[number]; shelfNum: number; barcodes: string[] }>();
+      for (const b of unassignedList) {
+        const cat = String(b.category || "").trim();
+        const text = `${cat} ${b.title} ${b.set_name}`.trim();
+        const matchedCab =
+          report.cabinets.find((c) => c.main_subject && (text.includes(c.main_subject) || (cat && c.main_subject.includes(cat)))) ||
+          undefined;
+        if (!matchedCab) continue;
+        const bestShelf = matchedCab.shelves
+          .filter((s) => s.shelfNumber > 0)
+          .sort((a, b2) => b2.freeCm - a.freeCm)[0];
+        if (!bestShelf) continue;
+        const entry = groupedByTarget.get(matchedCab.id) || { cab: matchedCab, shelfNum: bestShelf.shelfNumber, barcodes: [] };
+        entry.barcodes.push(b.barcode);
+        groupedByTarget.set(matchedCab.id, entry);
+      }
+      for (const { cab, shelfNum, barcodes } of groupedByTarget.values()) {
+        moves.push({
+          id: `unassigned-${cab.id}-${shelfNum}`,
+          source: "deterministic",
+          title: `שיוך ${barcodes.length} ספרים ללא מיקום לארון ${cab.code}`,
+          description: `שיבוץ אוטומטי לארון ${cab.code} (${cab.main_subject}) מדף ${shelfNum}`,
+          reason: "הספרים תואמים לנושא הראשי של הארון ויש מקום פנוי במדף",
+          severity: "info",
+          toCabinetId: cab.id,
+          toCabinetCode: cab.code,
+          toShelf: shelfNum,
+          barcodes,
+        });
+      }
+    }
+
+    let summary =
+      moves.length > 0
+        ? `נמצאו ${moves.length} המלצות לשיפור סדר המדפים וניצול השטח`
+        : "הספרייה מסודרת היטב — לא נמצאו מדפים עמוסים או סטים מפוצלים";
+    let aiUsed = false;
+    let aiError: string | undefined;
+
+    if (useAi) {
+      const cfg = getAiConfig(db);
+      if (!cfg.hasAnyKey) {
+        aiError = "לא הוגדר מפתח Gemini API בהגדרות";
+      } else {
+        try {
+          const compactPayload = {
+            room: report.room,
+            cabinets: report.cabinets.map((c) => ({
+              code: c.code,
+              main_subject: c.main_subject,
+              width_cm: c.width_cm,
+              shelves: c.shelves.filter((s) => s.shelfNumber > 0).map((s) => ({
+                shelfNumber: s.shelfNumber,
+                booksCount: s.booksCount,
+                fillPercent: s.fillPercent,
+                freeCm: s.freeCm,
+              })),
+            })),
+            unassignedSample: unassignedList.slice(0, 20).map((b) => ({ barcode: b.barcode, title: b.title, set_name: b.set_name, category: b.category })),
+            splitSetsCount: moves.filter((m) => m.id.startsWith("split-")).length,
+          };
+          const aiPlan = await generateSmartShelfPlanWithAi(db, JSON.stringify(compactPayload), { timeoutMs: 45_000 });
+          aiUsed = true;
+          if (aiPlan.summary) summary = aiPlan.summary;
+          aiPlan.moves.forEach((am, idx) => {
+            const fromCab = am.fromCabinetCode ? cabByCode.get(am.fromCabinetCode.trim()) : undefined;
+            const toCab = am.toCabinetCode ? cabByCode.get(am.toCabinetCode.trim()) : undefined;
+            const resolvedBarcodes = Array.isArray(am.barcodes) ? am.barcodes.filter((bc) => books.some((bk) => bk.barcode === bc)) : [];
+            moves.push({
+              id: `ai-${idx}-${Date.now()}`,
+              source: "ai",
+              title: am.title,
+              description: am.description,
+              reason: am.reason,
+              severity: am.severity,
+              fromCabinetId: fromCab?.id,
+              fromCabinetCode: fromCab?.code || am.fromCabinetCode,
+              fromShelf: am.fromShelf,
+              toCabinetId: toCab?.id,
+              toCabinetCode: toCab?.code || am.toCabinetCode,
+              toShelf: am.toShelf,
+              setName: am.setName,
+              barcodes: resolvedBarcodes,
+            });
+          });
+        } catch (err) {
+          aiError = formatGeminiError(err);
+        }
+      }
+    }
+
+    res.json({ ok: true, summary, aiUsed, aiError, moves });
+  });
+
+  app.post("/api/shelving/apply-moves", requireAdmin, (req, res) => {
+    const rawMoves = Array.isArray(req.body?.moves) ? req.body.moves : [];
+    if (rawMoves.length === 0) {
+      return res.status(400).json({ error: "לא נבחרו מהלכים לביצוע" });
+    }
+    const now = new Date().toISOString();
+    let movedBooks = 0;
+    db.transaction(() => {
+      for (const mv of rawMoves) {
+        const toCabinetId = Number(mv?.toCabinetId);
+        const cab = db.get<{ id: number; shelves_count: number }>("SELECT id, shelves_count FROM cabinets WHERE id = ? AND deleted_at IS NULL", toCabinetId);
+        if (!cab) continue;
+        const toShelf = Math.max(1, Math.min(cab.shelves_count || 5, Number(mv?.toShelf) || 1));
+        const barcodes: string[] = Array.isArray(mv?.barcodes) ? mv.barcodes.map((b: unknown) => String(b).trim()).filter(Boolean) : [];
+        for (const bc of barcodes) {
+          const bk = db.get<{ sync_id: string | null }>("SELECT sync_id FROM books WHERE barcode = ? AND deleted_at IS NULL", bc);
+          if (!bk) continue;
+          db.run("UPDATE books SET cabinet_id = ?, shelf_number = ?, updated_at = ? WHERE barcode = ?", cab.id, toShelf, now, bc);
+          if (bk.sync_id) enqueueSyncOutbox(db, "book", bk.sync_id, "upsert", { barcode: bc });
+          movedBooks++;
+        }
+      }
     });
+    res.json({ ok: true, movedBooks });
   });
 
   // --- Backup & Catalog Export (CSV BOM / Excel / SQLite .db) ---

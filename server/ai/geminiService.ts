@@ -5,6 +5,9 @@ import type { DbClient } from "../db/adapter.ts";
 export interface ExtractedBookMetadata {
   title: string;
   set_name?: string;
+  sub_series?: string;
+  set_global_number?: number | null;
+  coverage_range?: string;
   author: string;
   volume: string;
   publisher: string;
@@ -20,6 +23,9 @@ export interface ExtractedBookMetadata {
 
 export interface ExtractedShelfSetVolume {
   volume: string;
+  sub_series?: string;
+  set_global_number?: number | null;
+  coverage_range?: string;
   copiesCount: number;
   notes?: string;
 }
@@ -261,7 +267,7 @@ function createClient(apiKey: string): GoogleGenAI {
   });
 }
 
-export type GeminiErrorKind = "quota" | "overloaded" | "invalid_key" | "network" | "model" | "other";
+export type GeminiErrorKind = "quota" | "overloaded" | "invalid_key" | "network" | "model" | "timeout" | "other";
 
 export function classifyGeminiError(err: unknown): GeminiErrorKind {
   const msg = String((err as { message?: string })?.message || err || "").toLowerCase();
@@ -304,12 +310,25 @@ export function classifyGeminiError(err: unknown): GeminiErrorKind {
   if (msg.includes("404") || msg.includes("not_found")) {
     return "model";
   }
+  if (msg.includes("timeout") || msg.includes("timed out") || msg.includes("aborted") || msg.includes("aborterror")) {
+    return "timeout";
+  }
   return "other";
+}
+
+export function markApiKeySlowCooldown(apiKey: string, durationMs = 25_000, reason = "השהיה זמנית עקב חשיבה ארוכה / החלפה ידנית"): void {
+  if (!apiKey) return;
+  const st = getRuntimeState(apiKey);
+  st.cooldownUntil = Math.max(st.cooldownUntil, Date.now() + durationMs);
+  st.lastError = reason;
 }
 
 export function formatGeminiError(err: unknown): string {
   const msg = String((err as { message?: string })?.message || err || "");
   const kind = classifyGeminiError(err);
+  if (kind === "timeout") {
+    return "פג זמן ההמתנה לפענוח (Timeout) — ניתן לנסות שוב או להחליף מפתח בלחצן הרענון.";
+  }
   if (kind === "invalid_key") {
     return "מפתח ה-API אינו תקין או שנדחתה ההרשאה (403). בדוק את המפתחות ברולטה בהגדרות.";
   }
@@ -360,12 +379,20 @@ function waitMs(ms: number): Promise<void> {
 
 export async function executeWithKeyRoulette<T>(
   db: DbClient,
-  task: (apiKey: string, entry: AiKeyEntry) => Promise<T>,
-  options?: { maxOverloadRetries?: number }
+  task: (apiKey: string, entry: AiKeyEntry, signal: AbortSignal) => Promise<T>,
+  options?: {
+    maxOverloadRetries?: number;
+    abortSignal?: AbortSignal;
+    timeoutMs?: number;
+    onKeyPicked?: (entry: AiKeyEntry) => void;
+  }
 ): Promise<{ result: T; usedEntry: AiKeyEntry }> {
   const entries = getAiKeyPoolEntries(db).filter((k) => k.enabled);
   if (entries.length === 0) {
     throw new Error("לא הוגדרו מפתחות Gemini API פעילים בהגדרות המערכת");
+  }
+  if (options?.abortSignal?.aborted) {
+    throw new Error("aborted");
   }
 
   const tried = new Set<string>();
@@ -374,10 +401,14 @@ export async function executeWithKeyRoulette<T>(
   const maxOverloadRetries = options?.maxOverloadRetries ?? 2;
 
   while (tried.size < entries.length) {
+    if (options?.abortSignal?.aborted) {
+      throw new Error("aborted");
+    }
     const picked = selectLeastLoadedKey(entries, tried);
     if (!picked) break;
 
     tried.add(picked.apiKey);
+    options?.onKeyPicked?.(picked);
     const st = getRuntimeState(picked.apiKey);
     const now = Date.now();
     st.activeInFlight += 1;
@@ -385,15 +416,62 @@ export async function executeWithKeyRoulette<T>(
     st.lastUsedAt = now;
     st.totalRequests += 1;
 
+    const attemptController = new AbortController();
+    let timedOut = false;
+    let userAborted = false;
+
+    const onExternalAbort = () => {
+      userAborted = true;
+      attemptController.abort(new Error("aborted"));
+    };
+    if (options?.abortSignal) {
+      options.abortSignal.addEventListener("abort", onExternalAbort, { once: true });
+    }
+    const timer =
+      options?.timeoutMs && options.timeoutMs > 0
+        ? setTimeout(() => {
+            timedOut = true;
+            attemptController.abort(new Error("timeout"));
+          }, options.timeoutMs)
+        : null;
+
     try {
-      const result = await task(picked.apiKey, picked);
+      const taskPromise = task(picked.apiKey, picked, attemptController.signal);
+      const racePromise =
+        options?.timeoutMs && options.timeoutMs > 0
+          ? Promise.race([
+              taskPromise,
+              new Promise<T>((_, reject) => {
+                attemptController.signal.addEventListener(
+                  "abort",
+                  () => reject(new Error(userAborted ? "aborted" : "timeout")),
+                  { once: true }
+                );
+              }),
+            ])
+          : taskPromise;
+
+      const result = await racePromise;
       st.lastError = null;
       st.disabledInvalid = false;
       return { result, usedEntry: picked };
     } catch (err) {
       lastErr = err;
       st.totalErrors += 1;
-      const kind = classifyGeminiError(err);
+      if (userAborted || options?.abortSignal?.aborted) {
+        st.cooldownUntil = Math.max(st.cooldownUntil, Date.now() + 20_000);
+        st.lastError = "הופסק ידנית לצורך רענון והחלפת מפתח";
+        throw err;
+      }
+      const kind = timedOut ? "timeout" : classifyGeminiError(err);
+      if (kind === "timeout") {
+        st.cooldownUntil = Date.now() + 30_000;
+        st.lastError = "חשיבה ארוכה מדי (Timeout) — המפתח הועבר להשהיה קצרה";
+        if (tried.size < entries.length) {
+          continue; // Rotate immediately to next healthy key!
+        }
+        throw new Error("timeout: פג זמן ההמתנה לפענוח ב-Gemini");
+      }
       if (kind === "quota") {
         st.cooldownUntil = Date.now() + 60_000;
         st.lastError = "השהיה זמנית (60 שניות) עקב חריגת מכסה (429)";
@@ -414,13 +492,16 @@ export async function executeWithKeyRoulette<T>(
         throw err;
       }
       if (kind === "network" || kind === "model") {
-        // Network/Etrog SSL or invalid model affects all keys equally — fail fast
         st.lastError = formatGeminiError(err);
         throw err;
       }
       st.lastError = formatGeminiError(err);
       throw err;
     } finally {
+      if (timer) clearTimeout(timer);
+      if (options?.abortSignal) {
+        options.abortSignal.removeEventListener("abort", onExternalAbort);
+      }
       st.activeInFlight = Math.max(0, st.activeInFlight - 1);
     }
   }
@@ -445,7 +526,8 @@ export async function executeWithModelAndKeyFallback<T>(
   db: DbClient,
   primaryModel: string,
   allowFallback: boolean,
-  task: (apiKey: string, modelName: string, entry: AiKeyEntry) => Promise<T>
+  task: (apiKey: string, modelName: string, entry: AiKeyEntry, signal: AbortSignal) => Promise<T>,
+  options?: { abortSignal?: AbortSignal; timeoutMs?: number; onKeyPicked?: (entry: AiKeyEntry) => void }
 ): Promise<{ result: T; usedEntry: AiKeyEntry; usedModel: string; usedFallback: boolean }> {
   const cleanPrimary = primaryModel.trim() || "gemini-3.5-flash";
   const modelChain = allowFallback
@@ -454,13 +536,21 @@ export async function executeWithModelAndKeyFallback<T>(
 
   let lastErr: unknown = null;
   for (let i = 0; i < modelChain.length; i++) {
+    if (options?.abortSignal?.aborted) {
+      throw new Error("aborted");
+    }
     const modelName = modelChain[i];
     const hasNext = i < modelChain.length - 1;
     try {
       const { result, usedEntry } = await executeWithKeyRoulette(
         db,
-        (apiKey, entry) => task(apiKey, modelName, entry),
-        { maxOverloadRetries: hasNext ? 1 : 2 }
+        (apiKey, entry, signal) => task(apiKey, modelName, entry, signal),
+        {
+          maxOverloadRetries: hasNext ? 1 : 2,
+          abortSignal: options?.abortSignal,
+          timeoutMs: options?.timeoutMs,
+          onKeyPicked: options?.onKeyPicked,
+        }
       );
       return {
         result,
@@ -469,11 +559,14 @@ export async function executeWithModelAndKeyFallback<T>(
         usedFallback: modelName !== cleanPrimary,
       };
     } catch (err) {
+      if (options?.abortSignal?.aborted) {
+        throw err;
+      }
       lastErr = err;
       const kind = classifyGeminiError(err);
-      if (allowFallback && hasNext && (kind === "overloaded" || kind === "model")) {
+      if (allowFallback && hasNext && (kind === "overloaded" || kind === "model" || kind === "timeout")) {
         console.warn(`[AI] Model ${modelName} failed (${kind}); failing over to ${modelChain[i + 1]}`);
-        await waitMs(400);
+        await waitMs(350);
         continue;
       }
       throw err;
@@ -592,7 +685,8 @@ export interface CoverImagePart {
 export async function analyzeBookCoverImage(
   db: DbClient,
   imageInput: Buffer | CoverImagePart[],
-  mimeType = "image/jpeg"
+  mimeType = "image/jpeg",
+  options?: { abortSignal?: AbortSignal; timeoutMs?: number; customPrompt?: string; onKeyPicked?: (entry: AiKeyEntry) => void }
 ): Promise<ExtractedBookMetadata> {
   const cfg = getAiConfig(db);
   if (!cfg.hasAnyKey) {
@@ -606,10 +700,13 @@ export async function analyzeBookCoverImage(
   }
 
   const systemPrompt =
-    "אתה ספרן תורני מומחה בישיבה. תפקידך לפענח צילומי שערי ספרים תורניים (כולל אותיות מרובעות, כתב רש״י וראשי תיבות תורניים כמו שו״ע, רמב״ם, משנ״ב, ש״ס, שו״ת). אם מצורפות מספר תמונות, כולן דפים שונים של אותו ספר (למשל שער ראשי, גב שער עם שנת הוצאה ומהדורה, כריכה או תוכן עניינים) — מזג את הפרטים מכל התמונות לרשומה אחת מלאה ומדויקת. החזר JSON מדויק בלבד בעברית. בשדה tags צור 5 עד 10 תגיות חיפוש שימושיות (נושאים, מסכתות, סימנים, כינויים וראשי תיבות נפוצים).";
+    "אתה ספרן תורני מומחה בישיבה. תפקידך לפענח צילומי שערי ספרים תורניים (כולל אותיות מרובעות, כתב רש״י וראשי תיבות תורניים כמו שו״ע, רמב״ם, משנ״ב, ש״ס, שו״ת). אם מצורפות מספר תמונות, כולן דפים שונים של אותו ספר (למשל שער ראשי, גב שער עם שנת הוצאה ומהדורה, כריכה, שדרה או תוכן עניינים) — מזג את הפרטים מכל התמונות לרשומה אחת מלאה ומדויקת. הפרד בין שם הסט הגדול (set_name), תת-הסדרה/חלק ראשי/מסכת בתוך הסט אם יש היררכיה (sub_series, כגון 'מסכת שבת' או 'אורח חיים'), סימון הכרך המדויק כפי שמופיע על הספר גם אם בכוכביות/ספרות רומיות/אותיות (volume, למשל 'חלק א׳', '**', 'II'), המספר הכללי של הכרך בסדרה הגדולה אם צוין (set_global_number, מספר שלם או 0 אם לא ידוע), וטווח הסימנים/דפים/פרקים שהכרך מכסה אם מופיע על השער או בתוכן (coverage_range, כגון 'סימנים א׳–קנ״ב' או 'דפים ב׳–ל״ו'). החזר JSON מדויק בלבד בעברית.";
 
-  const userPrompt =
-    "פענח את דפי הספר המצולמים וחלץ: שם הספר המלא (title), שם הסט/הסדרה אם הספר הוא חלק מסט כמו משנה ברורה/שולחן ערוך/ילקוט יוסף/שבט הלוי (set_name), שם המחבר/מפרש (author), כרך/חלק/מסכת (volume), הוצאה/מכון (publisher), שנת הוצאה (pub_year - עברי או לועזי אם מופיעה באחד הדפים), מהדורה (edition - למשל מהדורה מתוקנת, מורחבת, שניה, עוז והדר), קטגוריה ראשית (category - למשל ש״ס בבלי, הלכה, רמב״ם, תנ״ך, שו״ת, מוסר ומחשבה, חסידות), הערות קצרות (notes), ו-5 עד 10 תגיות חיפוש (tags). אם שדה לא מופיע באף תמונה השאר מחרוזת ריקה.";
+  const baseUserPrompt =
+    "פענח את דפי הספר המצולמים וחלץ: title, set_name, sub_series, set_global_number, volume, coverage_range, author, publisher, pub_year, edition, category, notes, ו-5 עד 10 tags. אם שדה לא מופיע באף תמונה השאר מחרוזת ריקה (או 0 עבור set_global_number).";
+  const userPrompt = options?.customPrompt?.trim()
+    ? `${baseUserPrompt}\nהנחיית עריכה מיוחדת מהמשתמש: ${options.customPrompt.trim()}`
+    : baseUserPrompt;
 
   const imageParts = images.map((img) => ({
     inlineData: {
@@ -622,49 +719,59 @@ export async function analyzeBookCoverImage(
     db,
     cfg.aiModel,
     cfg.autoFallback,
-    async (apiKey, activeModel) => {
+    async (apiKey, activeModel, _entry, signal) => {
       const ai = createClient(apiKey);
       return ai.models.generateContent({
         model: activeModel,
-      contents: {
-        parts: [
-          ...imageParts,
-          { text: userPrompt },
-        ],
-      },
-      config: {
-        systemInstruction: systemPrompt,
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            title: { type: Type.STRING, description: "שם הספר המלא" },
-            set_name: { type: Type.STRING, description: "שם הסט או הסדרה אם הספר שייך לסט/סדרה רב-כרכית, ריק אם ספר בודד" },
-            author: { type: Type.STRING, description: "שם המחבר או המפרש" },
-            volume: { type: Type.STRING, description: "כרך, חלק או מסכת" },
-            publisher: { type: Type.STRING, description: "הוצאה לאור או מכון" },
-            pub_year: { type: Type.STRING, description: "שנת הוצאה (עברי או לועזי) אם מופיעה בשער" },
-            edition: { type: Type.STRING, description: "מהדורה אם מופיעה בשער" },
-            category: { type: Type.STRING, description: "קטגוריה ראשית באוצר הספרים" },
-            notes: { type: Type.STRING, description: "פרטי מהדורה או מפרשים עיקריים" },
-            tags: {
-              type: Type.ARRAY,
-              items: { type: Type.STRING },
-              description: "5 עד 10 תגיות נושא, כינויים וראשי תיבות לחיפוש",
-            },
-          },
-          required: ["title", "author", "volume", "publisher", "pub_year", "edition", "category", "notes", "tags"],
+        contents: {
+          parts: [
+            ...imageParts,
+            { text: userPrompt },
+          ],
         },
-      },
-    });
-  });
+        config: {
+          abortSignal: signal,
+          systemInstruction: systemPrompt,
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              title: { type: Type.STRING, description: "שם הספר המלא" },
+              set_name: { type: Type.STRING, description: "שם הסט או הסדרה הראשית אם הספר שייך לסט רב-כרכי, ריק אם ספר בודד" },
+              sub_series: { type: Type.STRING, description: "תת-סדרה, מסכת או חטיבה בתוך הסט (כגון 'מסכת שבת' או 'אורח חיים'), ריק אם אין" },
+              set_global_number: { type: Type.INTEGER, description: "מספר הכרך הכללי בסדרה הגדולה (מספר שלם בלבד, או 0 אם לא ידוע)" },
+              volume: { type: Type.STRING, description: "סימון הכרך/חלק המדויק כפי שמופיע בספר (*, **, II, חלק א׳, כרך ב׳ וכו׳)" },
+              coverage_range: { type: Type.STRING, description: "טווח סימנים, דפים, פרקים או עמודים (כגון 'סימנים א׳–קנ״ב' או 'דפים ב׳–ס״ד'), ריק אם אין" },
+              author: { type: Type.STRING, description: "שם המחבר או המפרש" },
+              publisher: { type: Type.STRING, description: "הוצאה לאור או מכון" },
+              pub_year: { type: Type.STRING, description: "שנת הוצאה (עברי או לועזי) אם מופיעה בשער" },
+              edition: { type: Type.STRING, description: "מהדורה אם מופיעה בשער" },
+              category: { type: Type.STRING, description: "קטגוריה ראשית באוצר הספרים" },
+              notes: { type: Type.STRING, description: "פרטי מהדורה או מפרשים עיקריים" },
+              tags: {
+                type: Type.ARRAY,
+                items: { type: Type.STRING },
+                description: "5 עד 10 תגיות נושא, כינויים וראשי תיבות לחיפוש",
+              },
+            },
+            required: ["title", "author", "volume", "publisher", "pub_year", "edition", "category", "notes", "tags"],
+          },
+        },
+      });
+    },
+    { abortSignal: options?.abortSignal, timeoutMs: options?.timeoutMs ?? 45_000, onKeyPicked: options?.onKeyPicked }
+  );
 
   const rawText = (response.text || "{}").trim();
   const parsed = JSON.parse(rawText) as Partial<ExtractedBookMetadata>;
+  const rawGlobalNum = Number(parsed.set_global_number);
 
   return {
     title: String(parsed.title || "").trim(),
     set_name: String(parsed.set_name || "").trim(),
+    sub_series: String(parsed.sub_series || "").trim(),
+    set_global_number: Number.isFinite(rawGlobalNum) && rawGlobalNum > 0 ? Math.round(rawGlobalNum) : null,
+    coverage_range: String(parsed.coverage_range || "").trim(),
     author: String(parsed.author || "").trim(),
     volume: String(parsed.volume || "").trim(),
     publisher: String(parsed.publisher || "").trim(),
@@ -693,7 +800,8 @@ export async function analyzeShelfSetImages(
   db: DbClient,
   titlePageInput: CoverImagePart | CoverImagePart[],
   spineImageParts: CoverImagePart[],
-  existingSetContext?: ExistingSetContext
+  existingSetContext?: ExistingSetContext,
+  options?: { abortSignal?: AbortSignal; timeoutMs?: number; onKeyPicked?: (entry: AiKeyEntry) => void }
 ): Promise<ExtractedShelfSet> {
   const cfg = getAiConfig(db);
   if (!cfg.hasAnyKey) {
@@ -724,8 +832,8 @@ export async function analyzeShelfSetImages(
   }
   const systemPrompt =
     titleParts.length === 0 && existingSetContext?.set_name
-      ? `אתה ספרן תורני מומחה בישיבה. לפניך ${spineImageParts.length} תמונות של שדרות כרכים נוספים מהסט הקיים "${existingSetContext.set_name}" (מחבר: ${existingSetContext.author || "לא צוין"}, הוצאה: ${existingSetContext.publisher || "לא צוינה"}). פרטי הסט הכלליים כבר שמורים במאגר ואין תמונת שער מצורפת.\nתפקידך:\n1. השאר את פרטי הסט הכלליים כפי שסופקו (או השלם קטגוריה ותגיות אם חסר).\n2. זהה בעיון מתוך שדרות הספרים שעל המדף את רשימת כל הכרכים/החלקים המופיעים בתמונות אלו (volumes), בסדר כרכים נכון (למשל: חלק ג, חלק ד, או ברכות, שבת חלק א). אם כרך מסוים מופיע פעמיים על המדף, ציין copiesCount: 2.`
-      : `אתה ספרן תורני מומחה בישיבה. לפניך ${allParts.length} צילומים של סט ספרים: ${titleParts.length === 1 ? "התמונה הראשונה היא עמוד שער מייצג של הסט" : `${titleParts.length} התמונות הראשונות הן צילומי השער ופרטי המהדורה/ההוצאה של הסט (כגון עמוד שער ראשי, גב השער, דף הסכמות)`}, ושאר ${spineImageParts.length} התמונות הן צילום שדרות כרכי הסט העומדים על המדף בספרייה.\nתפקידך:\n1. מזג את המידע מכל תמונות השער והפרטים וחלץ את פרטי הסט הכלליים: שם הסט (set_name), שם המחבר/מפרש (author), הוצאה/מכון (publisher), שנת הוצאה (pub_year), מהדורה (edition), קטגוריה ראשית (category), הערות (notes) ותגיות (tags).\n2. זהה בעיון מתוך שדרות הספרים שעל המדף את רשימת כל הכרכים/החלקים המופיעים (volumes), בסדר כרכים נכון (למשל: חלק א, חלק ב, או ברכות, שבת חלק א). אם כרך מסוים מופיע פעמיים על המדף, ציין copiesCount: 2.`;
+      ? `אתה ספרן תורני מומחה בישיבה. לפניך ${spineImageParts.length} תמונות של שדרות כרכים נוספים מהסט הקיים "${existingSetContext.set_name}" (מחבר: ${existingSetContext.author || "לא צוין"}, הוצאה: ${existingSetContext.publisher || "לא צוינה"}). פרטי הסט הכלליים כבר שמורים במאגר ואין תמונת שער מצורפת.\nתפקידך:\n1. השאר את פרטי הסט הכלליים כפי שסופקו (או השלם קטגוריה ותגיות אם חסר).\n2. זהה בעיון מתוך שדרות הספרים שעל המדף לפי הסדר מהמדף את רשימת כל הכרכים והחלקים המופיעים בתמונות אלו (volumes). לכל כרך ציין: volume (הסימון על השדרה גם אם *, **, II, א׳-1, ברכות), sub_series (אם יש תת-סדרה/מסכת, כגון 'מסכת שבת' או 'אורח חיים'), set_global_number (מספר סידורי כללי בסדרה אם מופיע על השדרה, אחרת 0), ו-coverage_range (טווח סימנים/דפים/פרקים אם נראה על השדרה). אם כרך מופיע פעמיים, ציין copiesCount: 2.`
+      : `אתה ספרן תורני מומחה בישיבה. לפניך ${allParts.length} צילומים של סט ספרים: ${titleParts.length === 1 ? "התמונה הראשונה היא עמוד שער מייצג של הסט" : `${titleParts.length} התמונות הראשונות הן צילומי השער ופרטי המהדורה/ההוצאה של הסט (כגון עמוד שער ראשי, גב השער, דף הסכמות)`}, ושאר ${spineImageParts.length} התמונות הן צילום שדרות כרכי הסט העומדים על המדף בספרייה.\nתפקידך:\n1. מזג את המידע מכל תמונות השער והפרטים וחלץ את פרטי הסט הכלליים: שם הסט (set_name), שם המחבר/מפרש (author), הוצאה/מכון (publisher), שנת הוצאה (pub_year), מהדורה (edition), קטגוריה ראשית (category), הערות (notes) ותגיות (tags).\n2. זהה בעיון מתוך שדרות הספרים שעל המדף את רשימת כל הכרכים המופיעים לפי סדר עמידתם על המדף (volumes). לכל כרך חלץ גם sub_series (תת-סדרה/מסכת אם קיימת), set_global_number (מספר כרך כללי אם מצוין על השדרה, אחרת 0), ו-coverage_range (טווח סימנים/דפים אם כתוב על השדרה). אם כרך מסוים מופיע פעמיים על המדף, ציין copiesCount: 2.`;
   const userPrompt =
     titleParts.length === 0 && existingSetContext?.set_name
       ? `פענח את תמונות השדרות של הסט הקיים "${existingSetContext.set_name}" וחלץ את רשימת כל הכרכים והעותקים שעל המדף בפורמט JSON מדויק.`
@@ -734,7 +842,7 @@ export async function analyzeShelfSetImages(
     db,
     cfg.aiModel,
     cfg.autoFallback,
-    async (apiKey, activeModel) => {
+    async (apiKey, activeModel, _entry, signal) => {
       const ai = createClient(apiKey);
       return ai.models.generateContent({
         model: activeModel,
@@ -742,6 +850,7 @@ export async function analyzeShelfSetImages(
           parts: [...allParts, { text: userPrompt }],
         },
         config: {
+          abortSignal: signal,
           systemInstruction: systemPrompt,
           responseMimeType: "application/json",
           responseSchema: {
@@ -764,20 +873,24 @@ export async function analyzeShelfSetImages(
                 items: {
                   type: Type.OBJECT,
                   properties: {
-                    volume: { type: Type.STRING, description: "שם הכרך, החלק או המסכת כפי שמופיע בשדרה" },
+                    volume: { type: Type.STRING, description: "סימון הכרך או החלק כפי שמופיע בשדרה (*, **, II, א׳, כרך ג׳ וכו׳)" },
+                    sub_series: { type: Type.STRING, description: "תת-סדרה, מסכת או חטיבה בתוך הסט אם קיימת" },
+                    set_global_number: { type: Type.INTEGER, description: "מספר כרך כללי בסדרה הגדולה (מספר שלם או 0 אם אין)" },
+                    coverage_range: { type: Type.STRING, description: "טווח סימנים, דפים או פרקים אם נראה על השדרה" },
                     copiesCount: { type: Type.INTEGER, description: "מספר העותקים של כרך זה שנראים על המדף (ברירת מחדל 1)" },
                     notes: { type: Type.STRING, description: "הערה על הכרך במידה ויש" },
                   },
                   required: ["volume"],
                 },
-                description: "רשימת הכרכים שעל המדף",
+                description: "רשימת הכרכים שעל המדף לפי סדר הופעתם על המדף",
               },
             },
             required: ["set_name", "author", "publisher", "category", "volumes"],
           },
         },
       });
-    }
+    },
+    { abortSignal: options?.abortSignal, timeoutMs: options?.timeoutMs ?? 60_000, onKeyPicked: options?.onKeyPicked }
   );
 
   const rawText = (response.text || "{}").trim();
@@ -792,11 +905,17 @@ export async function analyzeShelfSetImages(
     category: String(parsed.category || "").trim() || "כללי",
     notes: String(parsed.notes || "").trim(),
     tags: Array.isArray(parsed.tags) ? parsed.tags.map((t) => String(t).trim()).filter(Boolean) : [],
-    volumes: rawVolumes.map((v) => ({
-      volume: String(v.volume || "").trim(),
-      copiesCount: Math.max(1, Number(v.copiesCount) || 1),
-      notes: v.notes ? String(v.notes).trim() : undefined,
-    })),
+    volumes: rawVolumes.map((v) => {
+      const gn = Number(v.set_global_number);
+      return {
+        volume: String(v.volume || "").trim(),
+        sub_series: v.sub_series ? String(v.sub_series).trim() : "",
+        set_global_number: Number.isFinite(gn) && gn > 0 ? Math.round(gn) : null,
+        coverage_range: v.coverage_range ? String(v.coverage_range).trim() : "",
+        copiesCount: Math.max(1, Number(v.copiesCount) || 1),
+        notes: v.notes ? String(v.notes).trim() : undefined,
+      };
+    }),
   };
 }
 
@@ -873,9 +992,220 @@ export function cosineSimilarity(a: Float32Array, b: Float32Array): number {
   return denom > 0 ? dot / denom : 0;
 }
 
+export async function reanalyzeApprovedBook(
+  db: DbClient,
+  existingBook: {
+    title?: string;
+    set_name?: string;
+    sub_series?: string;
+    set_global_number?: number | null;
+    coverage_range?: string;
+    author?: string;
+    volume?: string;
+    publisher?: string;
+    pub_year?: string;
+    edition?: string;
+    category?: string;
+    notes?: string;
+    tags?: string[];
+  },
+  images: CoverImagePart[],
+  customPrompt?: string,
+  options?: { abortSignal?: AbortSignal; timeoutMs?: number; onKeyPicked?: (entry: AiKeyEntry) => void }
+): Promise<ExtractedBookMetadata> {
+  const cfg = getAiConfig(db);
+  if (!cfg.hasAnyKey) {
+    throw new Error("לא הוגדר מפתח Gemini API בהגדרות המערכת");
+  }
+  const existingSnapshot = JSON.stringify({
+    title: existingBook.title || "",
+    set_name: existingBook.set_name || "",
+    sub_series: existingBook.sub_series || "",
+    set_global_number: existingBook.set_global_number ?? null,
+    volume: existingBook.volume || "",
+    coverage_range: existingBook.coverage_range || "",
+    author: existingBook.author || "",
+    publisher: existingBook.publisher || "",
+    pub_year: existingBook.pub_year || "",
+    edition: existingBook.edition || "",
+    category: existingBook.category || "",
+    notes: existingBook.notes || "",
+    tags: existingBook.tags || [],
+  });
+
+  const systemPrompt =
+    "אתה ספרן תורני מומחה בישיבה שמבצע טיוב ותיקון נתונים של ספר שכבר מאושר בקטלוג. לפניך הנתונים הקיימים של הספר, ובמידה וצורפו תמונות שמורות או חדשות של השער/שדרה — העזר בהן. הקפד במיוחד על חילוץ והפרדה של סט (set_name), תת-סדרה/מסכת (sub_series), מספר כרך כללי (set_global_number), סימון כרך מדויק (volume), טווח סימנים/דפים (coverage_range), ותיקון שגיאות כתיב/מהדורה/מחבר. החזר JSON מדויק בלבד בעברית.";
+  const userPrompt = `נתוני הספר הנוכחיים בקטלוג:
+${existingSnapshot}
+${customPrompt?.trim() ? `\nבקשת העריכה של הספרן: ${customPrompt.trim()}` : "\nבצע בדיקה, דיוק והשלמה של כל שדות הספר (במיוחד כותר, סט, תת-סדרה, טווח סימנים/דפים, שנת הוצאה, מהדורה ותגיות)."}
+החזר את כל השדות המעודכנים בפורמט JSON מלא.`;
+
+  const imageParts = images.map((img) => ({
+    inlineData: {
+      mimeType: img.mimeType || "image/jpeg",
+      data: img.buffer.toString("base64"),
+    },
+  }));
+
+  const { result: response } = await executeWithModelAndKeyFallback(
+    db,
+    cfg.aiModel,
+    cfg.autoFallback,
+    async (apiKey, activeModel, _entry, signal) => {
+      const ai = createClient(apiKey);
+      return ai.models.generateContent({
+        model: activeModel,
+        contents: {
+          parts: [...imageParts, { text: userPrompt }],
+        },
+        config: {
+          abortSignal: signal,
+          systemInstruction: systemPrompt,
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              title: { type: Type.STRING },
+              set_name: { type: Type.STRING },
+              sub_series: { type: Type.STRING },
+              set_global_number: { type: Type.INTEGER },
+              volume: { type: Type.STRING },
+              coverage_range: { type: Type.STRING },
+              author: { type: Type.STRING },
+              publisher: { type: Type.STRING },
+              pub_year: { type: Type.STRING },
+              edition: { type: Type.STRING },
+              category: { type: Type.STRING },
+              notes: { type: Type.STRING },
+              tags: { type: Type.ARRAY, items: { type: Type.STRING } },
+            },
+            required: ["title", "author", "volume", "publisher", "pub_year", "edition", "category", "notes", "tags"],
+          },
+        },
+      });
+    },
+    { abortSignal: options?.abortSignal, timeoutMs: options?.timeoutMs ?? 45_000, onKeyPicked: options?.onKeyPicked }
+  );
+
+  const rawText = (response.text || "{}").trim();
+  const parsed = JSON.parse(rawText) as Partial<ExtractedBookMetadata>;
+  const rawGlobalNum = Number(parsed.set_global_number);
+
+  return {
+    title: String(parsed.title || "").trim(),
+    set_name: String(parsed.set_name || "").trim(),
+    sub_series: String(parsed.sub_series || "").trim(),
+    set_global_number: Number.isFinite(rawGlobalNum) && rawGlobalNum > 0 ? Math.round(rawGlobalNum) : null,
+    coverage_range: String(parsed.coverage_range || "").trim(),
+    author: String(parsed.author || "").trim(),
+    volume: String(parsed.volume || "").trim(),
+    publisher: String(parsed.publisher || "").trim(),
+    pub_year: String(parsed.pub_year || "").trim(),
+    edition: String(parsed.edition || "").trim(),
+    category: String(parsed.category || "").trim() || "כללי",
+    notes: String(parsed.notes || "").trim(),
+    tags: Array.isArray(parsed.tags) ? parsed.tags.map((t) => String(t).trim()).filter(Boolean).slice(0, 12) : [],
+  };
+}
+
+export async function generateSmartShelfPlanWithAi(
+  db: DbClient,
+  librarySummaryJson: string,
+  options?: { abortSignal?: AbortSignal; timeoutMs?: number }
+): Promise<{
+  summary: string;
+  moves: Array<{
+    title: string;
+    description: string;
+    reason: string;
+    severity: "info" | "warning" | "high";
+    fromCabinetCode?: string;
+    fromShelf?: number;
+    toCabinetCode?: string;
+    toShelf?: number;
+    setName?: string;
+    barcodes?: string[];
+  }>;
+}> {
+  const cfg = getAiConfig(db);
+  if (!cfg.hasAnyKey) {
+    throw new Error("לא הוגדר מפתח Gemini API");
+  }
+  const systemPrompt =
+    "אתה יועץ ארגון וסדר תורני של אוצר ספרים בישיבה. לפניך תמונת מצב מספרית של החדר, הארונות (כולל רוחב מדפים בס״מ ונושא ראשי), אחוזי תפוסה של כל מדף, סטים מפוצלים וספרים לא משויכים. הצע מהלכי סידור קונקרטיים וריאליים לפי ס״מ פנויים ונושא ארון, רק עבור ארונות ומדפים שבאמת קיימים בסיכום. החזר JSON בעברית בלבד.";
+
+  const { result: response } = await executeWithModelAndKeyFallback(
+    db,
+    cfg.aiModel,
+    cfg.autoFallback,
+    async (apiKey, activeModel, _entry, signal) => {
+      const ai = createClient(apiKey);
+      return ai.models.generateContent({
+        model: activeModel,
+        contents: `להלן נתוני המדפים והספרים של אוצר הספרים:\n${librarySummaryJson}\nהפק עד 8 המלצות סידור והעברת מדפים חכמות (עם קוד ארון ומספר מדף מקור ויעד מדויקים כשניתן ליישום אוטומטי).`,
+        config: {
+          abortSignal: signal,
+          systemInstruction: systemPrompt,
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              summary: { type: Type.STRING, description: "סיכום קצר של מצב הספרייה" },
+              moves: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    title: { type: Type.STRING },
+                    description: { type: Type.STRING },
+                    reason: { type: Type.STRING },
+                    severity: { type: Type.STRING },
+                    fromCabinetCode: { type: Type.STRING },
+                    fromShelf: { type: Type.INTEGER },
+                    toCabinetCode: { type: Type.STRING },
+                    toShelf: { type: Type.INTEGER },
+                    setName: { type: Type.STRING },
+                    barcodes: { type: Type.ARRAY, items: { type: Type.STRING } },
+                  },
+                  required: ["title", "description", "reason", "severity"],
+                },
+              },
+            },
+            required: ["summary", "moves"],
+          },
+        },
+      });
+    },
+    { abortSignal: options?.abortSignal, timeoutMs: options?.timeoutMs ?? 45_000 }
+  );
+
+  const rawText = (response.text || "{}").trim();
+  const parsed = JSON.parse(rawText) as { summary?: string; moves?: Array<Record<string, unknown>> };
+  const moves = Array.isArray(parsed.moves)
+    ? parsed.moves.map((m) => ({
+        title: String(m.title || "המלצת סידור").trim(),
+        description: String(m.description || "").trim(),
+        reason: String(m.reason || "").trim(),
+        severity: (m.severity === "high" || m.severity === "warning" ? m.severity : "info") as "info" | "warning" | "high",
+        fromCabinetCode: m.fromCabinetCode ? String(m.fromCabinetCode).trim() : undefined,
+        fromShelf: Number(m.fromShelf) > 0 ? Number(m.fromShelf) : undefined,
+        toCabinetCode: m.toCabinetCode ? String(m.toCabinetCode).trim() : undefined,
+        toShelf: Number(m.toShelf) > 0 ? Number(m.toShelf) : undefined,
+        setName: m.setName ? String(m.setName).trim() : undefined,
+        barcodes: Array.isArray(m.barcodes) ? m.barcodes.map((b) => String(b).trim()).filter(Boolean) : undefined,
+      }))
+    : [];
+  return {
+    summary: String(parsed.summary || "").trim(),
+    moves,
+  };
+}
+
 export function buildBookEmbeddingText(book: {
   title?: string;
   set_name?: string;
+  sub_series?: string;
+  coverage_range?: string;
   author?: string;
   volume?: string;
   publisher?: string;
@@ -898,8 +1228,10 @@ export function buildBookEmbeddingText(book: {
   return [
     book.title ? `ספר: ${book.title}` : "",
     book.set_name ? `סט/סדרה: ${book.set_name}` : "",
+    book.sub_series ? `תת-סדרה: ${book.sub_series}` : "",
     book.author ? `מחבר: ${book.author}` : "",
     book.volume ? `כרך: ${book.volume}` : "",
+    book.coverage_range ? `טווח סימנים/דפים: ${book.coverage_range}` : "",
     book.category ? `קטגוריה: ${book.category}` : "",
     tagsStr ? `נושאים ותגיות: ${tagsStr}` : "",
     book.publisher ? `הוצאה: ${book.publisher}` : "",

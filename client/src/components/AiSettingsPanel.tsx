@@ -212,7 +212,7 @@ export const AiSettingsPanel: React.FC<AiSettingsPanelProps> = ({ settings, setS
     try {
       const res = await fetch("/api/ai/cleanup-images", { method: "POST" });
       const data = await res.json();
-      setCleanupMsg(`נמחקו ${data.deletedFiles} תמונות של ספרים מאושרים/דחויים (פונו ${data.freedKb} KB).`);
+      setCleanupMsg(`נמחקו ${data.deletedFiles} קבצי תמונה יתומים/שפג תוקפם (פונו ${data.freedKb} KB). תמונות פעילות לעריכה חוזרת וסל המחזור (30 יום) נשמרו.`);
     } finally {
       setCleaning(false);
     }
@@ -529,9 +529,9 @@ export const AiSettingsPanel: React.FC<AiSettingsPanelProps> = ({ settings, setS
 
         <div className="flex flex-wrap items-center justify-between gap-3 p-3.5 rounded-lg bg-[var(--otzar-surface-alt)] border border-[var(--otzar-border-muted)] text-sm">
           <div>
-            <div className="font-semibold">ניקוי קבצי תמונות שכבר טופלו</div>
+            <div className="font-semibold">ניקוי תמונות שפג תוקפן (מעל 30 יום)</div>
             <div className="text-xs text-[var(--otzar-text-muted)]">
-              מוחק מהדיסק את צילומי השערים של ספרים שכבר אושרו או נדחו כדי לחסוך מקום במחשב.
+              צילומי ספרים מאושרים וסל מחזור נשמרים אוטומטית ל-30 יום לצורך עריכה חוזרת בבינה ושחזור. הניקוי מסיר רק קבצים שפג תוקפם או יתומים.
             </div>
           </div>
           <button
@@ -541,7 +541,7 @@ export const AiSettingsPanel: React.FC<AiSettingsPanelProps> = ({ settings, setS
             className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-semibold border border-red-300 text-red-700 hover:bg-red-50 cursor-pointer"
           >
             <Trash2 className="w-3.5 h-3.5" />
-            {cleaning ? "מנקה..." : "ניקוי תמונות של ספרים שאושרו"}
+            {cleaning ? "מנקה..." : "נקה תמונות שפג תוקפן"}
           </button>
         </div>
 

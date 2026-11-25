@@ -1,12 +1,14 @@
 import React, { useEffect, useRef, useState } from "react";
-import { Plus, Save, RotateCw, Trash2, CheckCircle2, BarChart3, X, RefreshCw } from "lucide-react";
-import type { CabinetRow, MapEntrance, ShelvingReport } from "../types.ts";
+import { Plus, Save, RotateCw, Trash2, CheckCircle2, BarChart3, X, RefreshCw, Copy, Sparkles, ArrowLeftRight, Ruler } from "lucide-react";
+import type { CabinetRow, MapEntrance, RoomDimensions, ShelvingReport } from "../types.ts";
 import { DEFAULT_ENTRANCE, EntranceMarker, MAP_HEIGHT, MAP_WIDTH } from "./LibraryMap2D.tsx";
+import { SmartShelfOrganizerModal } from "./SmartShelfOrganizerModal.tsx";
 import { useStrings } from "../lib/stringsContext.tsx";
 
 interface MapEditorModuleProps {
   cabinets: CabinetRow[];
   entrance?: MapEntrance;
+  roomDimensions?: RoomDimensions;
   onReload: () => Promise<void>;
 }
 
@@ -47,10 +49,14 @@ function getHandleCursor(dir: ResizeDir, rotation: number): string {
   return "nwse-resize";
 }
 
-export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entrance, onReload }) => {
+export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entrance, roomDimensions, onReload }) => {
   const { t } = useStrings();
   const [draftCabinets, setDraftCabinets] = useState<CabinetRow[]>(cabinets);
   const [draftEntrance, setDraftEntrance] = useState<MapEntrance>(entrance || DEFAULT_ENTRANCE);
+  const [draftRoom, setDraftRoom] = useState<RoomDimensions>(() => ({
+    width_m: Number(roomDimensions?.width_m) > 0 ? Number(roomDimensions?.width_m) : 5,
+    length_m: Number(roomDimensions?.length_m) > 0 ? Number(roomDimensions?.length_m) : 6,
+  }));
   const [selectedId, setSelectedId] = useState<number | null>(cabinets[0]?.id ?? null);
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -59,11 +65,23 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
   const [newCode, setNewCode] = useState("");
   const [newSubject, setNewSubject] = useState("");
   const [newShelves, setNewShelves] = useState("5");
+  const [newWidthCm, setNewWidthCm] = useState("120");
+  const [newDepthCm, setNewDepthCm] = useState("40");
+
+  const [dupCopyBooks, setDupCopyBooks] = useState(false);
+  const [duplicatingCab, setDuplicatingCab] = useState(false);
+
+  const [shelfActionMode, setShelfActionMode] = useState<"move_books" | "copy_books">("move_books");
+  const [sourceShelfNum, setSourceShelfNum] = useState(1);
+  const [targetCabId, setTargetCabId] = useState<number>(cabinets[0]?.id ?? 0);
+  const [targetShelfNum, setTargetShelfNum] = useState(1);
+  const [runningShelfAction, setRunningShelfAction] = useState(false);
 
   const [reportOpen, setReportOpen] = useState(false);
   const [reportLoading, setReportLoading] = useState(false);
   const [reportError, setReportError] = useState<string | null>(null);
   const [shelvingReport, setShelvingReport] = useState<ShelvingReport | null>(null);
+  const [smartOpen, setSmartOpen] = useState(false);
 
   const loadShelvingReport = async () => {
     setReportLoading(true);
@@ -101,7 +119,25 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
     if (entrance) setDraftEntrance(entrance);
   }, [entrance?.wall, entrance?.offset]);
 
+  useEffect(() => {
+    if (roomDimensions && (Number(roomDimensions.width_m) > 0 || Number(roomDimensions.length_m) > 0)) {
+      setDraftRoom({
+        width_m: Number(roomDimensions.width_m) > 0 ? Number(roomDimensions.width_m) : 5,
+        length_m: Number(roomDimensions.length_m) > 0 ? Number(roomDimensions.length_m) : 6,
+      });
+    }
+  }, [roomDimensions?.width_m, roomDimensions?.length_m]);
+
+  useEffect(() => {
+    fetch("/api/reports/shelving")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (d) setShelvingReport(d); })
+      .catch(() => {});
+  }, [cabinets.length]);
+
   const selectedCab = draftCabinets.find((c) => c.id === selectedId) || null;
+  const pxPerCmX = (MAP_WIDTH - 20) / Math.max(100, (Number(draftRoom.length_m) || 6) * 100);
+  const pxPerCmY = (MAP_HEIGHT - 20) / Math.max(100, (Number(draftRoom.width_m) || 5) * 100);
 
   const getSvgCoords = (clientX: number, clientY: number) => {
     const svg = svgRef.current;
@@ -221,6 +257,8 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
         ...startCab,
         width: newWidth,
         height: newHeight,
+        width_cm: Math.max(30, Math.round(newWidth / pxPerCmX)),
+        depth_cm: Math.max(20, Math.round(newHeight / pxPerCmY)),
         x: newCx - newWidth / 2,
         y: newCy - newHeight / 2,
       };
@@ -271,7 +309,7 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
         fetch("/api/settings", {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ map_entrance: draftEntrance }),
+          body: JSON.stringify({ map_entrance: draftEntrance, room_dimensions: draftRoom }),
         }),
       ]);
       if (!cabRes.ok || !setRes.ok) {
@@ -301,8 +339,10 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
           shelves_count: Number(newShelves) || 5,
           x: 60 + ((draftCabinets.length * 30) % 400),
           y: 260,
-          width: 160,
-          height: 60,
+          width: Math.max(40, Math.min(420, Math.round((Number(newWidthCm) || 120) * pxPerCmX))),
+          height: Math.max(30, Math.min(300, Math.round((Number(newDepthCm) || 40) * pxPerCmY))),
+          width_cm: Number(newWidthCm) || 120,
+          depth_cm: Number(newDepthCm) || 40,
           rotation: 0,
         }),
       });
@@ -328,6 +368,115 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
     }
   };
 
+  const handleScaleMapFromCm = () => {
+    setDraftCabinets((prev) =>
+      prev.map((c) => {
+        const wCm = Number(c.width_cm) > 0 ? Number(c.width_cm) : Math.round(c.width / pxPerCmX);
+        const dCm = Number(c.depth_cm) > 0 ? Number(c.depth_cm) : Math.round(c.height / pxPerCmY);
+        const wPx = Math.max(40, Math.min(420, Math.round(wCm * pxPerCmX)));
+        const hPx = Math.max(30, Math.min(300, Math.round(dCm * pxPerCmY)));
+        const merged = { ...c, width_cm: wCm, depth_cm: dCm, width: wPx, height: hPx };
+        const clamped = clampRotatedCabinet(merged, merged.x, merged.y);
+        return { ...merged, x: clamped.x, y: clamped.y };
+      })
+    );
+    setNotice("מידות הארונות במפה הותאמו לקנה המידה של החדר.");
+  };
+
+  const handleDuplicateCabinet = async () => {
+    if (!selectedCab) return;
+    setDuplicatingCab(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const res = await fetch(`/api/cabinets/${selectedCab.id}/duplicate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ copyBooks: dupCopyBooks }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "שגיאה בשכפול ארון");
+      setSelectedId(data.cabinet?.id ?? null);
+      setNotice(
+        dupCopyBooks
+          ? `הארון שוכפל בהצלחה (${data.cabinet?.code}) יחד עם ${data.copiedBooksCount || 0} ספרים.`
+          : `הארון שוכפל בהצלחה (${data.cabinet?.code}).`
+      );
+      await onReload();
+      loadShelvingReport();
+    } catch (err: any) {
+      setError(err?.message || "שגיאה בשכפול ארון");
+    } finally {
+      setDuplicatingCab(false);
+    }
+  };
+
+  const handleAddShelfToSelected = async () => {
+    if (!selectedCab) return;
+    setRunningShelfAction(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/cabinets/${selectedCab.id}/shelves/action`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "add_shelf" }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "שגיאה בהוספת מדף");
+      setNotice(`נוסף מדף לארון ${selectedCab.code} (סה״כ ${data.shelves_count} מדפים).`);
+      await onReload();
+      loadShelvingReport();
+    } catch (err: any) {
+      setError(err?.message || "שגיאה בהוספת מדף");
+    } finally {
+      setRunningShelfAction(false);
+    }
+  };
+
+  const handleRunShelfAction = async () => {
+    if (!selectedCab) return;
+    setRunningShelfAction(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const res = await fetch(`/api/cabinets/${selectedCab.id}/shelves/action`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: shelfActionMode,
+          sourceShelf: sourceShelfNum,
+          targetCabinetId: targetCabId || selectedCab.id,
+          targetShelf: targetShelfNum,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "שגיאה בפעולת המדף");
+      setNotice(
+        shelfActionMode === "copy_books"
+          ? `שוכפלו ${data.copiedCount || 0} ספרים למדף היעד עם ברקודים חדשים.`
+          : `הועברו ${data.movedCount || 0} ספרים למדף היעד.`
+      );
+      await onReload();
+      loadShelvingReport();
+    } catch (err: any) {
+      setError(err?.message || "שגיאה בפעולת מדף");
+    } finally {
+      setRunningShelfAction(false);
+    }
+  };
+
+  const roomWidthM = Math.max(1, Number(draftRoom.width_m) || 5);
+  const roomLengthM = Math.max(1, Number(draftRoom.length_m) || 6);
+  const roomAreaSqm = Math.round(roomWidthM * roomLengthM * 100) / 100;
+  const cabFootprintSqm = Math.round(
+    draftCabinets.reduce((sum, c) => {
+      const wCm = Number(c.width_cm) > 0 ? Number(c.width_cm) : Math.round(c.width / pxPerCmX);
+      const dCm = Number(c.depth_cm) > 0 ? Number(c.depth_cm) : Math.round(c.height / pxPerCmY);
+      return sum + (wCm / 100) * (dCm / 100);
+    }, 0) * 100
+  ) / 100;
+  const aisleFreePct = roomAreaSqm > 0 ? Math.max(0, Math.round(((roomAreaSqm - cabFootprintSqm) / roomAreaSqm) * 100)) : 0;
+
   return (
     <div className="space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-4">
@@ -339,6 +488,14 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
         </div>
 
         <div className="flex flex-wrap items-center gap-2.5">
+          <button
+            type="button"
+            onClick={() => setSmartOpen(true)}
+            className="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold border border-[var(--otzar-accent)] bg-[var(--otzar-surface)] text-[var(--otzar-accent)] hover:bg-[var(--otzar-accent-soft)] cursor-pointer whitespace-nowrap"
+          >
+            <Sparkles className="w-4 h-4" />
+            {t("map.smartOrganizerButton")}
+          </button>
           <button
             type="button"
             onClick={() => {
@@ -372,10 +529,55 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
         <div className="p-3 rounded-lg border border-red-300 bg-red-50 text-red-800 text-sm">{error}</div>
       )}
 
+      {/* Room Dimensions & m² Scale Bar */}
+      <div className="p-4 rounded-xl border border-[var(--otzar-border-muted)] bg-[var(--otzar-surface-alt)] flex flex-wrap items-end justify-between gap-4 text-sm">
+        <div className="flex flex-wrap items-end gap-3">
+          <div>
+            <label className="block text-xs font-medium mb-1">אורך חדר (מ׳)</label>
+            <input
+              type="number"
+              min={1}
+              max={60}
+              step="0.5"
+              value={draftRoom.length_m}
+              onChange={(e) => setDraftRoom((p) => ({ ...p, length_m: Math.max(1, Number(e.target.value) || 1) }))}
+              className="w-24 px-2.5 py-1.5 text-sm rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] tabular-nums"
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-medium mb-1">רוחב חדר (מ׳)</label>
+            <input
+              type="number"
+              min={1}
+              max={60}
+              step="0.5"
+              value={draftRoom.width_m}
+              onChange={(e) => setDraftRoom((p) => ({ ...p, width_m: Math.max(1, Number(e.target.value) || 1) }))}
+              className="w-24 px-2.5 py-1.5 text-sm rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] tabular-nums"
+            />
+          </div>
+          <div className="text-xs text-[var(--otzar-text-muted)] tabular-nums pb-1.5 flex flex-wrap items-center gap-2">
+            <span>שטח אולם: <strong className="text-[var(--otzar-text)]">{roomAreaSqm} מ״ר</strong></span>
+            <span aria-hidden="true">·</span>
+            <span>שטח ארונות: <strong className="text-[var(--otzar-text)]">{cabFootprintSqm} מ״ר</strong></span>
+            <span aria-hidden="true">·</span>
+            <span>מעברים פנויים: <strong className="text-[var(--otzar-accent)]">{aisleFreePct}%</strong></span>
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={handleScaleMapFromCm}
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] hover:bg-[var(--otzar-surface)] cursor-pointer"
+        >
+          <Ruler className="w-3.5 h-3.5 text-[var(--otzar-accent)]" />
+          סנכרן מידות ארונות (ס״מ) לקנה מידה
+        </button>
+      </div>
+
       {/* Add new cabinet bar */}
       <form
         onSubmit={handleAddCabinet}
-        className="p-4 rounded-xl border border-[var(--otzar-border)] bg-[var(--otzar-surface)] grid grid-cols-1 md:grid-cols-5 gap-3 items-end"
+        className="p-4 rounded-xl border border-[var(--otzar-border)] bg-[var(--otzar-surface)] grid grid-cols-1 md:grid-cols-7 gap-3 items-end"
       >
         <div>
           <label className="block text-xs font-medium mb-1">קוד ארון חדש</label>
@@ -399,7 +601,7 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
           />
         </div>
         <div>
-          <label className="block text-xs font-medium mb-1">מספר מדפים</label>
+          <label className="block text-xs font-medium mb-1">מדפים</label>
           <input
             type="number"
             min={1}
@@ -410,12 +612,34 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
           />
         </div>
         <div>
+          <label className="block text-xs font-medium mb-1">רוחב (ס״מ)</label>
+          <input
+            type="number"
+            min={30}
+            max={500}
+            value={newWidthCm}
+            onChange={(e) => setNewWidthCm(e.target.value)}
+            className="w-full px-2.5 py-1.5 text-sm rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] tabular-nums"
+          />
+        </div>
+        <div>
+          <label className="block text-xs font-medium mb-1">עומק (ס״מ)</label>
+          <input
+            type="number"
+            min={20}
+            max={200}
+            value={newDepthCm}
+            onChange={(e) => setNewDepthCm(e.target.value)}
+            className="w-full px-2.5 py-1.5 text-sm rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] tabular-nums"
+          />
+        </div>
+        <div>
           <button
             type="submit"
             className="w-full inline-flex items-center justify-center gap-1.5 px-4 py-1.5 rounded-lg text-sm font-semibold text-white bg-[var(--otzar-accent)] hover:bg-[var(--otzar-accent-hover)] cursor-pointer"
           >
             <Plus className="w-4 h-4" />
-            הוסף ארון למפה
+            הוסף ארון
           </button>
         </div>
       </form>
@@ -618,28 +842,156 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
                 </div>
                 <div className="grid grid-cols-2 gap-2">
                   <div>
-                    <label className="block text-xs font-medium mb-1">אורך</label>
+                    <label className="block text-xs font-medium mb-1">רוחב ארון (ס״מ)</label>
                     <input
                       type="number"
-                      min={40}
-                      max={420}
-                      step={10}
-                      value={selectedCab.width}
-                      onChange={(e) => updateSelectedField({ width: Math.max(40, Number(e.target.value) || 60) })}
+                      min={30}
+                      max={600}
+                      step={5}
+                      value={selectedCab.width_cm ?? Math.round(selectedCab.width / pxPerCmX)}
+                      onChange={(e) => {
+                        const cm = Math.max(30, Number(e.target.value) || 120);
+                        updateSelectedField({
+                          width_cm: cm,
+                          width: Math.max(40, Math.min(420, Math.round(cm * pxPerCmX))),
+                        });
+                      }}
                       className="w-full px-3 py-1.5 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] tabular-nums"
                     />
                   </div>
                   <div>
-                    <label className="block text-xs font-medium mb-1">רוחב</label>
+                    <label className="block text-xs font-medium mb-1">עומק ארון (ס״מ)</label>
                     <input
                       type="number"
-                      min={30}
+                      min={20}
                       max={300}
-                      step={10}
-                      value={selectedCab.height}
-                      onChange={(e) => updateSelectedField({ height: Math.max(30, Number(e.target.value) || 60) })}
+                      step={5}
+                      value={selectedCab.depth_cm ?? Math.round(selectedCab.height / pxPerCmY)}
+                      onChange={(e) => {
+                        const cm = Math.max(20, Number(e.target.value) || 40);
+                        updateSelectedField({
+                          depth_cm: cm,
+                          height: Math.max(30, Math.min(300, Math.round(cm * pxPerCmY))),
+                        });
+                      }}
                       className="w-full px-3 py-1.5 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] tabular-nums"
                     />
+                  </div>
+                </div>
+
+                {/* Duplicate Cabinet */}
+                <div className="pt-2.5 border-t border-[var(--otzar-border-muted)] space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <label className="inline-flex items-center gap-1.5 text-xs cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={dupCopyBooks}
+                        onChange={(e) => setDupCopyBooks(e.target.checked)}
+                        className="rounded accent-[var(--otzar-accent)]"
+                      />
+                      <span>שכפל גם ספרים וברקודים</span>
+                    </label>
+                    <button
+                      type="button"
+                      disabled={duplicatingCab}
+                      onClick={handleDuplicateCabinet}
+                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold border border-[var(--otzar-accent)] text-[var(--otzar-accent)] hover:bg-[var(--otzar-accent-soft)] cursor-pointer disabled:opacity-50"
+                    >
+                      <Copy className="w-3.5 h-3.5" />
+                      {duplicatingCab ? "משכפל..." : t("map.duplicateCabinet")}
+                    </button>
+                  </div>
+                </div>
+
+                {/* Shelf Actions & Capacity */}
+                <div className="pt-2.5 border-t border-[var(--otzar-border-muted)] space-y-2 text-xs">
+                  <div className="flex items-center justify-between">
+                    <span className="font-semibold">מדפים וקיבולת</span>
+                    <button
+                      type="button"
+                      disabled={runningShelfAction}
+                      onClick={handleAddShelfToSelected}
+                      className="inline-flex items-center gap-1 px-2 py-1 rounded border border-[var(--otzar-border-muted)] hover:bg-[var(--otzar-surface-alt)] cursor-pointer"
+                    >
+                      <Plus className="w-3 h-3" />
+                      הוסף מדף
+                    </button>
+                  </div>
+                  {(() => {
+                    const cabRep = shelvingReport?.cabinets.find((c) => c.id === selectedCab.id);
+                    if (!cabRep) return null;
+                    return (
+                      <div className="space-y-1 max-h-28 overflow-y-auto pl-1">
+                        {cabRep.shelves.filter((s) => s.shelfNumber > 0).map((sh) => {
+                          const pct = Math.min(130, Number(sh.fillPercent) || 0);
+                          return (
+                            <div key={sh.shelfNumber} className="flex items-center gap-2 tabular-nums">
+                              <span className="w-12 shrink-0 text-[var(--otzar-text-muted)]">מדף {sh.shelfNumber}</span>
+                              <div className="flex-1 h-1.5 rounded-full bg-[var(--otzar-surface-alt)] overflow-hidden">
+                                <div
+                                  className={`h-full ${sh.isOverloaded ? "bg-red-500" : pct > 85 ? "bg-amber-500" : "bg-[var(--otzar-accent)]"}`}
+                                  style={{ width: `${Math.min(100, pct)}%` }}
+                                />
+                              </div>
+                              <span className={`w-10 text-left ${sh.isOverloaded ? "text-red-600 font-bold" : "text-[var(--otzar-text-muted)]"}`}>
+                                {pct}%
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    );
+                  })()}
+                  <div className="p-2.5 rounded-lg bg-[var(--otzar-surface-alt)] border border-[var(--otzar-border-muted)] space-y-2">
+                    <div className="font-semibold flex items-center gap-1">
+                      <ArrowLeftRight className="w-3.5 h-3.5 text-[var(--otzar-accent)]" />
+                      <span>{t("map.duplicateShelf")}</span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-1.5">
+                      <select
+                        value={shelfActionMode}
+                        onChange={(e) => setShelfActionMode(e.target.value as "move_books" | "copy_books")}
+                        className="px-2 py-1 rounded border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)]"
+                      >
+                        <option value="move_books">העבר ספרים</option>
+                        <option value="copy_books">שכפל עם ברקוד חדש</option>
+                      </select>
+                      <select
+                        value={sourceShelfNum}
+                        onChange={(e) => setSourceShelfNum(Number(e.target.value) || 1)}
+                        className="px-2 py-1 rounded border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] tabular-nums"
+                      >
+                        {Array.from({ length: selectedCab.shelves_count || 5 }, (_, i) => i + 1).map((s) => (
+                          <option key={s} value={s}>ממדף {s}</option>
+                        ))}
+                      </select>
+                      <select
+                        value={targetCabId || selectedCab.id}
+                        onChange={(e) => setTargetCabId(Number(e.target.value))}
+                        className="px-2 py-1 rounded border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)]"
+                      >
+                        {draftCabinets.map((c) => (
+                          <option key={c.id} value={c.id}>לארון {c.code}</option>
+                        ))}
+                      </select>
+                      <input
+                        type="number"
+                        min={1}
+                        max={25}
+                        value={targetShelfNum}
+                        onChange={(e) => setTargetShelfNum(Math.max(1, Number(e.target.value) || 1))}
+                        placeholder="למדף"
+                        className="px-2 py-1 rounded border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] tabular-nums"
+                      />
+                    </div>
+                    <button
+                      type="button"
+                      disabled={runningShelfAction}
+                      onClick={handleRunShelfAction}
+                      className="w-full py-1.5 rounded bg-[var(--otzar-accent)] text-white font-semibold hover:bg-[var(--otzar-accent-hover)] cursor-pointer disabled:opacity-50"
+                    >
+                      {runningShelfAction ? "מבצע..." : shelfActionMode === "copy_books" ? "שכפל מדף כעת" : "העבר מדף כעת"}
+                    </button>
                   </div>
                 </div>
 
@@ -713,6 +1065,14 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
                 <div className="py-12 text-center text-[var(--otzar-text-muted)]">מחשב נתוני מידוף...</div>
               ) : shelvingReport ? (
                 <>
+                  {shelvingReport.room && (
+                    <div className="p-3.5 rounded-xl border border-[var(--otzar-border-muted)] bg-[var(--otzar-surface-alt)] flex flex-wrap items-center justify-between gap-3 text-xs tabular-nums">
+                      <span>מידות חדר: <strong className="text-[var(--otzar-text)]">{shelvingReport.room.length_m}מ׳ × {shelvingReport.room.width_m}מ׳ ({shelvingReport.room.areaSqm} מ״ר)</strong></span>
+                      <span>שטח ארונות: <strong className="text-[var(--otzar-text)]">{shelvingReport.room.cabinetsFootprintSqm} מ״ר</strong></span>
+                      <span>מעברים פנויים: <strong className="text-[var(--otzar-accent)]">{shelvingReport.room.aisleFreeSqm} מ״ר ({shelvingReport.room.aisleFreePercent}%)</strong></span>
+                    </div>
+                  )}
+
                   {/* Totals strip */}
                   <div className="grid grid-cols-2 md:grid-cols-5 divide-x divide-x-reverse divide-[var(--otzar-border-muted)] rounded-xl border border-[var(--otzar-border-muted)] bg-[var(--otzar-surface-alt)]">
                     <div className="p-3.5">
@@ -781,7 +1141,7 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
                               <tr>
                                 <th className="py-2 px-3 font-medium">מדף</th>
                                 <th className="py-2 px-3 font-medium">ספרים</th>
-                                <th className="py-2 px-3 font-medium">רוחב מצטבר</th>
+                                <th className="py-2 px-3 font-medium">רוחב מצטבר / תפוסה</th>
                                 <th className="py-2 px-3 font-medium">עובי ממוצע</th>
                                 <th className="py-2 px-3 font-medium">חסר עובי</th>
                                 <th className="py-2 px-3 font-medium">גדלים</th>
@@ -798,7 +1158,14 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
                                       {sh.shelfNumber > 0 ? `מדף ${sh.shelfNumber}` : "ללא מדף"}
                                     </td>
                                     <td className="py-2 px-3 tabular-nums">{sh.booksCount}</td>
-                                    <td className="py-2 px-3 tabular-nums">{sh.totalThicknessCm} ס״מ</td>
+                                    <td className="py-2 px-3 tabular-nums">
+                                      <span>{sh.totalThicknessCm} ס״מ</span>
+                                      {sh.estimatedCapacityCm ? (
+                                        <span className={`mr-1.5 ${sh.isOverloaded ? "text-red-600 font-bold" : "text-[var(--otzar-text-muted)]"}`}>
+                                          / {sh.estimatedCapacityCm} ({sh.fillPercent ?? 0}%)
+                                        </span>
+                                      ) : null}
+                                    </td>
                                     <td className="py-2 px-3 tabular-nums">
                                       {sh.avgThicknessMm != null ? `${sh.avgThicknessMm} מ״מ` : "—"}
                                     </td>
@@ -818,6 +1185,16 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
             </div>
           </div>
         </div>
+      )}
+
+      {smartOpen && (
+        <SmartShelfOrganizerModal
+          onClose={() => setSmartOpen(false)}
+          onMovesApplied={async () => {
+            await onReload();
+            await loadShelvingReport();
+          }}
+        />
       )}
     </div>
   );

@@ -137,8 +137,11 @@ export function registerSyncRoutes(app: Express, db: DbClient, syncService: Otza
       const norm = buildNormalizedBookSearch([
         newBarcode,
         String(book.title || ""),
+        String(book.set_name || ""),
+        String(book.sub_series || ""),
         String(book.author || ""),
         String(book.volume || ""),
+        String(book.coverage_range || ""),
         String(book.publisher || ""),
         String(book.pub_year || ""),
         String(book.edition || ""),

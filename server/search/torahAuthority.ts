@@ -1,44 +1,32 @@
 import type { DbClient } from "../db/adapter.ts";
 import { normalizeHebrewText } from "../db/schema.ts";
+import {
+  hebrewGematriya,
+  torahNaturalVolumeRank,
+  torahNaturalVolumeSort,
+  compareSetBooks,
+  parseVolumeNotationRules,
+  type VolumeNotationRule,
+  type SetSortableBook,
+} from "../../shared/torah/volumeAndCoverage.ts";
 
-const GEMATRIYA_MAP: Record<string, number> = {
-  א: 1, ב: 2, ג: 3, ד: 4, ה: 5, ו: 6, ז: 7, ח: 8, ט: 9,
-  י: 10, כ: 20, ך: 20, ל: 30, מ: 40, ם: 40, נ: 50, ן: 50,
-  ס: 60, ע: 70, פ: 80, ף: 80, צ: 90, ץ: 90, ק: 100, ר: 200, ש: 300, ת: 400,
+export {
+  hebrewGematriya,
+  torahNaturalVolumeRank,
+  torahNaturalVolumeSort,
+  compareSetBooks,
+  parseVolumeNotationRules,
+  type VolumeNotationRule,
+  type SetSortableBook,
 };
 
-export function hebrewGematriya(str: string): number {
-  if (!str) return 0;
-  const clean = str.replace(/["'״׳]/g, "").trim();
-  let sum = 0;
-  for (const ch of clean) {
-    if (GEMATRIYA_MAP[ch]) {
-      sum += GEMATRIYA_MAP[ch];
-    } else {
-      return 0;
-    }
+export function readCustomVolumeNotationRules(db: DbClient): VolumeNotationRule[] {
+  try {
+    const row = db.get<{ value: string }>("SELECT value FROM settings WHERE key = 'volume_notation_rules'");
+    return parseVolumeNotationRules(row?.value);
+  } catch {
+    return [];
   }
-  return sum;
-}
-
-export function torahNaturalVolumeRank(val: unknown): number {
-  if (!val) return 9999;
-  const s = String(val).trim();
-  if (!s) return 9999;
-  const numMatch = s.match(/\d+/);
-  if (numMatch) return parseInt(numMatch[0], 10);
-  const tokenMatch = s.replace(/^(חלק|כרך|ספר|ח['"״׳]|כ['"״׳])\s*/i, "").trim();
-  const firstWord = tokenMatch.split(/[\s\-–—]/)[0];
-  const g = hebrewGematriya(firstWord);
-  if (g > 0) return g;
-  return 9999;
-}
-
-export function torahNaturalVolumeSort(a: unknown, b: unknown): number {
-  const ra = torahNaturalVolumeRank(a);
-  const rb = torahNaturalVolumeRank(b);
-  if (ra !== rb) return ra - rb;
-  return String(a || "").localeCompare(String(b || ""), "he");
 }
 
 const RABBINIC_HONORIFIC_TOKENS = new Set([

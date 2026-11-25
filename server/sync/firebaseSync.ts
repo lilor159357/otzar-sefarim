@@ -1074,20 +1074,24 @@ export class OtzarFirebaseSyncService {
     return { queued, ...res };
   }
 
-  private async pushLibraryMeta(): Promise<void> {
+  public async pushLibraryMeta(): Promise<void> {
     if (!this.firestore) return;
     const libraryName = getSettingVal(this.db, "library_name", "אוצר ספרים");
     const defaultLoanDays = parseInt(getSettingVal(this.db, "default_loan_days", "14"), 10) || 14;
     let mapEntrance: unknown = { wall: "bottom", offset: 50 };
-    try {
-      mapEntrance = JSON.parse(getSettingVal(this.db, "map_entrance", "{}"));
-    } catch {}
+    try { mapEntrance = JSON.parse(getSettingVal(this.db, "map_entrance", "{}")); } catch {}
+    let roomDimensions: unknown = { width_m: 6, length_m: 5 };
+    try { roomDimensions = JSON.parse(getSettingVal(this.db, "room_dimensions", "{}")); } catch {}
+    let volumeNotationRules: unknown = [];
+    try { volumeNotationRules = JSON.parse(getSettingVal(this.db, "volume_notation_rules", "[]")); } catch {}
     await setDoc(
       doc(this.firestore, "library_meta", "settings"),
       {
         library_name: libraryName,
         default_loan_days: defaultLoanDays,
         map_entrance: mapEntrance,
+        room_dimensions: roomDimensions,
+        volume_notation_rules: Array.isArray(volumeNotationRules) ? volumeNotationRules : [],
         updated_at: new Date().toISOString(),
         source_device: this.deviceId,
       },
@@ -1213,6 +1217,8 @@ export class OtzarFirebaseSyncService {
                 y: Number(cab.y) || 0,
                 width: Number(cab.width) || 150,
                 height: Number(cab.height) || 64,
+                width_cm: cab.width_cm != null ? Number(cab.width_cm) : null,
+                depth_cm: cab.depth_cm != null ? Number(cab.depth_cm) : null,
                 rotation: Number(cab.rotation) || 0,
                 updated_at: String(cab.updated_at || nowIso),
                 deleted_at: null,
@@ -1273,8 +1279,11 @@ export class OtzarFirebaseSyncService {
               barcode_status: String(bk.barcode_status || "assigned"),
               title: String(bk.title || ""),
               set_name: String(bk.set_name || ""),
+              sub_series: String(bk.sub_series || ""),
+              set_global_number: bk.set_global_number != null ? Number(bk.set_global_number) : null,
               author: String(bk.author || ""),
               volume: String(bk.volume || ""),
+              coverage_range: String(bk.coverage_range || ""),
               publisher: String(bk.publisher || ""),
               pub_year: String(bk.pub_year || ""),
               edition: String(bk.edition || ""),
@@ -1431,10 +1440,12 @@ export class OtzarFirebaseSyncService {
         return false;
       }
       if (!code) return false;
+      const rWidthCm = data.width_cm != null && Number(data.width_cm) > 0 ? Number(data.width_cm) : null;
+      const rDepthCm = data.depth_cm != null && Number(data.depth_cm) > 0 ? Number(data.depth_cm) : null;
       if (existing) {
         this.db.run(
           `UPDATE cabinets
-           SET code = ?, main_subject = ?, shelves_count = ?, x = ?, y = ?, width = ?, height = ?, rotation = ?, sync_id = ?, updated_at = ?, deleted_at = NULL
+           SET code = ?, main_subject = ?, shelves_count = ?, x = ?, y = ?, width = ?, height = ?, width_cm = COALESCE(?, width_cm), depth_cm = COALESCE(?, depth_cm), rotation = ?, sync_id = ?, updated_at = ?, deleted_at = NULL
            WHERE id = ?`,
           code,
           String(data.main_subject || ""),
@@ -1443,6 +1454,8 @@ export class OtzarFirebaseSyncService {
           Number(data.y) || 40,
           Math.max(40, Number(data.width) || 150),
           Math.max(40, Number(data.height) || 64),
+          rWidthCm,
+          rDepthCm,
           Number(data.rotation) || 0,
           syncId,
           remoteUpdated,
@@ -1450,8 +1463,8 @@ export class OtzarFirebaseSyncService {
         );
       } else {
         this.db.run(
-          `INSERT INTO cabinets (code, main_subject, shelves_count, x, y, width, height, rotation, sync_id, updated_at, deleted_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+          `INSERT INTO cabinets (code, main_subject, shelves_count, x, y, width, height, width_cm, depth_cm, rotation, sync_id, updated_at, deleted_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
           code,
           String(data.main_subject || ""),
           Math.max(1, Number(data.shelves_count) || 5),
@@ -1459,6 +1472,8 @@ export class OtzarFirebaseSyncService {
           Number(data.y) || 40,
           Math.max(40, Number(data.width) || 150),
           Math.max(40, Number(data.height) || 64),
+          rWidthCm,
+          rDepthCm,
           Number(data.rotation) || 0,
           syncId,
           remoteUpdated
@@ -1566,8 +1581,11 @@ export class OtzarFirebaseSyncService {
       const norm = buildNormalizedBookSearch([
         targetBarcode,
         title,
+        String(data.set_name || ""),
+        String(data.sub_series || ""),
         String(data.author || ""),
         String(data.volume || ""),
+        String(data.coverage_range || ""),
         String(data.publisher || ""),
         String(data.pub_year || ""),
         String(data.edition || ""),
@@ -1589,7 +1607,7 @@ export class OtzarFirebaseSyncService {
         }
         this.db.run(
           `UPDATE books
-           SET barcode = ?, title = ?, set_name = ?, author = ?, volume = ?, publisher = ?, pub_year = ?, edition = ?, category = ?,
+           SET barcode = ?, title = ?, set_name = ?, sub_series = ?, set_global_number = ?, author = ?, volume = ?, coverage_range = ?, publisher = ?, pub_year = ?, edition = ?, category = ?,
                tags = ?, normalized_search = ?, cabinet_id = ?, shelf_number = ?, notes = ?, status = ?, label_printed = ?,
                format_size = ?, thickness_mm = ?, pages_count = ?, barcode_status = ?, updated_at = ?, deleted_at = NULL
                ${embBlob !== undefined ? ", embedding = ?" : ""}
@@ -1597,8 +1615,11 @@ export class OtzarFirebaseSyncService {
           targetBarcode,
           title,
           String(data.set_name || ""),
+          String(data.sub_series || ""),
+          data.set_global_number != null && Number(data.set_global_number) > 0 ? Math.round(Number(data.set_global_number)) : null,
           String(data.author || ""),
           String(data.volume || ""),
+          String(data.coverage_range || ""),
           String(data.publisher || ""),
           String(data.pub_year || ""),
           String(data.edition || ""),
@@ -1621,15 +1642,18 @@ export class OtzarFirebaseSyncService {
       } else {
         this.db.run(
           `INSERT INTO books
-           (barcode, title, set_name, author, volume, publisher, pub_year, edition, category, tags, normalized_search, embedding,
+           (barcode, title, set_name, sub_series, set_global_number, author, volume, coverage_range, publisher, pub_year, edition, category, tags, normalized_search, embedding,
             cabinet_id, shelf_number, notes, status, label_printed, created_at, format_size, thickness_mm, pages_count,
             barcode_status, sync_id, updated_at, deleted_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
           targetBarcode,
           title,
           String(data.set_name || ""),
+          String(data.sub_series || ""),
+          data.set_global_number != null && Number(data.set_global_number) > 0 ? Math.round(Number(data.set_global_number)) : null,
           String(data.author || ""),
           String(data.volume || ""),
+          String(data.coverage_range || ""),
           String(data.publisher || ""),
           String(data.pub_year || ""),
           String(data.edition || ""),

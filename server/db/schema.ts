@@ -87,6 +87,8 @@ export function initSchemaAndSeed(db: DbClient): void {
       y REAL NOT NULL DEFAULT 40,
       width REAL NOT NULL DEFAULT 150,
       height REAL NOT NULL DEFAULT 64,
+      width_cm REAL,
+      depth_cm REAL,
       rotation REAL NOT NULL DEFAULT 0,
       sync_id TEXT,
       updated_at TEXT NOT NULL DEFAULT '',
@@ -97,6 +99,9 @@ export function initSchemaAndSeed(db: DbClient): void {
       barcode TEXT PRIMARY KEY,
       title TEXT NOT NULL,
       set_name TEXT NOT NULL DEFAULT '',
+      sub_series TEXT NOT NULL DEFAULT '',
+      set_global_number INTEGER,
+      coverage_range TEXT NOT NULL DEFAULT '',
       author TEXT NOT NULL DEFAULT '',
       volume TEXT NOT NULL DEFAULT '',
       publisher TEXT NOT NULL DEFAULT '',
@@ -153,10 +158,25 @@ export function initSchemaAndSeed(db: DbClient): void {
       default_shelf_number INTEGER,
       source_relay_id TEXT,
       processing_status TEXT NOT NULL DEFAULT 'pending' CHECK (processing_status IN ('pending', 'processing', 'done', 'error')),
+      processing_started_at TEXT,
       extracted_json TEXT,
       error_message TEXT,
       approval_status TEXT NOT NULL DEFAULT 'pending' CHECK (approval_status IN ('pending', 'approved', 'rejected')),
+      deleted_at TEXT,
+      recycle_expires_at TEXT,
       created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS book_images (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      book_barcode TEXT NOT NULL REFERENCES books(barcode) ON DELETE CASCADE,
+      file_path TEXT NOT NULL,
+      mime_type TEXT NOT NULL DEFAULT 'image/jpeg',
+      source_type TEXT NOT NULL DEFAULT 'ai_queue',
+      queue_id INTEGER,
+      created_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      deleted_at TEXT
     );
 
     CREATE TABLE IF NOT EXISTS settings (
@@ -184,11 +204,17 @@ export function initSchemaAndSeed(db: DbClient): void {
     CREATE INDEX IF NOT EXISTS idx_books_norm ON books(normalized_search);
     CREATE INDEX IF NOT EXISTS idx_loans_open ON loans(book_barcode, return_date);
     CREATE INDEX IF NOT EXISTS idx_sync_outbox_pending ON sync_outbox(synced_at, id);
+    CREATE INDEX IF NOT EXISTS idx_book_images_barcode ON book_images(book_barcode);
+    CREATE INDEX IF NOT EXISTS idx_book_images_expires ON book_images(expires_at);
   `);
 
   // Safe idempotent migrations for existing databases
   ensureColumn(db, "books", "set_name", "TEXT NOT NULL DEFAULT ''");
   db.exec("CREATE INDEX IF NOT EXISTS idx_books_set_name ON books(set_name)");
+  ensureColumn(db, "books", "sub_series", "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, "books", "set_global_number", "INTEGER");
+  ensureColumn(db, "books", "coverage_range", "TEXT NOT NULL DEFAULT ''");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_books_sub_series ON books(sub_series)");
   ensureColumn(db, "books", "pub_year", "TEXT NOT NULL DEFAULT ''");
   ensureColumn(db, "books", "edition", "TEXT NOT NULL DEFAULT ''");
   ensureColumn(db, "books", "format_size", "TEXT NOT NULL DEFAULT ''");
@@ -199,6 +225,8 @@ export function initSchemaAndSeed(db: DbClient): void {
   ensureColumn(db, "books", "updated_at", "TEXT NOT NULL DEFAULT ''");
   ensureColumn(db, "books", "deleted_at", "TEXT");
 
+  ensureColumn(db, "cabinets", "width_cm", "REAL");
+  ensureColumn(db, "cabinets", "depth_cm", "REAL");
   ensureColumn(db, "cabinets", "sync_id", "TEXT");
   ensureColumn(db, "cabinets", "updated_at", "TEXT NOT NULL DEFAULT ''");
   ensureColumn(db, "cabinets", "deleted_at", "TEXT");
@@ -218,8 +246,12 @@ export function initSchemaAndSeed(db: DbClient): void {
   ensureColumn(db, "ai_catalog_queue", "set_batch_id", "TEXT");
   ensureColumn(db, "ai_catalog_queue", "is_shelf_set", "INTEGER NOT NULL DEFAULT 0");
   ensureColumn(db, "ai_catalog_queue", "spine_extracted_json", "TEXT NOT NULL DEFAULT '[]'");
+  ensureColumn(db, "ai_catalog_queue", "processing_started_at", "TEXT");
+  ensureColumn(db, "ai_catalog_queue", "deleted_at", "TEXT");
+  ensureColumn(db, "ai_catalog_queue", "recycle_expires_at", "TEXT");
   db.exec("CREATE INDEX IF NOT EXISTS idx_ai_queue_set_batch ON ai_catalog_queue(set_batch_id)");
   db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_queue_relay_id ON ai_catalog_queue(source_relay_id)");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_ai_queue_deleted ON ai_catalog_queue(deleted_at)");
 
   backfillSyncColumns(db, "cabinets", "id");
   backfillSyncColumns(db, "books", "barcode", "created_at");
@@ -245,6 +277,8 @@ export function initSchemaAndSeed(db: DbClient): void {
     theme_preset: "otzar-orange",
     theme_mode: "light",
     map_entrance: JSON.stringify({ wall: "bottom", offset: 50 }),
+    room_dimensions: JSON.stringify({ width_m: 8, length_m: 6, wall_note: "" }),
+    volume_notation_rules: JSON.stringify([]),
     label_config: JSON.stringify({
       showLibraryName: false,
       showBookTitle: true,

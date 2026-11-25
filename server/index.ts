@@ -6,7 +6,7 @@ import { fileURLToPath } from "url";
 import { openDatabase } from "./db/adapter.ts";
 import { buildNormalizedBookSearch, enqueueSyncOutbox, initSchemaAndSeed, newSyncId } from "./db/schema.ts";
 import { searchBooksOffline, type SearchableBook } from "./search/torahSearch.ts";
-import { getAuthoritySuggestions, torahNaturalVolumeSort } from "./search/torahAuthority.ts";
+import { compareSetBooks, getAuthoritySuggestions, readCustomVolumeNotationRules } from "./search/torahAuthority.ts";
 import { registerCirculationRoutes } from "./routes/circulation.ts";
 import { registerCatalogAiRoutes } from "./routes/catalogAi.ts";
 import { registerLabelsAndAdminRoutes } from "./routes/labelsAndAdmin.ts";
@@ -148,8 +148,10 @@ export async function startOtzarServer(options: OtzarServerOptions = {}): Promis
     const cabinets = db.get<{ c: number }>("SELECT COUNT(*) AS c FROM cabinets WHERE deleted_at IS NULL")?.c ?? 0;
     const borrowers = db.get<{ c: number }>("SELECT COUNT(*) AS c FROM borrowers WHERE deleted_at IS NULL")?.c ?? 0;
     const activeLoans = db.get<{ c: number }>("SELECT COUNT(*) AS c FROM loans WHERE return_date IS NULL AND deleted_at IS NULL")?.c ?? 0;
-    const printQueue = db.get<{ c: number }>("SELECT COUNT(*) AS c FROM books WHERE label_printed = 0")?.c ?? 0;
-    const aiQueue = db.get<{ c: number }>("SELECT COUNT(*) AS c FROM ai_catalog_queue WHERE approval_status = 'pending'")?.c ?? 0;
+    const printQueue = db.get<{ c: number }>("SELECT COUNT(*) AS c FROM books WHERE label_printed = 0 AND deleted_at IS NULL")?.c ?? 0;
+    const aiQueue = db.get<{ c: number }>("SELECT COUNT(*) AS c FROM ai_catalog_queue WHERE approval_status = 'pending' AND deleted_at IS NULL")?.c ?? 0;
+    const recycleBooks = db.get<{ c: number }>("SELECT COUNT(*) AS c FROM books WHERE deleted_at IS NOT NULL AND deleted_at != ''")?.c ?? 0;
+    const recycleAi = db.get<{ c: number }>("SELECT COUNT(*) AS c FROM ai_catalog_queue WHERE deleted_at IS NOT NULL AND deleted_at != ''")?.c ?? 0;
     res.json({
       ok: true,
       driver: db.driverName,
@@ -159,7 +161,7 @@ export async function startOtzarServer(options: OtzarServerOptions = {}): Promis
       appVersion,
       migratedFrom: options.migratedFrom ?? null,
       certSummary: options.certSummary ?? null,
-      counts: { books, cabinets, borrowers, activeLoans, printQueue, aiQueue },
+      counts: { books, cabinets, borrowers, activeLoans, printQueue, aiQueue, recycleBin: recycleBooks + recycleAi },
     });
   });
 
@@ -167,7 +169,7 @@ export async function startOtzarServer(options: OtzarServerOptions = {}): Promis
   app.get("/api/settings", (req, res) => {
     const admin = isAdminRequest(req);
     const rows = db.all<{ key: string; value: string }>("SELECT key, value FROM settings");
-    const publicKeys = new Set(["library_name", "default_loan_days", "theme_preset", "theme_mode", "map_entrance"]);
+    const publicKeys = new Set(["library_name", "default_loan_days", "theme_preset", "theme_mode", "map_entrance", "room_dimensions", "volume_notation_rules"]);
     const out: Record<string, unknown> = {};
     const hasApiKey = hasConfiguredAiKeys(db);
     for (const r of rows) {
@@ -206,6 +208,9 @@ export async function startOtzarServer(options: OtzarServerOptions = {}): Promis
     if ("theme_preset" in body || "theme_mode" in body) {
       saveUiPrefs(DATA_DIR, getThemeSnapshot());
     }
+    if (["library_name", "default_loan_days", "map_entrance", "room_dimensions", "volume_notation_rules"].some((k) => k in body)) {
+      void syncService?.pushLibraryMeta().catch(() => {});
+    }
     res.json({ ok: true });
   });
 
@@ -221,16 +226,18 @@ export async function startOtzarServer(options: OtzarServerOptions = {}): Promis
   });
 
   app.post("/api/cabinets", requireAdmin, (req, res) => {
-    const { code, main_subject = "", shelves_count = 5, x = 60, y = 60, width = 160, height = 64, rotation = 0 } = req.body || {};
+    const { code, main_subject = "", shelves_count = 5, x = 60, y = 60, width = 160, height = 64, width_cm = null, depth_cm = null, rotation = 0 } = req.body || {};
     if (!code || !String(code).trim()) {
       return res.status(400).json({ error: "יש להזין קוד ארון" });
     }
+    const parsedWidthCm = width_cm != null && width_cm !== "" && Number(width_cm) > 0 ? Number(width_cm) : null;
+    const parsedDepthCm = depth_cm != null && depth_cm !== "" && Number(depth_cm) > 0 ? Number(depth_cm) : null;
     try {
       const now = new Date().toISOString();
       const syncId = newSyncId();
       const info = db.run(
-        `INSERT INTO cabinets (code, main_subject, shelves_count, x, y, width, height, rotation, sync_id, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO cabinets (code, main_subject, shelves_count, x, y, width, height, width_cm, depth_cm, rotation, sync_id, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         String(code).trim(),
         String(main_subject).trim(),
         Math.max(1, Math.min(30, Number(shelves_count) || 5)),
@@ -238,6 +245,8 @@ export async function startOtzarServer(options: OtzarServerOptions = {}): Promis
         Number(y) || 60,
         Math.max(40, Number(width) || 160),
         Math.max(40, Number(height) || 64),
+        parsedWidthCm,
+        parsedDepthCm,
         Number(rotation) || 0,
         syncId,
         now
@@ -259,9 +268,11 @@ export async function startOtzarServer(options: OtzarServerOptions = {}): Promis
     db.transaction(() => {
       for (const c of items) {
         const cabId = Number(c.id);
+        const wCm = c.width_cm != null && c.width_cm !== "" && Number(c.width_cm) > 0 ? Number(c.width_cm) : null;
+        const dCm = c.depth_cm != null && c.depth_cm !== "" && Number(c.depth_cm) > 0 ? Number(c.depth_cm) : null;
         db.run(
           `UPDATE cabinets
-           SET code = ?, main_subject = ?, shelves_count = ?, x = ?, y = ?, width = ?, height = ?, rotation = ?, updated_at = ?
+           SET code = ?, main_subject = ?, shelves_count = ?, x = ?, y = ?, width = ?, height = ?, width_cm = COALESCE(?, width_cm), depth_cm = COALESCE(?, depth_cm), rotation = ?, updated_at = ?
            WHERE id = ?`,
           String(c.code || "").trim(),
           String(c.main_subject || "").trim(),
@@ -270,6 +281,8 @@ export async function startOtzarServer(options: OtzarServerOptions = {}): Promis
           Number(c.y) || 0,
           Math.max(40, Number(c.width) || 140),
           Math.max(40, Number(c.height) || 60),
+          wCm,
+          dCm,
           Number(c.rotation) || 0,
           now,
           cabId
@@ -283,14 +296,17 @@ export async function startOtzarServer(options: OtzarServerOptions = {}): Promis
 
   app.put("/api/cabinets/:id", requireAdmin, (req, res) => {
     const id = Number(req.params.id);
-    const { code, main_subject = "", shelves_count = 5, x = 60, y = 60, width = 160, height = 64, rotation = 0 } = req.body || {};
+    const { code, main_subject = "", shelves_count = 5, x = 60, y = 60, width = 160, height = 64, width_cm, depth_cm, rotation = 0 } = req.body || {};
     if (!code || !String(code).trim()) {
       return res.status(400).json({ error: "יש להזין קוד ארון" });
     }
+    const existingCab = db.get<{ width_cm: number | null; depth_cm: number | null }>("SELECT width_cm, depth_cm FROM cabinets WHERE id = ?", id);
+    const parsedWidthCm = width_cm !== undefined ? (width_cm != null && width_cm !== "" && Number(width_cm) > 0 ? Number(width_cm) : null) : existingCab?.width_cm ?? null;
+    const parsedDepthCm = depth_cm !== undefined ? (depth_cm != null && depth_cm !== "" && Number(depth_cm) > 0 ? Number(depth_cm) : null) : existingCab?.depth_cm ?? null;
     try {
       const now = new Date().toISOString();
       db.run(
-        `UPDATE cabinets SET code = ?, main_subject = ?, shelves_count = ?, x = ?, y = ?, width = ?, height = ?, rotation = ?, updated_at = ? WHERE id = ?`,
+        `UPDATE cabinets SET code = ?, main_subject = ?, shelves_count = ?, x = ?, y = ?, width = ?, height = ?, width_cm = ?, depth_cm = ?, rotation = ?, updated_at = ? WHERE id = ?`,
         String(code).trim(),
         String(main_subject).trim(),
         Math.max(1, Math.min(30, Number(shelves_count) || 5)),
@@ -298,6 +314,8 @@ export async function startOtzarServer(options: OtzarServerOptions = {}): Promis
         Number(y) || 0,
         Math.max(40, Number(width) || 160),
         Math.max(40, Number(height) || 64),
+        parsedWidthCm,
+        parsedDepthCm,
         Number(rotation) || 0,
         now,
         id
@@ -320,6 +338,221 @@ export async function startOtzarServer(options: OtzarServerOptions = {}): Promis
       db.run("DELETE FROM cabinets WHERE id = ?", id);
     });
     res.json({ ok: true });
+  });
+
+  app.post("/api/cabinets/:id/duplicate", requireAdmin, (req, res) => {
+    const id = Number(req.params.id);
+    const orig = db.get<Record<string, unknown>>("SELECT * FROM cabinets WHERE id = ? AND deleted_at IS NULL", id);
+    if (!orig) {
+      return res.status(404).json({ error: "הארון לא נמצא" });
+    }
+    const copyBooks = Boolean(req.body?.copyBooks);
+    const baseCode = String(req.body?.code || (String(orig.code || "ארון") + "-העתק")).trim();
+    let newCode = baseCode;
+    let suffix = 2;
+    while (db.get("SELECT id FROM cabinets WHERE code = ?", newCode)) {
+      newCode = `${baseCode}-${suffix}`;
+      suffix++;
+    }
+
+    const now = new Date().toISOString();
+    const cabSyncId = newSyncId();
+    let newCabId = 0;
+    let copiedBooksCount = 0;
+
+    db.transaction(() => {
+      const info = db.run(
+        `INSERT INTO cabinets (code, main_subject, shelves_count, x, y, width, height, width_cm, depth_cm, rotation, sync_id, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        newCode,
+        String(orig.main_subject || ""),
+        Math.max(1, Number(orig.shelves_count) || 5),
+        (Number(orig.x) || 60) + 32,
+        (Number(orig.y) || 60) + 32,
+        Math.max(40, Number(orig.width) || 160),
+        Math.max(40, Number(orig.height) || 64),
+        orig.width_cm != null ? Number(orig.width_cm) : null,
+        orig.depth_cm != null ? Number(orig.depth_cm) : null,
+        Number(orig.rotation) || 0,
+        cabSyncId,
+        now
+      );
+      newCabId = Number(info.lastInsertRowid);
+      enqueueSyncOutbox(db, "cabinet", cabSyncId, "upsert", { id: newCabId });
+
+      if (copyBooks) {
+        const srcBooks = db.all<Record<string, unknown>>(
+          "SELECT * FROM books WHERE cabinet_id = ? AND deleted_at IS NULL ORDER BY shelf_number ASC, barcode ASC",
+          id
+        );
+        if (srcBooks.length > 0) {
+          const prefix = db.get<{ value: string }>("SELECT value FROM settings WHERE key = 'barcode_prefix'")?.value ?? "";
+          let nextNum = parseInt(db.get<{ value: string }>("SELECT value FROM settings WHERE key = 'next_barcode'")?.value ?? "100001", 10) || 100001;
+          for (const b of srcBooks) {
+            while (db.get("SELECT barcode FROM books WHERE barcode = ?", prefix + String(nextNum))) nextNum++;
+            const code = prefix + String(nextNum);
+            nextNum++;
+            const bSyncId = newSyncId();
+            const tagsArr = parseTags(b.tags);
+            const norm = buildNormalizedBookSearch([
+              code,
+              String(b.title || ""),
+              String(b.set_name || ""),
+              String(b.sub_series || ""),
+              String(b.author || ""),
+              String(b.volume || ""),
+              String(b.coverage_range || ""),
+              String(b.publisher || ""),
+              String(b.pub_year || ""),
+              String(b.edition || ""),
+              String(b.category || ""),
+              tagsArr.join(" "),
+              String(b.notes || ""),
+            ]);
+            db.run(
+              `INSERT INTO books (barcode, title, set_name, sub_series, set_global_number, author, volume, coverage_range, publisher, pub_year, edition, category, tags, normalized_search, cabinet_id, shelf_number, notes, status, label_printed, created_at, format_size, thickness_mm, pages_count, barcode_status, sync_id, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'available', 0, ?, ?, ?, ?, 'assigned', ?, ?)`,
+              code,
+              String(b.title || ""),
+              String(b.set_name || ""),
+              String(b.sub_series || ""),
+              b.set_global_number != null ? Number(b.set_global_number) : null,
+              String(b.author || ""),
+              String(b.volume || ""),
+              String(b.coverage_range || ""),
+              String(b.publisher || ""),
+              String(b.pub_year || ""),
+              String(b.edition || ""),
+              String(b.category || ""),
+              JSON.stringify(tagsArr),
+              norm,
+              newCabId,
+              b.shelf_number != null ? Number(b.shelf_number) : 1,
+              String(b.notes || ""),
+              now,
+              String(b.format_size || ""),
+              b.thickness_mm != null ? Number(b.thickness_mm) : null,
+              b.pages_count != null ? Number(b.pages_count) : null,
+              bSyncId,
+              now
+            );
+            enqueueSyncOutbox(db, "book", bSyncId, "upsert", { barcode: code });
+            copiedBooksCount++;
+          }
+          db.run("INSERT INTO settings (key, value) VALUES ('next_barcode', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", String(nextNum));
+        }
+      }
+    });
+
+    const created = db.get("SELECT *, (SELECT COUNT(*) FROM books b WHERE b.cabinet_id = cabinets.id AND b.deleted_at IS NULL) AS books_count FROM cabinets WHERE id = ?", newCabId);
+    res.status(201).json({ ok: true, cabinet: created, copiedBooksCount });
+  });
+
+  app.post("/api/cabinets/:id/shelves/action", requireAdmin, (req, res) => {
+    const sourceCabId = Number(req.params.id);
+    const sourceCab = db.get<Record<string, unknown>>("SELECT * FROM cabinets WHERE id = ? AND deleted_at IS NULL", sourceCabId);
+    if (!sourceCab) {
+      return res.status(404).json({ error: "הארון לא נמצא" });
+    }
+    const action = String(req.body?.action || "").trim();
+    const now = new Date().toISOString();
+
+    if (action === "add_shelf") {
+      const nextCount = Math.min(30, (Number(sourceCab.shelves_count) || 5) + 1);
+      db.run("UPDATE cabinets SET shelves_count = ?, updated_at = ? WHERE id = ?", nextCount, now, sourceCabId);
+      if (sourceCab.sync_id) enqueueSyncOutbox(db, "cabinet", String(sourceCab.sync_id), "upsert", { id: sourceCabId });
+      return res.json({ ok: true, shelves_count: nextCount });
+    }
+
+    const sourceShelf = Math.max(1, Number(req.body?.sourceShelf) || 1);
+    const targetCabId = Number(req.body?.targetCabinetId || sourceCabId);
+    const targetCab = db.get<Record<string, unknown>>("SELECT * FROM cabinets WHERE id = ? AND deleted_at IS NULL", targetCabId);
+    if (!targetCab) {
+      return res.status(404).json({ error: "ארון היעד לא נמצא" });
+    }
+    const targetShelf = Math.max(1, Math.min(Number(targetCab.shelves_count) || 5, Number(req.body?.targetShelf) || 1));
+    const filterBarcodes: string[] | null = Array.isArray(req.body?.barcodes)
+      ? req.body.barcodes.map((b: unknown) => String(b).trim()).filter(Boolean)
+      : null;
+
+    const matchingBooks = db.all<Record<string, unknown>>(
+      "SELECT * FROM books WHERE cabinet_id = ? AND shelf_number = ? AND deleted_at IS NULL ORDER BY barcode ASC",
+      sourceCabId,
+      sourceShelf
+    ).filter((b) => !filterBarcodes || filterBarcodes.includes(String(b.barcode)));
+
+    if (action === "move_books") {
+      db.transaction(() => {
+        for (const b of matchingBooks) {
+          db.run("UPDATE books SET cabinet_id = ?, shelf_number = ?, updated_at = ? WHERE barcode = ?", targetCabId, targetShelf, now, String(b.barcode));
+          if (b.sync_id) enqueueSyncOutbox(db, "book", String(b.sync_id), "upsert", { barcode: String(b.barcode) });
+        }
+      });
+      return res.json({ ok: true, movedCount: matchingBooks.length });
+    }
+
+    if (action === "copy_books") {
+      const prefix = db.get<{ value: string }>("SELECT value FROM settings WHERE key = 'barcode_prefix'")?.value ?? "";
+      let nextNum = parseInt(db.get<{ value: string }>("SELECT value FROM settings WHERE key = 'next_barcode'")?.value ?? "100001", 10) || 100001;
+      const createdBarcodes: string[] = [];
+      db.transaction(() => {
+        for (const b of matchingBooks) {
+          while (db.get("SELECT barcode FROM books WHERE barcode = ?", prefix + String(nextNum))) nextNum++;
+          const code = prefix + String(nextNum);
+          nextNum++;
+          const bSyncId = newSyncId();
+          const tagsArr = parseTags(b.tags);
+          const norm = buildNormalizedBookSearch([
+            code,
+            String(b.title || ""),
+            String(b.set_name || ""),
+            String(b.sub_series || ""),
+            String(b.author || ""),
+            String(b.volume || ""),
+            String(b.coverage_range || ""),
+            String(b.publisher || ""),
+            String(b.pub_year || ""),
+            String(b.edition || ""),
+            String(b.category || ""),
+            tagsArr.join(" "),
+            String(b.notes || ""),
+          ]);
+          db.run(
+            `INSERT INTO books (barcode, title, set_name, sub_series, set_global_number, author, volume, coverage_range, publisher, pub_year, edition, category, tags, normalized_search, cabinet_id, shelf_number, notes, status, label_printed, created_at, format_size, thickness_mm, pages_count, barcode_status, sync_id, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'available', 0, ?, ?, ?, ?, 'assigned', ?, ?)`,
+            code,
+            String(b.title || ""),
+            String(b.set_name || ""),
+            String(b.sub_series || ""),
+            b.set_global_number != null ? Number(b.set_global_number) : null,
+            String(b.author || ""),
+            String(b.volume || ""),
+            String(b.coverage_range || ""),
+            String(b.publisher || ""),
+            String(b.pub_year || ""),
+            String(b.edition || ""),
+            String(b.category || ""),
+            JSON.stringify(tagsArr),
+            norm,
+            targetCabId,
+            targetShelf,
+            String(b.notes || ""),
+            now,
+            String(b.format_size || ""),
+            b.thickness_mm != null ? Number(b.thickness_mm) : null,
+            b.pages_count != null ? Number(b.pages_count) : null,
+            bSyncId,
+            now
+          );
+          enqueueSyncOutbox(db, "book", bSyncId, "upsert", { barcode: code });
+          createdBarcodes.push(code);
+        }
+        db.run("INSERT INTO settings (key, value) VALUES ('next_barcode', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", String(nextNum));
+      });
+      return res.status(201).json({ ok: true, copiedCount: createdBarcodes.length, barcodes: createdBarcodes });
+    }
+
+    return res.status(400).json({ error: "פעולת מדף לא מוכרת" });
   });
 
   // Books API with Smart Offline Torah Search + Optional 768d Semantic Hybrid Blending
@@ -429,8 +662,11 @@ export async function startOtzarServer(options: OtzarServerOptions = {}): Promis
     const {
       title,
       set_name = "",
+      sub_series = "",
+      set_global_number = null,
       author = "",
       volume = "",
+      coverage_range = "",
       publisher = "",
       pub_year = "",
       edition = "",
@@ -447,6 +683,7 @@ export async function startOtzarServer(options: OtzarServerOptions = {}): Promis
       copiesCount = 1,
       barcode: explicitBarcode,
     } = req.body || {};
+    const parsedGlobalNum = set_global_number !== null && set_global_number !== "" && Number(set_global_number) > 0 ? Math.round(Number(set_global_number)) : null;
 
     if (!title || typeof title !== "string" || !title.trim()) {
       return res.status(400).json({ error: stringsStore.t("errors.bookTitleRequired") });
@@ -473,11 +710,11 @@ export async function startOtzarServer(options: OtzarServerOptions = {}): Promis
           nextNum++;
         }
         const syncId = newSyncId();
-        const norm = buildNormalizedBookSearch([code, title, set_name, author, volume, publisher, pub_year, edition, category, tagsArr.join(" "), notes]);
+        const norm = buildNormalizedBookSearch([code, title, set_name, sub_series, author, volume, coverage_range, publisher, pub_year, edition, category, tagsArr.join(" "), notes]);
         db.run(
-          `INSERT INTO books (barcode, title, set_name, author, volume, publisher, pub_year, edition, category, tags, normalized_search, cabinet_id, shelf_number, notes, status, label_printed, created_at, format_size, thickness_mm, pages_count, barcode_status, sync_id, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          code, title.trim(), String(set_name || "").trim(), String(author).trim(), String(volume).trim(), String(publisher).trim(),
+          `INSERT INTO books (barcode, title, set_name, sub_series, set_global_number, author, volume, coverage_range, publisher, pub_year, edition, category, tags, normalized_search, cabinet_id, shelf_number, notes, status, label_printed, created_at, format_size, thickness_mm, pages_count, barcode_status, sync_id, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)`,
+          code, title.trim(), String(set_name || "").trim(), String(sub_series || "").trim(), parsedGlobalNum, String(author).trim(), String(volume).trim(), String(coverage_range || "").trim(), String(publisher).trim(),
           String(pub_year).trim(), String(edition).trim(),
           String(category).trim(), JSON.stringify(tagsArr), norm, cabinet_id ? Number(cabinet_id) : null,
           shelf_number ? Number(shelf_number) : null, String(notes).trim(), status, now,
@@ -493,7 +730,7 @@ export async function startOtzarServer(options: OtzarServerOptions = {}): Promis
 
     const cfg = getAiConfig(db);
     if (cfg.hasAnyKey && createdBarcodes.length > 0) {
-      const embText = buildBookEmbeddingText({ title, set_name, author, volume, publisher, pub_year, edition, category, tags: tagsArr, notes });
+      const embText = buildBookEmbeddingText({ title, set_name, sub_series, coverage_range, author, volume, publisher, pub_year, edition, category, tags: tagsArr, notes });
       void generateTextEmbedding(db, embText)
         .then((vec) => {
           const blob = float32ToBlob(vec);
@@ -513,15 +750,18 @@ export async function startOtzarServer(options: OtzarServerOptions = {}): Promis
 
   app.put("/api/books/:barcode", requireAdmin, (req, res) => {
     const barcode = req.params.barcode;
-    const existing = db.get<Record<string, unknown>>("SELECT * FROM books WHERE barcode = ?", barcode);
+    const existing = db.get<Record<string, unknown>>("SELECT * FROM books WHERE barcode = ? AND deleted_at IS NULL", barcode);
     if (!existing) {
       return res.status(404).json({ error: stringsStore.t("errors.bookNotFound") });
     }
     const {
       title = existing.title,
       set_name = existing.set_name || "",
+      sub_series = existing.sub_series || "",
+      set_global_number = existing.set_global_number ?? null,
       author = existing.author,
       volume = existing.volume,
+      coverage_range = existing.coverage_range || "",
       publisher = existing.publisher,
       pub_year = existing.pub_year || "",
       edition = existing.edition || "",
@@ -539,6 +779,7 @@ export async function startOtzarServer(options: OtzarServerOptions = {}): Promis
 
     const parsedThickness = thickness_mm !== null && thickness_mm !== "" && Number(thickness_mm) > 0 ? Number(thickness_mm) : null;
     const parsedPages = pages_count !== null && pages_count !== "" && Number(pages_count) > 0 ? Math.round(Number(pages_count)) : null;
+    const parsedGlobalNum = set_global_number !== null && set_global_number !== "" && Number(set_global_number) > 0 ? Math.round(Number(set_global_number)) : null;
     const now = new Date().toISOString();
 
     const tagsArr = tags !== undefined ? parseTags(tags) : parseTags(existing.tags);
@@ -546,8 +787,10 @@ export async function startOtzarServer(options: OtzarServerOptions = {}): Promis
       barcode,
       String(title),
       String(set_name),
+      String(sub_series),
       String(author),
       String(volume),
+      String(coverage_range),
       String(publisher),
       String(pub_year),
       String(edition),
@@ -558,12 +801,15 @@ export async function startOtzarServer(options: OtzarServerOptions = {}): Promis
 
     db.run(
       `UPDATE books
-       SET title = ?, set_name = ?, author = ?, volume = ?, publisher = ?, pub_year = ?, edition = ?, category = ?, tags = ?, normalized_search = ?, cabinet_id = ?, shelf_number = ?, notes = ?, status = ?, format_size = ?, thickness_mm = ?, pages_count = ?, barcode_status = ?, updated_at = ?
+       SET title = ?, set_name = ?, sub_series = ?, set_global_number = ?, author = ?, volume = ?, coverage_range = ?, publisher = ?, pub_year = ?, edition = ?, category = ?, tags = ?, normalized_search = ?, cabinet_id = ?, shelf_number = ?, notes = ?, status = ?, format_size = ?, thickness_mm = ?, pages_count = ?, barcode_status = ?, updated_at = ?
        WHERE barcode = ?`,
       String(title).trim(),
       String(set_name || "").trim(),
+      String(sub_series || "").trim(),
+      parsedGlobalNum,
       String(author).trim(),
       String(volume).trim(),
+      String(coverage_range || "").trim(),
       String(publisher).trim(),
       String(pub_year).trim(),
       String(edition).trim(),
@@ -592,6 +838,8 @@ export async function startOtzarServer(options: OtzarServerOptions = {}): Promis
       const embText = buildBookEmbeddingText({
         title: String(title),
         set_name: String(set_name),
+        sub_series: String(sub_series),
+        coverage_range: String(coverage_range),
         author: String(author),
         volume: String(volume),
         publisher: String(publisher),
@@ -618,14 +866,16 @@ export async function startOtzarServer(options: OtzarServerOptions = {}): Promis
 
   app.delete("/api/books/:barcode", requireAdmin, (req, res) => {
     const barcode = req.params.barcode;
-    const existing = db.get<{ sync_id: string }>("SELECT sync_id FROM books WHERE barcode = ?", barcode);
+    const existing = db.get<{ sync_id: string }>("SELECT sync_id FROM books WHERE barcode = ? AND deleted_at IS NULL", barcode);
+    if (!existing) return res.status(404).json({ error: stringsStore.t("errors.bookNotFound") });
+    const nowIso = new Date().toISOString();
     db.transaction(() => {
       if (existing?.sync_id) {
-        enqueueSyncOutbox(db, "book", existing.sync_id, "delete", { barcode, deleted_at: new Date().toISOString() });
+        enqueueSyncOutbox(db, "book", existing.sync_id, "delete", { barcode, deleted_at: nowIso });
       }
-      db.run("DELETE FROM books WHERE barcode = ?", barcode);
+      db.run("UPDATE books SET deleted_at = ?, updated_at = ? WHERE barcode = ?", nowIso, nowIso, barcode);
     });
-    res.json({ ok: true });
+    res.json({ ok: true, recycled: true });
   });
 
   // Suggestions API for Authority Autocomplete (author, set_name, publisher, category)
@@ -647,7 +897,24 @@ export async function startOtzarServer(options: OtzarServerOptions = {}): Promis
        WHERE b.set_name = ? AND b.deleted_at IS NULL`,
       setName
     );
-    rows.sort((a, b) => torahNaturalVolumeSort(a.volume, b.volume));
+    const customRules = readCustomVolumeNotationRules(db);
+    rows.sort((a, b) =>
+      compareSetBooks(
+        {
+          sub_series: String(a.sub_series || ""),
+          set_global_number: a.set_global_number != null ? Number(a.set_global_number) : null,
+          volume: String(a.volume || ""),
+          title: String(a.title || ""),
+        },
+        {
+          sub_series: String(b.sub_series || ""),
+          set_global_number: b.set_global_number != null ? Number(b.set_global_number) : null,
+          volume: String(b.volume || ""),
+          title: String(b.title || ""),
+        },
+        customRules
+      )
+    );
     const cleanRows = rows.map((r) => {
       const { embedding: _drop, ...rest } = r;
       return { ...rest, tagsList: parseTags(r.tags) };

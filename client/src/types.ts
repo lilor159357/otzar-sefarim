@@ -5,6 +5,18 @@ export interface MapEntrance {
   offset: number; // percentage 10..90 along the wall
 }
 
+export interface RoomDimensions {
+  width_m: number;
+  length_m: number;
+  wall_note?: string;
+}
+
+export interface VolumeNotationRule {
+  symbol: string;
+  rank: number;
+  label?: string;
+}
+
 export interface HealthData {
   ok: boolean;
   driver: string;
@@ -24,6 +36,7 @@ export interface HealthData {
     activeLoans: number;
     printQueue: number;
     aiQueue: number;
+    recycleBin?: number;
   };
 }
 
@@ -36,6 +49,8 @@ export interface CabinetRow {
   y: number;
   width: number;
   height: number;
+  width_cm?: number | null;
+  depth_cm?: number | null;
   rotation: number;
   books_count?: number;
   sync_id?: string;
@@ -49,6 +64,9 @@ export interface BookRow {
   volume: string;
 
   set_name?: string;
+  sub_series?: string;
+  set_global_number?: number | null;
+  coverage_range?: string;
   publisher: string;
   pub_year?: string;
   edition?: string;
@@ -119,12 +137,23 @@ export interface AiQueueItem {
 
   is_shelf_set?: boolean;
 
-  spine_extracted?: Array<{ volume: string; copiesCount: number; notes?: string }> | null;
+  spine_extracted?: Array<{
+    volume: string;
+    sub_series?: string;
+    set_global_number?: number | null;
+    coverage_range?: string;
+    copiesCount: number;
+    notes?: string;
+  }> | null;
   processing_status: "pending" | "processing" | "done" | "error";
+  processing_started_at?: string | null;
   extracted: {
     title?: string;
     author?: string;
     volume?: string;
+    sub_series?: string;
+    set_global_number?: number | null;
+    coverage_range?: string;
     publisher?: string;
     pub_year?: string;
     edition?: string;
@@ -135,11 +164,73 @@ export interface AiQueueItem {
     canonical_author?: string;
     authority_suggestion?: { field: string; suggestion: string; confidence: number } | string;
     authority_unified?: { field: string; original: string; matched: string } | boolean;
-    volumes?: Array<{ volume: string; copiesCount: number; notes?: string }>;
+    volumes?: Array<{
+      volume: string;
+      sub_series?: string;
+      set_global_number?: number | null;
+      coverage_range?: string;
+      copiesCount: number;
+      notes?: string;
+    }>;
   } | null;
   error_message: string | null;
   approval_status: "pending" | "approved" | "rejected";
+  deleted_at?: string | null;
+  recycle_expires_at?: string | null;
   created_at: string;
+}
+
+export interface BookImageMeta {
+  id: number;
+  book_barcode: string;
+  mime_type: string;
+  source_type: string;
+  queue_id?: number | null;
+  created_at: string;
+  expires_at: string;
+  days_remaining: number;
+}
+
+export interface RecycleBinBookItem {
+  barcode: string;
+  title: string;
+  author: string;
+  volume: string;
+  set_name?: string;
+  sub_series?: string;
+  set_global_number?: number | null;
+  coverage_range?: string;
+  publisher?: string;
+  pub_year?: string;
+  edition?: string;
+  category?: string;
+  tags?: string[];
+  cabinet_id?: number | null;
+  cabinet_code?: string | null;
+  shelf_number?: number | null;
+  notes?: string;
+  deleted_at: string;
+  days_remaining: number;
+  images_count: number;
+}
+
+export interface RecycleBinAiItem {
+  id: number;
+  has_image: boolean;
+  image_count: number;
+  is_shelf_set?: boolean;
+  processing_status: string;
+  extracted: AiQueueItem["extracted"];
+  deleted_at: string;
+  recycle_expires_at: string;
+  days_remaining: number;
+  created_at: string;
+}
+
+export interface RecycleBinData {
+  books: RecycleBinBookItem[];
+  aiItems: RecycleBinAiItem[];
+  retentionDays: number;
 }
 
 export interface AiPoolKeyStatus {
@@ -161,6 +252,9 @@ export interface ShelvingShelfReport {
   booksCount: number;
   totalThicknessMm: number;
   totalThicknessCm: number;
+  estimatedCapacityCm?: number | null;
+  fillPercent?: number | null;
+  isOverloaded?: boolean;
   avgThicknessMm: number | null;
   knownThicknessCount: number;
   missingThicknessCount: number;
@@ -172,6 +266,9 @@ export interface ShelvingCabinetReport {
   code: string;
   main_subject: string;
   shelves_count: number;
+  width_cm?: number | null;
+  depth_cm?: number | null;
+  footprintSqm?: number | null;
   booksCount: number;
   totalThicknessMm: number;
   totalThicknessCm: number;
@@ -183,6 +280,15 @@ export interface ShelvingCabinetReport {
 }
 
 export interface ShelvingReport {
+  room?: {
+    width_m: number;
+    length_m: number;
+    areaSqm: number;
+    cabinetsFootprintSqm: number;
+    cabinetsKnownCount: number;
+    aisleFreeSqm: number;
+    aisleFreePercent: number;
+  };
   totals: {
     totalBooks: number;
     assignedBooks: number;
@@ -200,6 +306,30 @@ export interface ShelvingReport {
     missingThicknessCount: number;
   };
   cabinets: ShelvingCabinetReport[];
+}
+
+export interface SmartShelfMove {
+  id: string;
+  title: string;
+  description: string;
+  reason: string;
+  severity: "info" | "warning" | "high";
+  source: "deterministic" | "ai";
+  fromCabinetId?: number;
+  fromCabinetCode?: string;
+  fromShelf?: number;
+  toCabinetId?: number;
+  toCabinetCode?: string;
+  toShelf?: number;
+  barcodes?: string[];
+  setName?: string;
+}
+
+export interface SmartShelfPlan {
+  moves: SmartShelfMove[];
+  summary: string;
+  usedAi: boolean;
+  aiError?: string | null;
 }
 
 export const FORMAT_SIZE_OPTIONS = ["רגיל", "גדול (פוליו)", "בינוני", "קטן (כיס)"] as const;

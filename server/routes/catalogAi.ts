@@ -14,6 +14,8 @@ import {
   generateTextEmbedding,
   getAiConfig,
   getAiKeyPoolPublicStatus,
+  markApiKeySlowCooldown,
+  reanalyzeApprovedBook,
   saveAiKeyPool,
   testGeminiConnection,
   testSinglePoolKey,
@@ -23,7 +25,12 @@ import {
 } from "../ai/geminiService.ts";
 import { findAuthorityMatch } from "../search/torahAuthority.ts";
 
+const RETENTION_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
 let isQueueWorkerRunning = false;
+const activeQueueAborts = new Map<
+  number,
+  { controller: AbortController; reason?: "manual_refresh" | "timeout" | "deleted"; activeApiKey?: string }
+>();
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -58,7 +65,9 @@ function parseExtraImages(raw: unknown): string[] {
   }
 }
 
-function parseSpineVolumes(raw: unknown): Array<{ volume: string; copiesCount: number; notes?: string }> {
+function parseSpineVolumes(
+  raw: unknown
+): Array<{ volume: string; sub_series?: string; set_global_number?: number | null; coverage_range?: string; copiesCount: number; notes?: string }> {
   if (typeof raw !== "string" || !raw) return [];
   try {
     const p = JSON.parse(raw);
@@ -101,9 +110,121 @@ function lookupExistingSetContext(db: DbClient, setName: string): ExistingSetCon
   };
 }
 
+function isDiskFileStillReferenced(db: DbClient, filePath: string, excludeQueueId?: number): boolean {
+  const clean = String(filePath || "").trim();
+  if (!clean) return false;
+  const nowIso = new Date().toISOString();
+  const imgRef = db.get<{ c: number }>(
+    `SELECT COUNT(*) AS c FROM book_images bi
+     LEFT JOIN books b ON b.barcode = bi.book_barcode
+     WHERE bi.file_path = ?
+       AND (
+         (bi.deleted_at IS NULL AND bi.expires_at > ?)
+         OR (b.barcode IS NOT NULL AND b.deleted_at IS NOT NULL)
+       )`,
+    clean,
+    nowIso
+  );
+  if ((imgRef?.c ?? 0) > 0) return true;
+
+  const qRows = db.all<{ id: number; image_path: string; extra_images_json: string }>(
+    `SELECT id, image_path, extra_images_json FROM ai_catalog_queue
+     WHERE (approval_status = 'pending' AND deleted_at IS NULL)
+        OR deleted_at IS NOT NULL`
+  );
+  for (const r of qRows) {
+    if (excludeQueueId != null && r.id === excludeQueueId) continue;
+    if (getItemImagePaths(r).includes(clean)) return true;
+  }
+  return false;
+}
+
+function safeUnlinkIfOrphaned(db: DbClient, filePath: string, excludeQueueId?: number): number {
+  const clean = String(filePath || "").trim();
+  if (!clean || isDiskFileStillReferenced(db, clean, excludeQueueId)) return 0;
+  if (fs.existsSync(clean)) {
+    try {
+      const st = fs.statSync(clean);
+      fs.unlinkSync(clean);
+      return st.size;
+    } catch {}
+  }
+  return 0;
+}
+
+function purgeExpiredRecycleAndImages(db: DbClient): void {
+  const nowMs = Date.now();
+  const nowIso = new Date(nowMs).toISOString();
+  const cutoffIso = new Date(nowMs - RETENTION_DAYS_MS).toISOString();
+
+  const expiredImages = db.all<{ id: number; file_path: string }>(
+    "SELECT id, file_path FROM book_images WHERE expires_at <= ? OR deleted_at IS NOT NULL",
+    nowIso
+  );
+  if (expiredImages.length > 0) {
+    db.transaction(() => {
+      for (const img of expiredImages) {
+        db.run("DELETE FROM book_images WHERE id = ?", img.id);
+      }
+    });
+    for (const img of expiredImages) {
+      safeUnlinkIfOrphaned(db, img.file_path);
+    }
+  }
+
+  const expiredBooks = db.all<{ barcode: string }>(
+    "SELECT barcode FROM books WHERE deleted_at IS NOT NULL AND deleted_at != '' AND deleted_at <= ?",
+    cutoffIso
+  );
+  if (expiredBooks.length > 0) {
+    const orphanPaths: string[] = [];
+    db.transaction(() => {
+      for (const bk of expiredBooks) {
+        const imgs = db.all<{ file_path: string }>("SELECT file_path FROM book_images WHERE book_barcode = ?", bk.barcode);
+        for (const im of imgs) orphanPaths.push(im.file_path);
+        db.run("DELETE FROM book_images WHERE book_barcode = ?", bk.barcode);
+        db.run("DELETE FROM books WHERE barcode = ?", bk.barcode);
+      }
+    });
+    for (const p of orphanPaths) safeUnlinkIfOrphaned(db, p);
+  }
+
+  const expiredQueue = db.all<{ id: number; image_path: string; extra_images_json: string }>(
+    `SELECT id, image_path, extra_images_json FROM ai_catalog_queue
+     WHERE deleted_at IS NOT NULL AND deleted_at != ''
+       AND (
+         (recycle_expires_at IS NOT NULL AND recycle_expires_at != '' AND recycle_expires_at <= ?)
+         OR ((recycle_expires_at IS NULL OR recycle_expires_at = '') AND deleted_at <= ?)
+       )`,
+    nowIso,
+    cutoffIso
+  );
+  if (expiredQueue.length > 0) {
+    const qPaths: string[] = [];
+    db.transaction(() => {
+      for (const q of expiredQueue) {
+        for (const p of getItemImagePaths(q)) qPaths.push(p);
+        db.run("DELETE FROM ai_catalog_queue WHERE id = ?", q.id);
+      }
+    });
+    for (const p of qPaths) safeUnlinkIfOrphaned(db, p);
+  }
+}
+
 export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: string, onSyncTrigger?: () => void, t: StringsTranslateFn = fallbackT) {
   const aiImagesDir = path.join(dataDir, "ai_images");
   fs.mkdirSync(aiImagesDir, { recursive: true });
+
+  try {
+    db.run(
+      "UPDATE ai_catalog_queue SET processing_status = 'pending', processing_started_at = NULL WHERE processing_status = 'processing' AND deleted_at IS NULL"
+    );
+    purgeExpiredRecycleAndImages(db);
+  } catch {}
+  const retentionTimer = setInterval(() => {
+    try { purgeExpiredRecycleAndImages(db); } catch {}
+  }, 12 * 60 * 60 * 1000);
+  if (typeof retentionTimer.unref === "function") retentionTimer.unref();
 
   async function processPendingQueue() {
     if (isQueueWorkerRunning) return;
@@ -118,12 +239,17 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
           is_shelf_set: number;
           extracted_json: string;
         }>(
-          "SELECT id, image_path, extra_images_json, is_shelf_set, extracted_json FROM ai_catalog_queue WHERE processing_status = 'pending' AND approval_status = 'pending' ORDER BY id ASC LIMIT 1"
+          "SELECT id, image_path, extra_images_json, is_shelf_set, extracted_json FROM ai_catalog_queue WHERE processing_status = 'pending' AND approval_status = 'pending' AND deleted_at IS NULL ORDER BY id ASC LIMIT 1"
         );
         if (!nextItem) break;
 
+        const controller = new AbortController();
+        const abortEntry: { controller: AbortController; reason?: "manual_refresh" | "timeout" | "deleted"; activeApiKey?: string } = { controller };
+        activeQueueAborts.set(nextItem.id, abortEntry);
+
         db.run(
-          "UPDATE ai_catalog_queue SET processing_status = 'processing', error_message = NULL WHERE id = ?",
+          "UPDATE ai_catalog_queue SET processing_status = 'processing', processing_started_at = ?, error_message = NULL WHERE id = ?",
+          new Date().toISOString(),
           nextItem.id
         );
 
@@ -168,7 +294,14 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
               db,
               titleParts,
               spineParts,
-              existingSetCtx
+              existingSetCtx,
+              {
+                abortSignal: controller.signal,
+                timeoutMs: 60_000,
+                onKeyPicked: (entry) => {
+                  abortEntry.activeApiKey = entry.apiKey;
+                },
+              }
             );
             if (presetSetName) {
               setExtracted.set_name = presetSetName;
@@ -206,18 +339,27 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
               }
             }
 
-            db.run(
-              "UPDATE ai_catalog_queue SET processing_status = 'done', extracted_json = ?, spine_extracted_json = ?, error_message = NULL WHERE id = ?",
-              JSON.stringify(setExtracted),
-              JSON.stringify(setExtracted.volumes || []),
-              nextItem.id
-            );
+            const curRow = db.get<{ deleted_at: string | null }>("SELECT deleted_at FROM ai_catalog_queue WHERE id = ?", nextItem.id);
+            if (!curRow?.deleted_at) {
+              db.run(
+                "UPDATE ai_catalog_queue SET processing_status = 'done', processing_started_at = NULL, extracted_json = ?, spine_extracted_json = ?, error_message = NULL WHERE id = ?",
+                JSON.stringify(setExtracted),
+                JSON.stringify(setExtracted.volumes || []),
+                nextItem.id
+              );
+            }
           } else {
             const imageBuffers = paths.map((p) => ({
               buffer: fs.readFileSync(p),
               mimeType: detectMimeFromExt(p),
             }));
-            const extracted: ExtractedBookMetadata = await analyzeBookCoverImage(db, imageBuffers);
+            const extracted: ExtractedBookMetadata = await analyzeBookCoverImage(db, imageBuffers, "image/jpeg", {
+              abortSignal: controller.signal,
+              timeoutMs: 45_000,
+              onKeyPicked: (entry) => {
+                abortEntry.activeApiKey = entry.apiKey;
+              },
+            });
             if (presetSetName) {
               extracted.set_name = presetSetName;
             }
@@ -267,22 +409,35 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
               }
             }
 
+            const curRow = db.get<{ deleted_at: string | null }>("SELECT deleted_at FROM ai_catalog_queue WHERE id = ?", nextItem.id);
+            if (!curRow?.deleted_at) {
+              db.run(
+                "UPDATE ai_catalog_queue SET processing_status = 'done', processing_started_at = NULL, extracted_json = ?, error_message = NULL WHERE id = ?",
+                JSON.stringify(extracted),
+                nextItem.id
+              );
+            }
+          }
+        } catch (err) {
+          const curRow = db.get<{ deleted_at: string | null }>("SELECT deleted_at FROM ai_catalog_queue WHERE id = ?", nextItem.id);
+          if (abortEntry.reason === "manual_refresh" && !curRow?.deleted_at) {
             db.run(
-              "UPDATE ai_catalog_queue SET processing_status = 'done', extracted_json = ?, error_message = NULL WHERE id = ?",
-              JSON.stringify(extracted),
+              "UPDATE ai_catalog_queue SET processing_status = 'pending', processing_started_at = NULL, error_message = NULL WHERE id = ?",
+              nextItem.id
+            );
+          } else if (abortEntry.reason !== "deleted" && !curRow?.deleted_at) {
+            db.run(
+              "UPDATE ai_catalog_queue SET processing_status = 'error', processing_started_at = NULL, error_message = ? WHERE id = ?",
+              formatGeminiError(err),
               nextItem.id
             );
           }
-        } catch (err) {
-          db.run(
-            "UPDATE ai_catalog_queue SET processing_status = 'error', error_message = ? WHERE id = ?",
-            formatGeminiError(err),
-            nextItem.id
-          );
+        } finally {
+          activeQueueAborts.delete(nextItem.id);
         }
 
         const more = db.get<{ c: number }>(
-          "SELECT COUNT(*) AS c FROM ai_catalog_queue WHERE processing_status = 'pending' AND approval_status = 'pending'"
+          "SELECT COUNT(*) AS c FROM ai_catalog_queue WHERE processing_status = 'pending' AND approval_status = 'pending' AND deleted_at IS NULL"
         );
         if ((more?.c ?? 0) > 0) {
           const cfg = getAiConfig(db);
@@ -343,8 +498,8 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
 
     const rows = db.all<Record<string, unknown>>(
       forceAll
-        ? "SELECT barcode, sync_id, title, set_name, author, volume, publisher, pub_year, edition, category, tags, notes FROM books WHERE deleted_at IS NULL"
-        : "SELECT barcode, sync_id, title, set_name, author, volume, publisher, pub_year, edition, category, tags, notes FROM books WHERE deleted_at IS NULL AND embedding IS NULL"
+        ? "SELECT barcode, sync_id, title, set_name, sub_series, coverage_range, author, volume, publisher, pub_year, edition, category, tags, notes FROM books WHERE deleted_at IS NULL"
+        : "SELECT barcode, sync_id, title, set_name, sub_series, coverage_range, author, volume, publisher, pub_year, edition, category, tags, notes FROM books WHERE deleted_at IS NULL AND embedding IS NULL"
     );
 
     let indexed = 0;
@@ -357,6 +512,8 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
         const text = buildBookEmbeddingText({
           title: String(b.title || ""),
           set_name: String(b.set_name || ""),
+          sub_series: String(b.sub_series || ""),
+          coverage_range: String(b.coverage_range || ""),
           author: String(b.author || ""),
           volume: String(b.volume || ""),
           publisher: String(b.publisher || ""),
@@ -400,28 +557,31 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
     });
   });
 
-  // Cleanup approved/rejected cover images from disk
+  // Cleanup unreferenced/expired cover images from disk (preserves 30-day retained book_images & Recycle Bin)
   app.post("/api/ai/cleanup-images", requireAdmin, (_req, res) => {
+    purgeExpiredRecycleAndImages(db);
     const rows = db.all<{ id: number; image_path: string; extra_images_json: string }>(
-      "SELECT id, image_path, extra_images_json FROM ai_catalog_queue WHERE approval_status IN ('approved', 'rejected') AND (image_path != '' OR extra_images_json != '[]')"
+      "SELECT id, image_path, extra_images_json FROM ai_catalog_queue WHERE approval_status IN ('approved', 'rejected') AND deleted_at IS NULL AND (image_path != '' OR extra_images_json != '[]')"
     );
     let deletedFiles = 0;
     let freedBytes = 0;
-    db.transaction(() => {
-      for (const r of rows) {
-        for (const p of getItemImagePaths(r)) {
-          if (p && fs.existsSync(p)) {
-            try {
-              const st = fs.statSync(p);
-              freedBytes += st.size;
-              fs.unlinkSync(p);
-              deletedFiles++;
-            } catch {}
+    for (const r of rows) {
+      let allOrphaned = true;
+      for (const p of getItemImagePaths(r)) {
+        if (isDiskFileStillReferenced(db, p, r.id)) {
+          allOrphaned = false;
+        } else {
+          const freed = safeUnlinkIfOrphaned(db, p, r.id);
+          if (freed > 0) {
+            freedBytes += freed;
+            deletedFiles++;
           }
         }
+      }
+      if (allOrphaned) {
         db.run("UPDATE ai_catalog_queue SET image_path = '', extra_images_json = '[]' WHERE id = ?", r.id);
       }
-    });
+    }
     res.json({
       ok: true,
       deletedFiles,
@@ -432,7 +592,7 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
   // List AI queue items
   app.get("/api/ai-queue", requireAdmin, (req, res) => {
     const approval = typeof req.query.approval === "string" ? req.query.approval : "pending";
-    const whereClause = approval === "all" ? "" : "WHERE approval_status = 'pending'";
+    const whereClause = approval === "all" ? "WHERE deleted_at IS NULL" : "WHERE approval_status = 'pending' AND deleted_at IS NULL";
     const rows = db.all<Record<string, unknown>>(
       `SELECT * FROM ai_catalog_queue ${whereClause} ORDER BY id ASC`
     );
@@ -456,6 +616,7 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
         is_shelf_set: Boolean(r.is_shelf_set),
         spine_extracted: parseSpineVolumes(r.spine_extracted_json),
         processing_status: r.processing_status,
+        processing_started_at: r.processing_started_at || null,
         extracted,
         error_message: r.error_message || null,
         approval_status: r.approval_status,
@@ -675,7 +836,7 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
   // Retry all failed items in queue
   app.post("/api/ai-queue/retry-errors", requireAdmin, (_req, res) => {
     const info = db.run(
-      "UPDATE ai_catalog_queue SET processing_status = 'pending', error_message = NULL WHERE processing_status = 'error' AND approval_status = 'pending'"
+      "UPDATE ai_catalog_queue SET processing_status = 'pending', processing_started_at = NULL, error_message = NULL WHERE processing_status = 'error' AND approval_status = 'pending' AND deleted_at IS NULL"
     );
     void processPendingQueue();
     res.json({ ok: true, requeued: info.changes });
@@ -685,26 +846,54 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
   app.post("/api/ai-queue/:id/retry", requireAdmin, (req, res) => {
     const id = Number(req.params.id);
     db.run(
-      "UPDATE ai_catalog_queue SET processing_status = 'pending', error_message = NULL WHERE id = ?",
+      "UPDATE ai_catalog_queue SET processing_status = 'pending', processing_started_at = NULL, error_message = NULL WHERE id = ? AND deleted_at IS NULL",
       id
     );
     void processPendingQueue();
     res.json({ ok: true });
   });
 
+  // Manual instant refresh + API key rotation for stuck/slow AI decoding item
+  app.post("/api/ai-queue/:id/refresh", requireAdmin, (req, res) => {
+    const id = Number(req.params.id);
+    const row = db.get<{ id: number; deleted_at: string | null }>(
+      "SELECT id, deleted_at FROM ai_catalog_queue WHERE id = ?",
+      id
+    );
+    if (!row || row.deleted_at) {
+      return res.status(404).json({ error: t("errors.aiQueueItemNotFound") });
+    }
+    const active = activeQueueAborts.get(id);
+    let rotatedKey = false;
+    if (active) {
+      active.reason = "manual_refresh";
+      if (active.activeApiKey) {
+        markApiKeySlowCooldown(active.activeApiKey, 25_000, "הוחלף ידנית עקב חשיבה ארוכה");
+        rotatedKey = true;
+      }
+      try { active.controller.abort(new Error("MANUAL_REFRESH")); } catch {}
+    }
+    db.run(
+      "UPDATE ai_catalog_queue SET processing_status = 'pending', processing_started_at = NULL, error_message = NULL WHERE id = ? AND deleted_at IS NULL",
+      id
+    );
+    setTimeout(() => { void processPendingQueue(); }, 120);
+    void processPendingQueue();
+    res.json({ ok: true, aborted: Boolean(active), rotatedKey });
+  });
+
   // Approve queue item -> creates book(s) with sequential barcodes + print queue + optional async embedding
   app.post("/api/ai-queue/:id/approve", requireAdmin, (req, res) => {
     const id = Number(req.params.id);
-    const existing = db.get<{ id: number }>("SELECT id FROM ai_catalog_queue WHERE id = ?", id);
-    if (!existing) {
-      return res.status(404).json({ error: t("errors.aiQueueItemNotFound") });
-    }
 
     const {
       title,
       set_name = "",
+      sub_series = "",
+      set_global_number = null,
       author = "",
       volume = "",
+      coverage_range = "",
       publisher = "",
       pub_year = "",
       edition = "",
@@ -721,11 +910,21 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
       volumes, // optional array for batch shelf-set approval
     } = req.body || {};
 
+    const existingRow = db.get<{ id: number; image_path: string; extra_images_json: string }>(
+      "SELECT id, image_path, extra_images_json FROM ai_catalog_queue WHERE id = ? AND deleted_at IS NULL",
+      id
+    );
+    if (!existingRow) {
+      return res.status(404).json({ error: t("errors.aiQueueItemNotFound") });
+    }
+
     const prefix = db.get<{ value: string }>("SELECT value FROM settings WHERE key = 'barcode_prefix'")?.value ?? "";
     let nextNum =
       parseInt(db.get<{ value: string }>("SELECT value FROM settings WHERE key = 'next_barcode'")?.value ?? "100001", 10) ||
       100001;
     const now = new Date().toISOString();
+    const expiresAt = new Date(Date.now() + RETENTION_DAYS_MS).toISOString();
+    const queueImagePaths = getItemImagePaths(existingRow).filter((p) => fs.existsSync(p));
     const tagsArr = parseTags(tags);
     const createdBarcodes: string[] = [];
 
@@ -733,6 +932,10 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
       thickness_mm !== null && thickness_mm !== "" && Number(thickness_mm) > 0 ? Number(thickness_mm) : null;
     const parsedPages =
       pages_count !== null && pages_count !== "" && Number(pages_count) > 0 ? Math.round(Number(pages_count)) : null;
+    const parsedTopGlobalNum =
+      set_global_number !== null && set_global_number !== "" && Number(set_global_number) > 0
+        ? Math.round(Number(set_global_number))
+        : null;
 
     // Batch shelf-set approval
     if (Array.isArray(volumes) && volumes.length > 0) {
@@ -740,8 +943,16 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
         for (const volItem of volumes) {
           const vName = String(volItem?.volume || "").trim();
           if (!vName) continue;
+          const vSubSeries = String(volItem?.sub_series ?? sub_series ?? "").trim();
+          const vGlobalNumRaw = volItem?.set_global_number != null && volItem?.set_global_number !== "" ? Number(volItem.set_global_number) : parsedTopGlobalNum;
+          const vGlobalNum = vGlobalNumRaw != null && Number.isFinite(vGlobalNumRaw) && vGlobalNumRaw > 0 ? Math.round(vGlobalNumRaw) : null;
+          const vCoverage = String(volItem?.coverage_range ?? coverage_range ?? "").trim();
           const vCopies = Math.max(1, Math.min(20, Number(volItem.copiesCount) || 1));
-          const vTitle = title ? String(title).trim() : set_name ? `${set_name} ${vName}` : vName;
+          const vTitle = title
+            ? String(title).trim()
+            : set_name
+            ? (vSubSeries ? `${set_name} - ${vSubSeries} (${vName})` : `${set_name} ${vName}`)
+            : vName;
           const vNotes = volItem.notes ? `${notes ? notes + " | " : ""}${volItem.notes}` : notes;
 
           for (let c = 0; c < vCopies; c++) {
@@ -755,8 +966,10 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
               code,
               vTitle,
               String(set_name || ""),
+              vSubSeries,
               String(author || ""),
               vName,
+              vCoverage,
               String(publisher || ""),
               String(pub_year || ""),
               String(edition || ""),
@@ -766,13 +979,16 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
             ]);
 
             db.run(
-              `INSERT INTO books (barcode, title, set_name, author, volume, publisher, pub_year, edition, category, tags, normalized_search, cabinet_id, shelf_number, notes, status, label_printed, created_at, format_size, thickness_mm, pages_count, barcode_status, sync_id, updated_at) 
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, 'assigned', ?, ?)`,
+              `INSERT INTO books (barcode, title, set_name, sub_series, set_global_number, author, volume, coverage_range, publisher, pub_year, edition, category, tags, normalized_search, cabinet_id, shelf_number, notes, status, label_printed, created_at, format_size, thickness_mm, pages_count, barcode_status, sync_id, updated_at) 
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, 'assigned', ?, ?)`,
               code,
               vTitle,
               String(set_name || "").trim(),
+              vSubSeries,
+              vGlobalNum,
               String(author || "").trim(),
               vName,
+              vCoverage,
               String(publisher || "").trim(),
               String(pub_year || "").trim(),
               String(edition || "").trim(),
@@ -790,6 +1006,17 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
               syncId,
               now
             );
+            for (const imgPath of queueImagePaths) {
+              db.run(
+                "INSERT INTO book_images (book_barcode, file_path, mime_type, source_type, queue_id, created_at, expires_at) VALUES (?, ?, ?, 'ai_queue', ?, ?, ?)",
+                code,
+                imgPath,
+                detectMimeFromExt(imgPath),
+                id,
+                now,
+                expiresAt
+              );
+            }
             enqueueSyncOutbox(db, "book", syncId, "upsert", { barcode: code });
             createdBarcodes.push(code);
           }
@@ -819,8 +1046,10 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
             code,
             String(title),
             String(set_name),
+            String(sub_series),
             String(author),
             String(volume),
+            String(coverage_range),
             String(publisher),
             String(pub_year),
             String(edition),
@@ -829,13 +1058,16 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
             String(notes),
           ]);
           db.run(
-            `INSERT INTO books (barcode, title, set_name, author, volume, publisher, pub_year, edition, category, tags, normalized_search, cabinet_id, shelf_number, notes, status, label_printed, created_at, format_size, thickness_mm, pages_count, barcode_status, sync_id, updated_at) 
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, 'assigned', ?, ?)`,
+            `INSERT INTO books (barcode, title, set_name, sub_series, set_global_number, author, volume, coverage_range, publisher, pub_year, edition, category, tags, normalized_search, cabinet_id, shelf_number, notes, status, label_printed, created_at, format_size, thickness_mm, pages_count, barcode_status, sync_id, updated_at) 
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, 'assigned', ?, ?)`,
             code,
             String(title).trim(),
             String(set_name || "").trim(),
+            String(sub_series || "").trim(),
+            parsedTopGlobalNum,
             String(author).trim(),
             String(volume).trim(),
+            String(coverage_range || "").trim(),
             String(publisher).trim(),
             String(pub_year).trim(),
             String(edition).trim(),
@@ -853,6 +1085,17 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
             syncId,
             now
           );
+          for (const imgPath of queueImagePaths) {
+            db.run(
+              "INSERT INTO book_images (book_barcode, file_path, mime_type, source_type, queue_id, created_at, expires_at) VALUES (?, ?, ?, 'ai_queue', ?, ?, ?)",
+              code,
+              imgPath,
+              detectMimeFromExt(imgPath),
+              id,
+              now,
+              expiresAt
+            );
+          }
           enqueueSyncOutbox(db, "book", syncId, "upsert", { barcode: code });
           createdBarcodes.push(code);
         }
@@ -870,6 +1113,8 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
       const embText = buildBookEmbeddingText({
         title,
         set_name,
+        sub_series,
+        coverage_range,
         author,
         volume,
         publisher,
@@ -898,27 +1143,381 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
 
   app.post("/api/ai-queue/:id/reject", requireAdmin, (req, res) => {
     const id = Number(req.params.id);
-    db.run("UPDATE ai_catalog_queue SET approval_status = 'rejected' WHERE id = ?", id);
-    res.json({ ok: true });
+    const active = activeQueueAborts.get(id);
+    if (active) {
+      active.reason = "deleted";
+      try { active.controller.abort(new Error("SOFT_DELETED")); } catch {}
+    }
+    const nowIso = new Date().toISOString();
+    const expiresAt = new Date(Date.now() + RETENTION_DAYS_MS).toISOString();
+    db.run(
+      `UPDATE ai_catalog_queue
+       SET approval_status = 'rejected',
+           processing_status = CASE WHEN processing_status = 'processing' THEN 'pending' ELSE processing_status END,
+           processing_started_at = NULL,
+           deleted_at = COALESCE(deleted_at, ?),
+           recycle_expires_at = COALESCE(recycle_expires_at, ?)
+       WHERE id = ?`,
+      nowIso,
+      expiresAt,
+      id
+    );
+    res.json({ ok: true, recycled: true, expiresAt });
   });
 
   app.delete("/api/ai-queue/:id", requireAdmin, (req, res) => {
     const id = Number(req.params.id);
-    const row = db.get<{ image_path: string; extra_images_json: string }>(
-      "SELECT image_path, extra_images_json FROM ai_catalog_queue WHERE id = ?",
+    const active = activeQueueAborts.get(id);
+    if (active) {
+      active.reason = "deleted";
+      try { active.controller.abort(new Error("SOFT_DELETED")); } catch {}
+    }
+    const nowIso = new Date().toISOString();
+    const expiresAt = new Date(Date.now() + RETENTION_DAYS_MS).toISOString();
+    db.run(
+      `UPDATE ai_catalog_queue
+       SET approval_status = 'rejected',
+           processing_status = CASE WHEN processing_status = 'processing' THEN 'pending' ELSE processing_status END,
+           processing_started_at = NULL,
+           deleted_at = COALESCE(deleted_at, ?),
+           recycle_expires_at = COALESCE(recycle_expires_at, ?)
+       WHERE id = ?`,
+      nowIso,
+      expiresAt,
       id
     );
-    if (row) {
-      for (const p of getItemImagePaths(row)) {
-        if (p && fs.existsSync(p)) {
-          try {
-            fs.unlinkSync(p);
-          } catch {}
+    res.json({ ok: true, recycled: true, expiresAt });
+  });
+
+  // --- 30-Day Retained Book Images & Post-Approval AI Re-Edit ---
+  app.get("/api/books/:barcode/images", requireAdmin, (req, res) => {
+    const barcode = String(req.params.barcode || "").trim();
+    const nowMs = Date.now();
+    const nowIso = new Date(nowMs).toISOString();
+    const rows = db.all<{
+      id: number;
+      book_barcode: string;
+      file_path: string;
+      mime_type: string;
+      source_type: string;
+      created_at: string;
+      expires_at: string;
+    }>(
+      "SELECT id, book_barcode, file_path, mime_type, source_type, created_at, expires_at FROM book_images WHERE book_barcode = ? AND deleted_at IS NULL AND expires_at > ? ORDER BY id ASC",
+      barcode,
+      nowIso
+    );
+    const images = rows
+      .filter((r) => fs.existsSync(r.file_path))
+      .map((r) => ({
+        id: r.id,
+        book_barcode: r.book_barcode,
+        mime_type: r.mime_type || detectMimeFromExt(r.file_path),
+        source_type: r.source_type,
+        created_at: r.created_at,
+        expires_at: r.expires_at,
+        days_remaining: Math.max(1, Math.ceil((Date.parse(r.expires_at) - nowMs) / 86_400_000)),
+      }));
+    res.json({ images });
+  });
+
+  app.get("/api/books/:barcode/images/:imageId", requireAdmin, (req, res) => {
+    const barcode = String(req.params.barcode || "").trim();
+    const imageId = Number(req.params.imageId);
+    const row = db.get<{ file_path: string; mime_type: string }>(
+      "SELECT file_path, mime_type FROM book_images WHERE id = ? AND book_barcode = ? AND deleted_at IS NULL",
+      imageId,
+      barcode
+    );
+    if (!row || !row.file_path || !fs.existsSync(row.file_path)) {
+      return res.status(404).send("Image not found");
+    }
+    res.type(row.mime_type || detectMimeFromExt(row.file_path));
+    res.sendFile(path.resolve(row.file_path));
+  });
+
+  app.post("/api/books/:barcode/ai-reanalyze", requireAdmin, async (req, res) => {
+    const barcode = String(req.params.barcode || "").trim();
+    const book = db.get<Record<string, unknown>>(
+      "SELECT * FROM books WHERE barcode = ? AND deleted_at IS NULL",
+      barcode
+    );
+    if (!book) {
+      return res.status(404).json({ error: t("errors.bookNotFound") });
+    }
+    const cfg = getAiConfig(db);
+    if (!cfg.hasAnyKey) {
+      return res.status(400).json({ error: t("errors.aiNoActiveKeys") });
+    }
+
+    const customPrompt = typeof req.body?.customPrompt === "string" ? req.body.customPrompt.trim() : "";
+    const rawExtraImages = Array.isArray(req.body?.extraImages) ? req.body.extraImages.slice(0, 6) : [];
+    const saveExtraImages = req.body?.saveExtraImages !== false;
+
+    const nowIso = new Date().toISOString();
+    const expiresAt = new Date(Date.now() + RETENTION_DAYS_MS).toISOString();
+    const savedRows = db.all<{ id: number; file_path: string; mime_type: string }>(
+      "SELECT id, file_path, mime_type FROM book_images WHERE book_barcode = ? AND deleted_at IS NULL AND expires_at > ? ORDER BY id ASC",
+      barcode,
+      nowIso
+    ).filter((r) => fs.existsSync(r.file_path));
+
+    const imageParts: Array<{ buffer: Buffer; mimeType: string }> = savedRows.map((r) => ({
+      buffer: fs.readFileSync(r.file_path),
+      mimeType: r.mime_type || detectMimeFromExt(r.file_path),
+    }));
+
+    let usedExtraImagesCount = 0;
+    for (const ex of rawExtraImages) {
+      const rawB64 = String(ex?.imageBase64 || ex || "");
+      if (!rawB64) continue;
+      const cleanB64 = rawB64.includes(",") ? rawB64.split(",")[1] : rawB64;
+      const mime = String(ex?.mimeType || "image/jpeg");
+      const buf = Buffer.from(cleanB64, "base64");
+      if (buf.length === 0) continue;
+      imageParts.push({ buffer: buf, mimeType: mime });
+      usedExtraImagesCount++;
+      if (saveExtraImages) {
+        const savedPath = saveBase64ToFile(rawB64, mime);
+        if (savedPath) {
+          db.run(
+            "INSERT INTO book_images (book_barcode, file_path, mime_type, source_type, created_at, expires_at) VALUES (?, ?, ?, 'reedit_upload', ?, ?)",
+            barcode,
+            savedPath,
+            mime,
+            nowIso,
+            expiresAt
+          );
         }
       }
     }
-    db.run("DELETE FROM ai_catalog_queue WHERE id = ?", id);
+
+    if (imageParts.length === 0 && !customPrompt) {
+      return res.status(400).json({ error: "לא נמצאו תמונות שמורות ולא סופקה הנחיית עריכה" });
+    }
+
+    try {
+      const proposed = await reanalyzeApprovedBook(
+        db,
+        {
+          title: String(book.title || ""),
+          set_name: String(book.set_name || ""),
+          sub_series: String(book.sub_series || ""),
+          set_global_number: book.set_global_number != null ? Number(book.set_global_number) : null,
+          coverage_range: String(book.coverage_range || ""),
+          author: String(book.author || ""),
+          volume: String(book.volume || ""),
+          publisher: String(book.publisher || ""),
+          pub_year: String(book.pub_year || ""),
+          edition: String(book.edition || ""),
+          category: String(book.category || ""),
+          notes: String(book.notes || ""),
+          tags: parseTags(book.tags),
+        },
+        imageParts,
+        customPrompt,
+        { timeoutMs: 45_000 }
+      );
+      if (proposed.author) {
+        const authMatch = findAuthorityMatch(db, "author", proposed.author);
+        if (authMatch && authMatch.confidence === "high") proposed.author = authMatch.match;
+      }
+      if (proposed.set_name) {
+        const setMatch = findAuthorityMatch(db, "set_name", proposed.set_name);
+        if (setMatch && setMatch.confidence === "high") proposed.set_name = setMatch.match;
+      }
+      if (proposed.publisher) {
+        const pubMatch = findAuthorityMatch(db, "publisher", proposed.publisher);
+        if (pubMatch && pubMatch.confidence === "high") proposed.publisher = pubMatch.match;
+      }
+      res.json({
+        ok: true,
+        proposed,
+        usedSavedImagesCount: savedRows.length,
+        usedExtraImagesCount,
+      });
+    } catch (err) {
+      res.status(502).json({ error: formatGeminiError(err) });
+    }
+  });
+
+  // --- 30-Day Recycle Bin (Deleted Books & Rejected/Deleted AI Scans) ---
+  app.get("/api/recycle-bin", requireAdmin, (_req, res) => {
+    purgeExpiredRecycleAndImages(db);
+    const nowMs = Date.now();
+    const nowIso = new Date(nowMs).toISOString();
+
+    const deletedBooks = db.all<Record<string, unknown>>(
+      `SELECT b.barcode, b.title, b.set_name, b.sub_series, b.set_global_number, b.author, b.volume, b.coverage_range,
+              b.publisher, b.pub_year, b.edition, b.category, b.tags, b.cabinet_id, b.shelf_number, b.notes, b.deleted_at,
+              c.code AS cabinet_code
+       FROM books b
+       LEFT JOIN cabinets c ON b.cabinet_id = c.id AND c.deleted_at IS NULL
+       WHERE b.deleted_at IS NOT NULL AND b.deleted_at != ''
+       ORDER BY b.deleted_at DESC`
+    );
+
+    const booksOut = deletedBooks.map((b) => {
+      const delMs = Date.parse(String(b.deleted_at || nowIso)) || nowMs;
+      const expiresMs = delMs + RETENTION_DAYS_MS;
+      const imgs = db.all<{ id: number; file_path: string }>(
+        "SELECT id, file_path FROM book_images WHERE book_barcode = ? AND deleted_at IS NULL AND expires_at > ?",
+        String(b.barcode),
+        nowIso
+      ).filter((im) => fs.existsSync(im.file_path));
+      return {
+        barcode: String(b.barcode),
+        title: String(b.title || ""),
+        set_name: String(b.set_name || ""),
+        sub_series: String(b.sub_series || ""),
+        set_global_number: b.set_global_number != null ? Number(b.set_global_number) : null,
+        author: String(b.author || ""),
+        volume: String(b.volume || ""),
+        coverage_range: String(b.coverage_range || ""),
+        publisher: String(b.publisher || ""),
+        pub_year: String(b.pub_year || ""),
+        edition: String(b.edition || ""),
+        category: String(b.category || ""),
+        tags: parseTags(b.tags),
+        cabinet_id: b.cabinet_id != null ? Number(b.cabinet_id) : null,
+        cabinet_code: b.cabinet_code ? String(b.cabinet_code) : null,
+        shelf_number: b.shelf_number != null ? Number(b.shelf_number) : null,
+        notes: String(b.notes || ""),
+        deleted_at: String(b.deleted_at || nowIso),
+        days_remaining: Math.max(0, Math.ceil((expiresMs - nowMs) / 86_400_000)),
+        images_count: imgs.length,
+      };
+    });
+
+    const deletedAi = db.all<Record<string, unknown>>(
+      "SELECT * FROM ai_catalog_queue WHERE deleted_at IS NOT NULL AND deleted_at != '' ORDER BY deleted_at DESC"
+    );
+    const aiItemsOut = deletedAi.map((r) => {
+      let extracted = null;
+      if (typeof r.extracted_json === "string" && r.extracted_json) {
+        try { extracted = JSON.parse(r.extracted_json); } catch {}
+      }
+      const existingPaths = getItemImagePaths(r as any).filter((p) => fs.existsSync(p));
+      const delMs = Date.parse(String(r.deleted_at || nowIso)) || nowMs;
+      const expStr = String(r.recycle_expires_at || new Date(delMs + RETENTION_DAYS_MS).toISOString());
+      const expMs = Date.parse(expStr) || delMs + RETENTION_DAYS_MS;
+      return {
+        id: Number(r.id),
+        has_image: existingPaths.length > 0,
+        image_count: existingPaths.length,
+        is_shelf_set: Boolean(r.is_shelf_set),
+        processing_status: String(r.processing_status || "pending"),
+        extracted,
+        deleted_at: String(r.deleted_at || nowIso),
+        recycle_expires_at: expStr,
+        days_remaining: Math.max(0, Math.ceil((expMs - nowMs) / 86_400_000)),
+        created_at: String(r.created_at || nowIso),
+      };
+    });
+
+    res.json({ books: booksOut, aiItems: aiItemsOut, retentionDays: 30 });
+  });
+
+  app.post("/api/recycle-bin/books/:barcode/restore", requireAdmin, (req, res) => {
+    const barcode = String(req.params.barcode || "").trim();
+    const existing = db.get<{ sync_id: string | null; cabinet_id: number | null; deleted_at: string | null }>(
+      "SELECT sync_id, cabinet_id, deleted_at FROM books WHERE barcode = ?",
+      barcode
+    );
+    if (!existing || !existing.deleted_at) {
+      return res.status(404).json({ error: t("errors.bookNotFound") });
+    }
+    const nowIso = new Date().toISOString();
+    const syncId = existing.sync_id || newSyncId();
+    const cabActive =
+      existing.cabinet_id != null
+        ? db.get<{ id: number }>("SELECT id FROM cabinets WHERE id = ? AND deleted_at IS NULL", existing.cabinet_id)?.id ?? null
+        : null;
+    db.transaction(() => {
+      db.run(
+        "UPDATE books SET deleted_at = NULL, updated_at = ?, sync_id = ?, cabinet_id = ?, shelf_number = CASE WHEN ? IS NULL THEN NULL ELSE shelf_number END WHERE barcode = ?",
+        nowIso,
+        syncId,
+        cabActive,
+        cabActive,
+        barcode
+      );
+      db.run("UPDATE book_images SET deleted_at = NULL WHERE book_barcode = ?", barcode);
+      enqueueSyncOutbox(db, "book", syncId, "upsert", { barcode });
+    });
+    onSyncTrigger?.();
+    res.json({ ok: true, barcode });
+  });
+
+  app.post("/api/recycle-bin/ai-queue/:id/restore", requireAdmin, (req, res) => {
+    const id = Number(req.params.id);
+    const existing = db.get<{ id: number; processing_status: string; extracted_json: string; deleted_at: string | null }>(
+      "SELECT id, processing_status, extracted_json, deleted_at FROM ai_catalog_queue WHERE id = ?",
+      id
+    );
+    if (!existing || !existing.deleted_at) {
+      return res.status(404).json({ error: t("errors.aiQueueItemNotFound") });
+    }
+    const restoredProcStatus =
+      existing.processing_status === "processing"
+        ? existing.extracted_json && existing.extracted_json.trim().length > 2
+          ? "done"
+          : "pending"
+        : existing.processing_status || "pending";
+    db.run(
+      "UPDATE ai_catalog_queue SET approval_status = 'pending', processing_status = ?, processing_started_at = NULL, deleted_at = NULL, recycle_expires_at = NULL WHERE id = ?",
+      restoredProcStatus,
+      id
+    );
+    if (restoredProcStatus === "pending") {
+      void processPendingQueue();
+    }
+    res.json({ ok: true, id });
+  });
+
+  app.delete("/api/recycle-bin/books/:barcode", requireAdmin, (req, res) => {
+    const barcode = String(req.params.barcode || "").trim();
+    const imgs = db.all<{ file_path: string }>("SELECT file_path FROM book_images WHERE book_barcode = ?", barcode);
+    db.transaction(() => {
+      db.run("DELETE FROM book_images WHERE book_barcode = ?", barcode);
+      db.run("DELETE FROM books WHERE barcode = ? AND deleted_at IS NOT NULL", barcode);
+    });
+    for (const im of imgs) safeUnlinkIfOrphaned(db, im.file_path);
     res.json({ ok: true });
+  });
+
+  app.delete("/api/recycle-bin/ai-queue/:id", requireAdmin, (req, res) => {
+    const id = Number(req.params.id);
+    const row = db.get<{ image_path: string; extra_images_json: string }>(
+      "SELECT image_path, extra_images_json FROM ai_catalog_queue WHERE id = ? AND deleted_at IS NOT NULL",
+      id
+    );
+    const paths = row ? getItemImagePaths(row) : [];
+    db.run("DELETE FROM ai_catalog_queue WHERE id = ? AND deleted_at IS NOT NULL", id);
+    for (const p of paths) safeUnlinkIfOrphaned(db, p);
+    res.json({ ok: true });
+  });
+
+  app.post("/api/recycle-bin/empty", requireAdmin, (_req, res) => {
+    const deletedBooks = db.all<{ barcode: string }>("SELECT barcode FROM books WHERE deleted_at IS NOT NULL");
+    const deletedAi = db.all<{ id: number; image_path: string; extra_images_json: string }>(
+      "SELECT id, image_path, extra_images_json FROM ai_catalog_queue WHERE deleted_at IS NOT NULL"
+    );
+    const candidatePaths: string[] = [];
+    db.transaction(() => {
+      for (const b of deletedBooks) {
+        const imgs = db.all<{ file_path: string }>("SELECT file_path FROM book_images WHERE book_barcode = ?", b.barcode);
+        for (const im of imgs) candidatePaths.push(im.file_path);
+        db.run("DELETE FROM book_images WHERE book_barcode = ?", b.barcode);
+        db.run("DELETE FROM books WHERE barcode = ?", b.barcode);
+      }
+      for (const q of deletedAi) {
+        for (const p of getItemImagePaths(q)) candidatePaths.push(p);
+        db.run("DELETE FROM ai_catalog_queue WHERE id = ?", q.id);
+      }
+    });
+    for (const p of candidatePaths) safeUnlinkIfOrphaned(db, p);
+    res.json({ ok: true, deletedBooks: deletedBooks.length, deletedAiItems: deletedAi.length });
   });
 
   return {

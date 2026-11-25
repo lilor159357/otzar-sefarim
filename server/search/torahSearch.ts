@@ -1,4 +1,9 @@
 import { normalizeHebrewText } from "../db/schema.ts";
+import {
+  extractQueryCoverageTargets,
+  matchCoverageRange,
+  parseHebrewOrArabicNumber,
+} from "../../shared/torah/volumeAndCoverage.ts";
 
 // Bidirectional Torah synonym & abbreviation groups
 const TORAH_SYNONYM_GROUPS: string[][] = [
@@ -87,6 +92,9 @@ export interface SearchableBook {
   barcode: string;
   title: string;
   set_name?: string;
+  sub_series?: string;
+  set_global_number?: number | null;
+  coverage_range?: string;
   author: string;
   volume: string;
   publisher: string;
@@ -113,6 +121,8 @@ export function searchBooksOffline<T extends SearchableBook>(books: T[], rawQuer
 
   const queryTokens = normQuery.split(" ").filter(Boolean);
   const fullPhraseSynonyms = SYNONYM_MAP.get(normQuery) || [];
+  const coverageTargets = extractQueryCoverageTargets(rawQuery);
+  const hasExplicitCoverageTarget = coverageTargets.some((t) => t.explicit);
 
   const results: Array<ScoredBookResult<T>> = [];
 
@@ -129,6 +139,8 @@ export function searchBooksOffline<T extends SearchableBook>(books: T[], rawQuer
 
     const normTitle = normalizeHebrewText(book.title);
     const normSetName = normalizeHebrewText(String(book.set_name || ""));
+    const normSubSeries = normalizeHebrewText(String(book.sub_series || ""));
+    const normCoverage = normalizeHebrewText(String(book.coverage_range || ""));
     const normAuthor = normalizeHebrewText(book.author);
     const normCategory = normalizeHebrewText(book.category);
     const normVolume = normalizeHebrewText(book.volume);
@@ -148,6 +160,8 @@ export function searchBooksOffline<T extends SearchableBook>(books: T[], rawQuer
     const combinedText = [
       normTitle,
       normSetName,
+      normSubSeries,
+      normCoverage,
       normAuthor,
       normVolume,
       normPublisher,
@@ -165,11 +179,18 @@ export function searchBooksOffline<T extends SearchableBook>(books: T[], rawQuer
     let totalScore = 0;
     let matchedTokens = 0;
     let hint = "";
+    const unmatchedTokens: string[] = [];
 
     // Check full-phrase direct match
     if (normTitle.includes(normQuery)) {
       totalScore += 300;
       hint = "שם ספר";
+    } else if (normSetName && normSetName.includes(normQuery)) {
+      totalScore += 270;
+      hint = "שם סט";
+    } else if (normSubSeries && normSubSeries.includes(normQuery)) {
+      totalScore += 260;
+      hint = "תת-סדרה";
     } else if (normAuthor.includes(normQuery)) {
       totalScore += 240;
       hint = "מחבר";
@@ -183,14 +204,14 @@ export function searchBooksOffline<T extends SearchableBook>(books: T[], rawQuer
       const tokenSyns = SYNONYM_MAP.get(token) || [];
       const tokenSkel = skeletonHebrew(token);
 
-      if (normTitle.includes(token) || (normSetName && normSetName.includes(token))) {
+      if (normTitle.includes(token) || (normSetName && normSetName.includes(token)) || (normSubSeries && normSubSeries.includes(token))) {
         totalScore += 100;
         matchedTokens++;
-        if (!hint) hint = normTitle.includes(token) ? "שם ספר" : "שם סט";
-      } else if (normAuthor.includes(token) || normCategory.includes(token) || normVolume.includes(token) || normPublisher.includes(token) || normPubYear.includes(token) || normEdition.includes(token)) {
+        if (!hint) hint = normTitle.includes(token) ? "שם ספר" : normSetName.includes(token) ? "שם סט" : "תת-סדרה";
+      } else if (normAuthor.includes(token) || normCategory.includes(token) || normVolume.includes(token) || normCoverage.includes(token) || normPublisher.includes(token) || normPubYear.includes(token) || normEdition.includes(token)) {
         totalScore += 80;
         matchedTokens++;
-        if (!hint) hint = "פרטי ספר";
+        if (!hint) hint = normCoverage.includes(token) ? "טווח סימנים/דפים" : "פרטי ספר";
       } else if (parsedTags.some((t) => t.includes(token))) {
         totalScore += 75;
         matchedTokens++;
@@ -220,6 +241,32 @@ export function searchBooksOffline<T extends SearchableBook>(books: T[], rawQuer
           totalScore += bestDist === 1 ? 40 : 25;
           matchedTokens++;
           if (!hint) hint = "התאמה קרובה";
+        } else {
+          unmatchedTokens.push(token);
+        }
+      } else {
+        unmatchedTokens.push(token);
+      }
+    }
+
+    const rawCoverageSource =
+      String(book.coverage_range || "").trim() ||
+      (/(סימנ|סימן|דפ|דף|פרק|\d+\s*[\-–—]+\s*\d+)/.test(String(book.volume || "")) ? String(book.volume || "").trim() : "");
+    if (rawCoverageSource && coverageTargets.length > 0 && (hasExplicitCoverageTarget || unmatchedTokens.length > 0)) {
+      const covMatch = matchCoverageRange(rawCoverageSource, coverageTargets);
+      if (covMatch) {
+        const markerWords = new Set(["סימנ", "סימנימ", "סי", "דפ", "דפימ", "פרק", "פרקימ", "עמוד", "עמ", "עד"]);
+        let credited = 0;
+        for (const ut of unmatchedTokens) {
+          const utNum = parseHebrewOrArabicNumber(ut);
+          if ((covMatch.explicit && markerWords.has(ut)) || (utNum > 0 && utNum === covMatch.value)) {
+            credited++;
+          }
+        }
+        if (covMatch.explicit || credited > 0) {
+          matchedTokens = Math.min(queryTokens.length, matchedTokens + credited);
+          totalScore += covMatch.explicit ? 180 : 125;
+          hint = covMatch.hint;
         }
       }
     }

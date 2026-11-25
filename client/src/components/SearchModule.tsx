@@ -1,6 +1,6 @@
 import React, { useMemo, useRef, useState } from "react";
 import { Search, MapPin, Plus, CheckCircle2, X, BookOpen, Pencil, Barcode } from "lucide-react";
-import type { BookRow, CabinetRow, MapEntrance } from "../types.ts";
+import type { BookRow, CabinetRow, MapEntrance, RoomDimensions, VolumeNotationRule } from "../types.ts";
 import { STATUS_LABELS } from "../types.ts";
 import { LocationModal } from "./LocationModal.tsx";
 import { useStrings } from "../lib/stringsContext.tsx";
@@ -9,6 +9,8 @@ interface SearchModuleProps {
   books: BookRow[];
   cabinets: CabinetRow[];
   entrance?: MapEntrance;
+  roomDimensions?: RoomDimensions;
+  volumeNotationRules?: VolumeNotationRule[];
   loading: boolean;
   searchQuery: string;
   onSearchChange: (q: string) => void;
@@ -27,6 +29,8 @@ export const SearchModule: React.FC<SearchModuleProps> = ({
   books,
   cabinets,
   entrance,
+  roomDimensions,
+  volumeNotationRules,
   loading,
   searchQuery,
   onSearchChange,
@@ -353,12 +357,14 @@ export const SearchModule: React.FC<SearchModuleProps> = ({
                     </div>
                     <div className="text-xs text-[var(--otzar-text-muted)] mt-0.5 tabular-nums">
                       {b.set_name ? `סט: ${b.set_name} · ` : ""}
+                      {b.sub_series ? `${b.sub_series} · ` : ""}
                       {b.category || "כללי"}
+                      {b.coverage_range ? ` · ${b.coverage_range}` : ""}
                       {b.edition ? ` · מהדורה: ${b.edition}` : ""}
                       {b.pub_year ? ` · שנת הוצאה: ${b.pub_year}` : ""}
                       {b.format_size ? ` · ${b.format_size}` : ""}
                       {b.thickness_mm != null && b.thickness_mm > 0 ? ` · ${b.thickness_mm} מ״מ` : ""}
-                      {b.matchHint ? ` · התאמה: ${b.matchHint}` : ""}
+                      {b.matchHint ? <span className="text-[var(--otzar-accent)] font-medium"> · {b.matchHint}</span> : null}
                     </div>
                   </td>
                   <td className="py-3 px-4 text-[var(--otzar-text-muted)]">{b.author || "—"}</td>
@@ -434,6 +440,8 @@ export const SearchModule: React.FC<SearchModuleProps> = ({
           book={selectedBook}
           cabinets={cabinets}
           entrance={entrance}
+          roomDimensions={roomDimensions}
+          volumeNotationRules={volumeNotationRules}
           isAdmin={isAdmin}
           initialEditMode={isAdmin && openInEditMode}
           onBookUpdated={onReload}

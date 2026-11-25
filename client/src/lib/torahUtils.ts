@@ -1,60 +1,21 @@
-import type { BookRow } from "../types.ts";
+import type { BookRow, VolumeNotationRule } from "../types.ts";
+import {
+  hebrewGematriya,
+  numberToHebrewGematriya,
+  torahNaturalVolumeRank,
+  torahNaturalVolumeSort,
+  compareSetBooks,
+  parseVolumeNotationRules,
+} from "../../../shared/torah/volumeAndCoverage.ts";
 
-const GEMATRIYA_MAP: Record<string, number> = {
-  א: 1, ב: 2, ג: 3, ד: 4, ה: 5, ו: 6, ז: 7, ח: 8, ט: 9,
-  י: 10, כ: 20, ך: 20, ל: 30, מ: 40, ם: 40, נ: 50, ן: 50,
-  ס: 60, ע: 70, פ: 80, ף: 80, צ: 90, ץ: 90, ק: 100, ר: 200, ש: 300, ת: 400,
+export {
+  hebrewGematriya,
+  numberToHebrewGematriya,
+  torahNaturalVolumeRank,
+  torahNaturalVolumeSort,
+  compareSetBooks,
+  parseVolumeNotationRules,
 };
-
-export function hebrewGematriya(str: string): number {
-  if (!str) return 0;
-  const clean = str.replace(/["'״׳]/g, "").trim();
-  let sum = 0;
-  for (const ch of clean) {
-    if (GEMATRIYA_MAP[ch]) {
-      sum += GEMATRIYA_MAP[ch];
-    } else {
-      return 0;
-    }
-  }
-  return sum;
-}
-
-export function numberToHebrewGematriya(num: number): string {
-  if (num <= 0 || num > 499) return String(num);
-  if (num === 15) return "טו";
-  if (num === 16) return "טז";
-  const hundreds = ["", "ק", "ר", "ש", "ת"];
-  const tens = ["", "י", "כ", "ל", "מ", "נ", "ס", "ע", "פ", "צ"];
-  const ones = ["", "א", "ב", "ג", "ד", "ה", "ו", "ז", "ח", "ט"];
-  const h = Math.floor(num / 100);
-  const rem = num % 100;
-  if (rem === 15) return hundreds[h] + "טו";
-  if (rem === 16) return hundreds[h] + "טז";
-  const t = Math.floor(rem / 10);
-  const o = rem % 10;
-  return hundreds[h] + tens[t] + ones[o];
-}
-
-export function torahNaturalVolumeRank(val: unknown): number {
-  if (!val) return 9999;
-  const s = String(val).trim();
-  if (!s) return 9999;
-  const numMatch = s.match(/\d+/);
-  if (numMatch) return parseInt(numMatch[0], 10);
-  const tokenMatch = s.replace(/^(חלק|כרך|ספר|ח['"״׳]|כ['"״׳])\s*/i, "").trim();
-  const firstWord = tokenMatch.split(/[\s\-–—]/)[0];
-  const g = hebrewGematriya(firstWord);
-  if (g > 0) return g;
-  return 9999;
-}
-
-export function torahNaturalVolumeSort(a: unknown, b: unknown): number {
-  const ra = torahNaturalVolumeRank(a);
-  const rb = torahNaturalVolumeRank(b);
-  if (ra !== rb) return ra - rb;
-  return String(a || "").localeCompare(String(b || ""), "he");
-}
 
 export function suggestNextVolume(currentVolume: string): string {
   const s = currentVolume.trim();
@@ -81,6 +42,9 @@ export function suggestNextVolume(currentVolume: string): string {
 
 export interface SetVolumeGroup {
   volumeLabel: string;
+  subSeriesLabel: string;
+  minGlobalNumber: number | null;
+  coverageSummary: string;
   books: BookRow[];
   totalCopies: number;
   availableCount: number;
@@ -89,31 +53,54 @@ export interface SetVolumeGroup {
   locationSummary: string;
 }
 
-export function groupSetVolumes(books: BookRow[]): SetVolumeGroup[] {
+export interface SetSubSeriesSection {
+  subSeriesLabel: string;
+  volumes: SetVolumeGroup[];
+  totalBooks: number;
+}
+
+export function groupSetVolumes(
+  books: BookRow[],
+  customRules?: VolumeNotationRule[]
+): SetVolumeGroup[] {
   const map = new Map<string, BookRow[]>();
   for (const b of books) {
-    const key = (b.volume || "").trim() || "ללא ציון כרך";
+    const sub = String(b.sub_series || "").trim();
+    const vol = String(b.volume || "").trim() || "ללא ציון כרך";
+    const key = `${sub}\u0001${vol}`;
     const arr = map.get(key) || [];
     arr.push(b);
     map.set(key, arr);
   }
 
   const groups: SetVolumeGroup[] = [];
-  for (const [volumeLabel, list] of map.entries()) {
-    const availableCount = list.filter((x) => x.status === "available").length;
-    const borrowedCount = list.filter((x) => x.status === "borrowed").length;
-    const otherCount = list.length - availableCount - borrowedCount;
+  for (const [, list] of map.entries()) {
+    const sortedList = [...list].sort((a, b) => compareSetBooks(a, b, customRules));
+    const rep = sortedList[0];
+    const volumeLabel = String(rep.volume || "").trim() || "ללא ציון כרך";
+    const subSeriesLabel = String(rep.sub_series || "").trim();
+    const globalNums = sortedList
+      .map((x) => (x.set_global_number != null && Number.isFinite(Number(x.set_global_number)) ? Number(x.set_global_number) : null))
+      .filter((n): n is number => n != null);
+    const minGlobalNumber = globalNums.length > 0 ? Math.min(...globalNums) : null;
+    const covs = Array.from(new Set(sortedList.map((x) => String(x.coverage_range || "").trim()).filter(Boolean)));
+    const availableCount = sortedList.filter((x) => x.status === "available").length;
+    const borrowedCount = sortedList.filter((x) => x.status === "borrowed").length;
+    const otherCount = sortedList.length - availableCount - borrowedCount;
     const locs = Array.from(
       new Set(
-        list
+        sortedList
           .filter((x) => x.cabinet_code)
           .map((x) => `ארון ${x.cabinet_code}${x.shelf_number ? ` מדף ${x.shelf_number}` : ""}`)
       )
     );
     groups.push({
       volumeLabel,
-      books: list,
-      totalCopies: list.length,
+      subSeriesLabel,
+      minGlobalNumber,
+      coverageSummary: covs.join(" · "),
+      books: sortedList,
+      totalCopies: sortedList.length,
       availableCount,
       borrowedCount,
       otherCount,
@@ -121,6 +108,52 @@ export function groupSetVolumes(books: BookRow[]): SetVolumeGroup[] {
     });
   }
 
-  groups.sort((a, b) => torahNaturalVolumeSort(a.volumeLabel, b.volumeLabel));
+  groups.sort((a, b) =>
+    compareSetBooks(
+      {
+        volume: a.volumeLabel,
+        sub_series: a.subSeriesLabel,
+        set_global_number: a.minGlobalNumber,
+        title: a.books[0]?.title,
+        barcode: a.books[0]?.barcode,
+      },
+      {
+        volume: b.volumeLabel,
+        sub_series: b.subSeriesLabel,
+        set_global_number: b.minGlobalNumber,
+        title: b.books[0]?.title,
+        barcode: b.books[0]?.barcode,
+      },
+      customRules
+    )
+  );
   return groups;
+}
+
+export function groupSetBySubSeries(
+  books: BookRow[],
+  customRules?: VolumeNotationRule[]
+): SetSubSeriesSection[] {
+  const volumes = groupSetVolumes(books, customRules);
+  const bySub = new Map<string, SetVolumeGroup[]>();
+  for (const v of volumes) {
+    const key = v.subSeriesLabel || "";
+    const arr = bySub.get(key) || [];
+    arr.push(v);
+    bySub.set(key, arr);
+  }
+  const sections: SetSubSeriesSection[] = [];
+  for (const [subSeriesLabel, vols] of bySub.entries()) {
+    const totalBooks = vols.reduce((acc, g) => acc + g.totalCopies, 0);
+    sections.push({ subSeriesLabel, volumes: vols, totalBooks });
+  }
+  sections.sort((a, b) => {
+    const ga = a.volumes[0]?.minGlobalNumber ?? null;
+    const gb = b.volumes[0]?.minGlobalNumber ?? null;
+    if (ga != null && gb != null && ga !== gb) return ga - gb;
+    if (!a.subSeriesLabel && b.subSeriesLabel) return 1;
+    if (a.subSeriesLabel && !b.subSeriesLabel) return -1;
+    return a.subSeriesLabel.localeCompare(b.subSeriesLabel, "he");
+  });
+  return sections;
 }

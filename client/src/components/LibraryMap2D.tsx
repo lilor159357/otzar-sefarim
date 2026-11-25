@@ -1,11 +1,12 @@
 import React from "react";
-import type { CabinetRow, MapEntrance } from "../types.ts";
+import type { CabinetRow, MapEntrance, RoomDimensions } from "../types.ts";
 
 interface LibraryMap2DProps {
   cabinets: CabinetRow[];
   highlightedCabinetId?: number | null;
   onSelectCabinet?: (cab: CabinetRow) => void;
   entrance?: MapEntrance;
+  roomDimensions?: RoomDimensions;
   compact?: boolean;
 }
 
@@ -77,10 +78,21 @@ export const LibraryMap2D: React.FC<LibraryMap2DProps> = ({
   highlightedCabinetId,
   onSelectCabinet,
   entrance,
+  roomDimensions,
   compact = false,
 }) => {
+  const roomWidthM = Number(roomDimensions?.width_m) || 0;
+  const roomLengthM = Number(roomDimensions?.length_m) || 0;
+  const roomArea = roomWidthM > 0 && roomLengthM > 0 ? Math.round(roomWidthM * roomLengthM * 10) / 10 : 0;
+
   return (
     <div className="w-full rounded-xl border border-[var(--otzar-border-muted)] bg-[var(--otzar-surface-alt)] overflow-hidden">
+      {roomArea > 0 && !compact && (
+        <div className="px-3 py-1.5 border-b border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)]/60 flex items-center justify-between text-[11px] text-[var(--otzar-text-muted)] tabular-nums">
+          <span>מידות האולם: {roomLengthM}מ׳ × {roomWidthM}מ׳</span>
+          <span className="font-semibold text-[var(--otzar-text)]">{roomArea} מ״ר</span>
+        </div>
+      )}
       <svg
         viewBox={`0 0 ${MAP_WIDTH} ${MAP_HEIGHT}`}
         className={compact ? "w-full h-56 block" : "w-full h-80 block"}
@@ -151,6 +163,18 @@ export const LibraryMap2D: React.FC<LibraryMap2DProps> = ({
                   fill={isHighlighted ? "#ffedd5" : "var(--otzar-text-muted)"}
                 >
                   {cab.main_subject.length > 22 ? cab.main_subject.slice(0, 21) + "…" : cab.main_subject}
+                </text>
+              )}
+              {cab.width_cm && cab.depth_cm && cab.height >= 64 && (
+                <text
+                  x={cx}
+                  y={cy + 25}
+                  textAnchor="middle"
+                  fontSize="8.5"
+                  fill={isHighlighted ? "#fed7aa" : "var(--otzar-text-muted)"}
+                  opacity="0.85"
+                >
+                  {cab.width_cm}×{cab.depth_cm} ס״מ
                 </text>
               )}
             </g>

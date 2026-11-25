@@ -20,11 +20,13 @@ import {
   Plus,
   Sparkles,
   BookCopy,
+  ArrowLeftRight,
 } from "lucide-react";
-import { FORMAT_SIZE_OPTIONS, type AiQueueItem, type CabinetRow } from "../types.ts";
+import { FORMAT_SIZE_OPTIONS, type AiQueueItem, type CabinetRow, type VolumeNotationRule } from "../types.ts";
+import { RecycleBinModal } from "./RecycleBinModal.tsx";
 import { getAdminToken } from "../lib/adminSession.ts";
 import { AutocompleteInput } from "./AutocompleteInput.tsx";
-import { suggestNextVolume } from "../lib/torahUtils.ts";
+import { suggestNextVolume, compareSetBooks } from "../lib/torahUtils.ts";
 import { useStrings } from "../lib/stringsContext.tsx";
 
 interface CatalogModuleProps {
@@ -33,6 +35,8 @@ interface CatalogModuleProps {
   barcodePrefix: string;
   aiModel: string;
   hasApiKey: boolean;
+  volumeNotationRules?: VolumeNotationRule[];
+  recycleBinCount?: number;
   onReload: () => Promise<void>;
 }
 
@@ -126,12 +130,20 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
   barcodePrefix,
   aiModel,
   hasApiKey,
+  volumeNotationRules,
+  recycleBinCount = 0,
   onReload,
 }) => {
   const { t } = useStrings();
   const [subTab, setSubTab] = useState<CatalogSubTab>("manual");
 
   // Manual quick catalog form state
+  const [showRecycleBin, setShowRecycleBin] = useState(false);
+  const [subSeries, setSubSeries] = useState("");
+  const [setGlobalNumber, setSetGlobalNumber] = useState("");
+  const [coverageRange, setCoverageRange] = useState("");
+  const [shelfScanSortMode, setShelfScanSortMode] = useState<"scan" | "torah">("scan");
+  const [now, setNow] = useState(Date.now());
   const [title, setTitle] = useState("");
   const [setName, setSetName] = useState("");
   const [author, setAuthor] = useState("");
@@ -163,6 +175,24 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
   const [uploadingAi, setUploadingAi] = useState(false);
   const [compressionStats, setCompressionStats] = useState<string | null>(null);
   const [aiError, setAiError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const hasProcessing = queueItems.some((i) => i.processing_status === "processing");
+    if (!hasProcessing) return;
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [queueItems]);
+
+  const handleRefreshAiItem = async (id: number) => {
+    try {
+      const res = await fetch(`/api/ai-queue/${id}/refresh`, { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "שגיאה ברענון");
+      await loadQueue();
+    } catch (err: any) {
+      setAiError(err?.message || "שגיאה ברענון");
+    }
+  };
 
   // Sticky Set & Shelf-Set Capture modes (Sticky Set persisted across sessions)
   const [scanMode, setScanMode] = useState<"standard" | "shelf-set">("standard");
@@ -237,7 +267,17 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
   const [revSetName, setRevSetName] = useState("");
   const [revAuthor, setRevAuthor] = useState("");
   const [revVolume, setRevVolume] = useState("");
-  const [revVolumes, setRevVolumes] = useState<Array<{ volume: string; copiesCount: number; notes?: string }>>([]);
+  const [revSubSeries, setRevSubSeries] = useState("");
+  const [revSetGlobalNumber, setRevSetGlobalNumber] = useState("");
+  const [revCoverageRange, setRevCoverageRange] = useState("");
+  const [revVolumes, setRevVolumes] = useState<Array<{
+    volume: string;
+    sub_series?: string;
+    set_global_number?: number | null;
+    coverage_range?: string;
+    copiesCount: number;
+    notes?: string;
+  }>>([]);
   const [applyingBatch, setApplyingBatch] = useState(false);
   const [revPublisher, setRevPublisher] = useState("");
   const [revPubYear, setRevPubYear] = useState("");
@@ -393,6 +433,10 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
     setRevSetName(ex?.set_name || "");
     setRevAuthor(ex?.author || "");
     setRevVolume(ex?.volume || "");
+    setRevSubSeries(ex?.sub_series || "");
+    setRevSetGlobalNumber(ex?.set_global_number != null ? String(ex.set_global_number) : "");
+    setRevCoverageRange(ex?.coverage_range || "");
+    setShelfScanSortMode("scan");
     const rawVols =
       Array.isArray(ex?.volumes) && ex.volumes.length > 0
         ? ex.volumes
@@ -458,6 +502,9 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
         body: JSON.stringify({
           title: title.trim(),
           set_name: setName.trim(),
+          sub_series: subSeries.trim() || null,
+          set_global_number: setGlobalNumber.trim() ? Number(setGlobalNumber) : null,
+          coverage_range: coverageRange.trim() || null,
           author: author.trim(),
           volume: volume.trim(),
           publisher: publisher.trim(),
@@ -493,6 +540,9 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
       } else {
         setTitle("");
         setSetName("");
+        setSubSeries("");
+        setSetGlobalNumber("");
+        setCoverageRange("");
         setAuthor("");
         setVolume("");
         setNextVolSuggestion("");
@@ -803,6 +853,9 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
         body: JSON.stringify({
           title: effectiveTitle,
           set_name: revSetName.trim(),
+          sub_series: revSubSeries.trim() || null,
+          set_global_number: revSetGlobalNumber.trim() ? Number(revSetGlobalNumber) : null,
+          coverage_range: revCoverageRange.trim() || null,
           author: revAuthor.trim(),
           volume: revVolume.trim(),
           volumes: isBatchShelfSet ? cleanedVolumes : undefined,
@@ -856,9 +909,24 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
           </p>
         </div>
 
-        <div className="px-3.5 py-2 rounded-xl border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] text-xs flex items-center gap-3">
-          <span className="text-[var(--otzar-text-muted)]">{t("catalog.nextBarcodeLabel")}</span>
-          <strong className="font-mono text-sm tabular-nums text-[var(--otzar-accent)]">{previewStart}</strong>
+        <div className="flex items-center gap-2.5">
+          <button
+            type="button"
+            onClick={() => setShowRecycleBin(true)}
+            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] hover:bg-[var(--otzar-surface-alt)] text-xs font-semibold cursor-pointer"
+          >
+            <Trash2 className="w-4 h-4 text-[var(--otzar-accent)]" />
+            <span>סל מחזור</span>
+            {recycleBinCount > 0 ? (
+              <span className="px-1.5 py-0.5 rounded-full bg-[var(--otzar-accent)] text-white text-[10px] font-bold tabular-nums">
+                {recycleBinCount}
+              </span>
+            ) : null}
+          </button>
+          <div className="px-3.5 py-2 rounded-xl border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] text-xs flex items-center gap-3">
+            <span className="text-[var(--otzar-text-muted)]">{t("catalog.nextBarcodeLabel")}</span>
+            <strong className="font-mono text-sm tabular-nums text-[var(--otzar-accent)]">{previewStart}</strong>
+          </div>
         </div>
       </div>
 
@@ -935,8 +1003,18 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
               />
             </div>
 
+            <div className="md:col-span-3">
+              <AutocompleteInput
+                label="תת-סדרה / מסכת / חלק ראשי בסט"
+                field="sub_series"
+                value={subSeries}
+                onChange={setSubSeries}
+                placeholder="למשל: אורח חיים / מסכת שבת"
+              />
+            </div>
+
             <div className="md:col-span-2">
-              <label className="block text-xs font-medium mb-1">כרך / חלק / מסכת</label>
+              <label className="block text-xs font-medium mb-1">כרך / פורמט סימון</label>
               <input
                 ref={volumeRef}
                 type="text"
@@ -945,7 +1023,30 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
                   setVolume(e.target.value);
                   if (nextVolSuggestion) setNextVolSuggestion("");
                 }}
-                placeholder="למשל: חלק א׳"
+                placeholder="למשל: חלק א׳ / ** / •"
+                className="w-full px-3 py-2 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)]"
+              />
+            </div>
+
+            <div className="md:col-span-2">
+              <label className="block text-xs font-medium mb-1">מספר כרך כללי בסט</label>
+              <input
+                type="number"
+                min={1}
+                value={setGlobalNumber}
+                onChange={(e) => setSetGlobalNumber(e.target.value)}
+                placeholder="למשל: 3 מתוך 50"
+                className="w-full px-3 py-2 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] tabular-nums"
+              />
+            </div>
+
+            <div className="md:col-span-5">
+              <label className="block text-xs font-medium mb-1">טווח סימנים / דפים / פרקים</label>
+              <input
+                type="text"
+                value={coverageRange}
+                onChange={(e) => setCoverageRange(e.target.value)}
+                placeholder="למשל: סימנים א-קכז / דפים ב-מה"
                 className="w-full px-3 py-2 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)]"
               />
               {nextVolSuggestion && (
@@ -1730,7 +1831,12 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
                         </div>
                         <div className="text-xs text-[var(--otzar-text-muted)]">
                           {item.processing_status === "pending" && "ממתין בתור..."}
-                          {item.processing_status === "processing" && "מפענח פרטי ספר..."}
+                          {item.processing_status === "processing" && (
+                            <span className="flex items-center gap-1.5 text-amber-700 dark:text-amber-400 font-medium">
+                              <RefreshCw className="w-3 h-3 animate-spin shrink-0" />
+                              <span>מפענח פרטי ספר... ({Math.max(0, Math.floor((now - new Date(item.processing_started_at || item.created_at).getTime()) / 1000))} שניות)</span>
+                            </span>
+                          )}
                           {item.processing_status === "done" &&
                             `פוענח: ${item.extracted?.author || ""} (${item.extracted?.tags?.length || 0} תגיות)`}
                           {item.processing_status === "error" && (
@@ -1741,6 +1847,17 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
                     </div>
 
                     <div className="flex items-center gap-2">
+                      {item.processing_status === "processing" && (
+                        <button
+                          type="button"
+                          onClick={() => handleRefreshAiItem(item.id)}
+                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded text-xs border border-amber-300 bg-amber-50 text-amber-900 hover:bg-amber-100 dark:bg-amber-950/40 dark:border-amber-800 dark:text-amber-300 cursor-pointer font-medium"
+                          title="רענן מפתח Gemini שנתקע"
+                        >
+                          <RefreshCw className="w-3 h-3 text-amber-700" />
+                          רענן / החלף מפתח
+                        </button>
+                      )}
                       {item.processing_status === "error" && (
                         <button
                           type="button"
@@ -2030,9 +2147,39 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
                         );
                       })()}
                     </div>
+                    <div>
+                      <AutocompleteInput
+                        label="תת-סדרה / מסכת / חלק ראשי בסט"
+                        field="sub_series"
+                        value={revSubSeries}
+                        onChange={setRevSubSeries}
+                        placeholder="למשל: אורח חיים"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium mb-1">מספר כרך כללי בסט (אופציונלי)</label>
+                      <input
+                        type="number"
+                        min={1}
+                        value={revSetGlobalNumber}
+                        onChange={(e) => setRevSetGlobalNumber(e.target.value)}
+                        placeholder="למשל: 3 מתוך 50"
+                        className="w-full px-3 py-2 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] tabular-nums"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium mb-1">טווח סימנים / דפים / פרקים</label>
+                      <input
+                        type="text"
+                        value={revCoverageRange}
+                        onChange={(e) => setRevCoverageRange(e.target.value)}
+                        placeholder="למשל: סימנים א-קכז"
+                        className="w-full px-3 py-2 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)]"
+                      />
+                    </div>
                     {!activeReviewItem.is_shelf_set && (
                       <div>
-                        <label className="block text-xs font-medium mb-1">כרך / חלק</label>
+                        <label className="block text-xs font-medium mb-1">כרך / סימון כרך (*, III, חלק א׳)</label>
                         <input
                           type="text"
                           value={revVolume}
@@ -2121,72 +2268,151 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
                     </div>
                     {activeReviewItem.is_shelf_set && (
                       <div className="md:col-span-2 rounded-xl border border-[var(--otzar-border)] bg-[var(--otzar-surface-alt)] p-3 space-y-2.5">
-                        <div className="flex items-center justify-between">
+                        <div className="flex flex-wrap items-center justify-between gap-2 pb-1 border-b border-[var(--otzar-border-muted)]">
                           <span className="text-xs font-bold flex items-center gap-1.5">
                             <BookCopy className="w-4 h-4 text-[var(--otzar-accent)]" />
                             כרכים ועותקים שזוהו על המדף ({revVolumes.length} שורות)
                           </span>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              const lastVol = revVolumes[revVolumes.length - 1]?.volume || "";
-                              const nextVol = suggestNextVolume(lastVol) || `חלק ${revVolumes.length + 1}`;
-                              setRevVolumes((prev) => [...prev, { volume: nextVol, copiesCount: 1, notes: "" }]);
-                            }}
-                            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-semibold bg-[var(--otzar-accent)] text-white cursor-pointer"
-                          >
-                            <Plus className="w-3.5 h-3.5" />
-                            הוסף כרך
-                          </button>
-                        </div>
-                        <div className="space-y-1.5 max-h-56 overflow-y-auto">
-                          {revVolumes.map((row, idx) => (
-                            <div key={idx} className="grid grid-cols-12 gap-2 items-center">
-                              <input
-                                type="text"
-                                value={row.volume}
-                                onChange={(e) =>
-                                  setRevVolumes((prev) =>
-                                    prev.map((r, i) => (i === idx ? { ...r, volume: e.target.value } : r))
-                                  )
-                                }
-                                placeholder="כרך / חלק"
-                                className="col-span-5 px-2.5 py-1.5 rounded border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] text-xs font-medium"
-                              />
-                              <input
-                                type="number"
-                                min={1}
-                                max={20}
-                                value={row.copiesCount}
-                                onChange={(e) =>
-                                  setRevVolumes((prev) =>
-                                    prev.map((r, i) =>
-                                      i === idx ? { ...r, copiesCount: Math.max(1, Number(e.target.value) || 1) } : r
-                                    )
-                                  )
-                                }
-                                title="כמות עותקים"
-                                className="col-span-2 px-2 py-1.5 rounded border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] text-xs text-center tabular-nums font-bold"
-                              />
-                              <input
-                                type="text"
-                                value={row.notes || ""}
-                                onChange={(e) =>
-                                  setRevVolumes((prev) =>
-                                    prev.map((r, i) => (i === idx ? { ...r, notes: e.target.value } : r))
-                                  )
-                                }
-                                placeholder="הערה (אופציונלי)"
-                                className="col-span-4 px-2.5 py-1.5 rounded border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] text-xs"
-                              />
+                          <div className="flex flex-wrap items-center gap-2">
+                            <div className="flex items-center gap-1 p-0.5 rounded-lg bg-[var(--otzar-bg)] border border-[var(--otzar-border-muted)] text-[11px]">
                               <button
                                 type="button"
-                                onClick={() => setRevVolumes((prev) => prev.filter((_, i) => i !== idx))}
-                                className="col-span-1 p-1.5 text-red-600 hover:bg-red-50 rounded cursor-pointer flex justify-center"
-                                title="הסר שורה"
+                                onClick={() => setShelfScanSortMode("scan")}
+                                className={`px-2 py-1 rounded cursor-pointer font-semibold ${
+                                  shelfScanSortMode === "scan"
+                                    ? "bg-[var(--otzar-accent)] text-white"
+                                    : "text-[var(--otzar-text-muted)] hover:text-[var(--otzar-text)]"
+                                }`}
                               >
-                                <Trash2 className="w-3.5 h-3.5" />
+                                סדר מדף
                               </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setShelfScanSortMode("torah");
+                                  setRevVolumes((prev) =>
+                                    [...prev].sort((a, b) =>
+                                      compareSetBooks(
+                                        {
+                                          volume: a.volume,
+                                          sub_series: a.sub_series || revSubSeries,
+                                          set_global_number: a.set_global_number,
+                                          title: a.volume,
+                                        },
+                                        {
+                                          volume: b.volume,
+                                          sub_series: b.sub_series || revSubSeries,
+                                          set_global_number: b.set_global_number,
+                                          title: b.volume,
+                                        },
+                                        volumeNotationRules
+                                      )
+                                    )
+                                  );
+                                }}
+                                className={`px-2 py-1 rounded cursor-pointer font-semibold ${
+                                  shelfScanSortMode === "torah"
+                                    ? "bg-[var(--otzar-accent)] text-white"
+                                    : "text-[var(--otzar-text-muted)] hover:text-[var(--otzar-text)]"
+                                }`}
+                              >
+                                סדר כרכים תורני
+                              </button>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => setRevVolumes((prev) => [...prev].reverse())}
+                              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] hover:bg-[var(--otzar-surface)] text-xs font-medium cursor-pointer"
+                              title="הפוך סדר שורות (ימין-שמאל)"
+                            >
+                              <ArrowLeftRight className="w-3 h-3 text-[var(--otzar-accent)]" />
+                              הפוך ימין ↔ שמאל
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const lastVol = revVolumes[revVolumes.length - 1]?.volume || "";
+                                const nextVol = suggestNextVolume(lastVol) || `חלק ${revVolumes.length + 1}`;
+                                setRevVolumes((prev) => [
+                                  ...prev,
+                                  {
+                                    volume: nextVol,
+                                    sub_series: revSubSeries,
+                                    copiesCount: 1,
+                                    notes: "",
+                                  },
+                                ]);
+                              }}
+                              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-semibold bg-[var(--otzar-accent)] text-white cursor-pointer"
+                            >
+                              <Plus className="w-3.5 h-3.5" />
+                              הוסף כרך
+                            </button>
+                          </div>
+                        </div>
+                        <div className="space-y-1.5 max-h-64 overflow-y-auto">
+                          {revVolumes.map((row, idx) => (
+                            <div key={idx} className="p-2 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] space-y-1.5">
+                              <div className="grid grid-cols-12 gap-2 items-center">
+                                <input
+                                  type="text"
+                                  value={row.volume}
+                                  onChange={(e) =>
+                                    setRevVolumes((prev) =>
+                                      prev.map((r, i) => (i === idx ? { ...r, volume: e.target.value } : r))
+                                    )
+                                  }
+                                  placeholder="כרך / חלק / סימון"
+                                  className="col-span-3 px-2 py-1 rounded border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] text-xs font-bold"
+                                />
+                                <input
+                                  type="text"
+                                  value={row.sub_series || ""}
+                                  onChange={(e) =>
+                                    setRevVolumes((prev) =>
+                                      prev.map((r, i) => (i === idx ? { ...r, sub_series: e.target.value } : r))
+                                    )
+                                  }
+                                  placeholder="תת-סדרה / מסכת"
+                                  className="col-span-3 px-2 py-1 rounded border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] text-xs"
+                                />
+                                <input
+                                  type="text"
+                                  value={row.coverage_range || ""}
+                                  onChange={(e) =>
+                                    setRevVolumes((prev) =>
+                                      prev.map((r, i) => (i === idx ? { ...r, coverage_range: e.target.value } : r))
+                                    )
+                                  }
+                                  placeholder="טווח סימנים / דפים"
+                                  className="col-span-3 px-2 py-1 rounded border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] text-xs"
+                                />
+                                <input
+                                  type="number"
+                                  min={1}
+                                  max={50}
+                                  value={row.copiesCount}
+                                  onChange={(e) =>
+                                    setRevVolumes((prev) =>
+                                      prev.map((r, i) =>
+                                        i === idx ? { ...r, copiesCount: Math.max(1, Number(e.target.value) || 1) } : r
+                                      )
+                                    )
+                                  }
+                                  title="כמות עותקים"
+                                  className="col-span-2 px-1 py-1 rounded border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] text-xs text-center tabular-nums font-bold"
+                                />
+                                <div className="col-span-1 flex justify-center">
+                                  <button
+                                    type="button"
+                                    onClick={() => setRevVolumes((prev) => prev.filter((_, i) => i !== idx))}
+                                    className="p-1 text-red-600 hover:bg-red-50 rounded cursor-pointer"
+                                    title="הסר שורה"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
+                                </div>
+                              </div>
                             </div>
                           ))}
                         </div>
@@ -2270,9 +2496,10 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
                     <button
                       type="button"
                       onClick={() => handleRejectReview(activeReviewItem.id)}
-                      className="px-3 py-2 rounded-lg text-xs font-medium text-red-600 hover:bg-red-50 cursor-pointer"
+                      className="px-3 py-2 rounded-lg text-xs font-semibold text-red-600 hover:bg-red-50 cursor-pointer"
+                      title="העבר לסל המחזור ל-30 יום"
                     >
-                      דחה והסר מהתור
+                      דחה והעבר לסל מחזור
                     </button>
                     <button
                       type="submit"
@@ -2297,6 +2524,18 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
             </>
           )}
         </div>
+      )}
+
+      {showRecycleBin && (
+        <RecycleBinModal
+          onClose={() => setShowRecycleBin(false)}
+          onRestoredBook={async () => {
+            await Promise.all([loadQueue(), onReload()]);
+          }}
+          onRestoredAi={async () => {
+            await Promise.all([loadQueue(), onReload()]);
+          }}
+        />
       )}
     </div>
   );
