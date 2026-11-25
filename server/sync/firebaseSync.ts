@@ -1419,13 +1419,22 @@ export class OtzarFirebaseSyncService {
 
     if (entity === "cabinet") {
       const code = String(data.code || "").trim();
-      const existing =
-        this.db.get<Record<string, unknown>>("SELECT * FROM cabinets WHERE sync_id = ?", syncId) ||
-        (code ? this.db.get<Record<string, unknown>>("SELECT * FROM cabinets WHERE code = ? AND deleted_at IS NULL", code) : undefined);
+      let existing = this.db.get<Record<string, unknown>>(
+        "SELECT * FROM cabinets WHERE sync_id = ?",
+        syncId
+      );
+
+      if (!existing && code) {
+        existing = this.db.get<Record<string, unknown>>(
+          "SELECT * FROM cabinets WHERE code = ? ORDER BY (CASE WHEN deleted_at IS NULL THEN 0 ELSE 1 END), id DESC LIMIT 1",
+          code
+        );
+      }
 
       if (existing && String(existing.updated_at || "") >= remoteUpdated) {
         return false;
       }
+
       if (deletedAt) {
         if (existing) {
           this.db.run(
@@ -1439,9 +1448,38 @@ export class OtzarFirebaseSyncService {
         }
         return false;
       }
+
       if (!code) return false;
+
+      // Collision guard: if another row in cabinets already uses this code, free soft-deleted or disambiguate
+      const collision = this.db.get<{ id: number; sync_id: string | null; deleted_at: string | null }>(
+        "SELECT id, sync_id, deleted_at FROM cabinets WHERE code = ? AND id != ?",
+        code,
+        existing ? (existing.id as number) : -1
+      );
+
+      if (collision) {
+        if (collision.deleted_at) {
+          this.db.run(
+            "UPDATE books SET cabinet_id = ? WHERE cabinet_id = ?",
+            existing ? (existing.id as number) : null,
+            collision.id
+          );
+          this.db.run("DELETE FROM cabinets WHERE id = ?", collision.id);
+        } else if (!existing) {
+          existing = this.db.get<Record<string, unknown>>("SELECT * FROM cabinets WHERE id = ?", collision.id);
+        } else {
+          this.db.run(
+            "UPDATE cabinets SET code = ? || '-' || id WHERE id = ?",
+            code,
+            collision.id
+          );
+        }
+      }
+
       const rWidthCm = data.width_cm != null && Number(data.width_cm) > 0 ? Number(data.width_cm) : null;
       const rDepthCm = data.depth_cm != null && Number(data.depth_cm) > 0 ? Number(data.depth_cm) : null;
+
       if (existing) {
         this.db.run(
           `UPDATE cabinets
