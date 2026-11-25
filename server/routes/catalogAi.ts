@@ -84,9 +84,79 @@ function getItemImagePaths(row: { image_path?: unknown; extra_images_json?: unkn
   return [first, ...extras].filter(Boolean);
 }
 
-function lookupExistingSetContext(db: DbClient, setName: string): ExistingSetContext | undefined {
+function normEditionToken(val?: string | null): string {
+  return String(val || "")
+    .trim()
+    .toLowerCase()
+    .replace(/^(הוצאת|מכון|מהדורת|מהדורה|דפוס)\s+/g, "")
+    .replace(/["'״׳()\[\]]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function editionsConflict(a?: string | null, b?: string | null): boolean {
+  const na = normEditionToken(a);
+  const nb = normEditionToken(b);
+  if (!na || !nb) return false;
+  if (na === nb || na.includes(nb) || nb.includes(na)) return false;
+  return true;
+}
+
+function disambiguateSetNameWithEdition(
+  db: DbClient,
+  setName: string,
+  edition?: string | null,
+  publisher?: string | null
+): string {
+  const cleanSet = String(setName || "").trim();
+  if (!cleanSet) return "";
+  const rawQual = String(edition || publisher || "")
+    .replace(/^(הוצאת|מכון|מהדורת)\s+/i, "")
+    .trim();
+  if (!rawQual) return cleanSet;
+
+  if (/\([^)]{2,40}\)$/.test(cleanSet)) return cleanSet;
+
+  const candidateQualified = `${cleanSet} (${rawQual})`;
+  const existingQualRow = db.get<{ set_name: string }>(
+    "SELECT set_name FROM books WHERE LOWER(set_name) = LOWER(?) AND deleted_at IS NULL LIMIT 1",
+    candidateQualified
+  );
+  if (existingQualRow?.set_name) return String(existingQualRow.set_name).trim();
+
+  const existingRows = db.all<{ edition: string; publisher: string }>(
+    "SELECT edition, publisher FROM books WHERE LOWER(set_name) = LOWER(?) AND deleted_at IS NULL ORDER BY updated_at DESC LIMIT 10",
+    cleanSet
+  );
+  if (existingRows.length > 0) {
+    const hasMatch = existingRows.some((r) => {
+      const sameEd = edition && r.edition && !editionsConflict(edition, r.edition);
+      const samePub = publisher && r.publisher && !editionsConflict(publisher, r.publisher);
+      return sameEd || samePub;
+    });
+    if (hasMatch) return cleanSet;
+
+    const hasConflict = existingRows.some((r) => {
+      const edConf = edition && r.edition && editionsConflict(edition, r.edition);
+      const pubConf = publisher && r.publisher && editionsConflict(publisher, r.publisher);
+      return edConf || pubConf;
+    });
+    if (hasConflict) {
+      return candidateQualified;
+    }
+  }
+  return cleanSet;
+}
+
+function lookupExistingSetContext(
+  db: DbClient,
+  setName: string,
+  edition?: string | null,
+  publisher?: string | null
+): ExistingSetContext | undefined {
   const clean = String(setName || "").trim();
   if (!clean) return undefined;
+  const resolvedName = disambiguateSetNameWithEdition(db, clean, edition, publisher);
   const row = db.get<{
     set_name: string;
     author: string;
@@ -96,12 +166,12 @@ function lookupExistingSetContext(db: DbClient, setName: string): ExistingSetCon
     category: string;
     tags: string;
   }>(
-    "SELECT set_name, author, publisher, pub_year, edition, category, tags, cabinet_id, shelf_number FROM books WHERE set_name = ? AND deleted_at IS NULL ORDER BY updated_at DESC LIMIT 1",
-    clean
+    "SELECT set_name, author, publisher, pub_year, edition, category, tags, cabinet_id, shelf_number FROM books WHERE LOWER(set_name) = LOWER(?) AND deleted_at IS NULL ORDER BY updated_at DESC LIMIT 1",
+    resolvedName
   );
   if (!row) return undefined;
   return {
-    set_name: String(row.set_name || clean).trim(),
+    set_name: String(row.set_name || resolvedName).trim(),
     author: String(row.author || "").trim(),
     publisher: String(row.publisher || "").trim(),
     pub_year: String(row.pub_year || "").trim(),
@@ -312,9 +382,12 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
               setExtracted.set_name = presetSetName;
             }
 
-            // Post-extraction auto set lookup if set_name was discovered by Gemini
+            // Post-extraction edition disambiguation & auto set lookup
+            if (setExtracted.set_name) {
+              setExtracted.set_name = disambiguateSetNameWithEdition(db, setExtracted.set_name, setExtracted.edition, setExtracted.publisher);
+            }
             const discoveredSetName = setExtracted.set_name || presetSetName;
-            const resolvedSetCtx = existingSetCtx || (discoveredSetName ? lookupExistingSetContext(db, discoveredSetName) : undefined);
+            const resolvedSetCtx = existingSetCtx || (discoveredSetName ? lookupExistingSetContext(db, discoveredSetName, setExtracted.edition, setExtracted.publisher) : undefined);
             if (resolvedSetCtx) {
               if (!setExtracted.author && resolvedSetCtx.author) setExtracted.author = resolvedSetCtx.author;
               if (!setExtracted.publisher && resolvedSetCtx.publisher) setExtracted.publisher = resolvedSetCtx.publisher;
@@ -414,9 +487,12 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
               extracted.set_name = presetSetName;
             }
 
-            // Post-extraction auto set lookup for single cover
+            // Post-extraction edition disambiguation & auto set lookup for single cover
+            if (extracted.set_name) {
+              extracted.set_name = disambiguateSetNameWithEdition(db, extracted.set_name, extracted.edition, extracted.publisher);
+            }
             const discoveredSetName = extracted.set_name || presetSetName;
-            const resolvedSetCtx = existingSetCtx || (discoveredSetName ? lookupExistingSetContext(db, discoveredSetName) : undefined);
+            const resolvedSetCtx = existingSetCtx || (discoveredSetName ? lookupExistingSetContext(db, discoveredSetName, extracted.edition, extracted.publisher) : undefined);
             if (resolvedSetCtx) {
               if (!extracted.author && resolvedSetCtx.author) extracted.author = resolvedSetCtx.author;
               if (!extracted.publisher && resolvedSetCtx.publisher) extracted.publisher = resolvedSetCtx.publisher;
@@ -1084,6 +1160,8 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
           const vGlobalNumRaw = volItem?.set_global_number != null && volItem?.set_global_number !== "" ? Number(volItem.set_global_number) : parsedTopGlobalNum;
           const vGlobalNum = vGlobalNumRaw != null && Number.isFinite(vGlobalNumRaw) && vGlobalNumRaw > 0 ? Math.round(vGlobalNumRaw) : null;
           const vCoverage = String(volItem?.coverage_range ?? coverage_range ?? "").trim();
+          const vPubYear = String(volItem?.pub_year ?? pub_year ?? "").trim();
+          const vFormatSize = String(volItem?.format_size ?? format_size ?? "").trim();
           const vCopies = Math.max(1, Math.min(20, Number(volItem.copiesCount) || 1));
           const vTitle = title
             ? String(title).trim()
@@ -1127,7 +1205,7 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
               vName,
               vCoverage,
               String(publisher || "").trim(),
-              String(pub_year || "").trim(),
+              vPubYear,
               String(edition || "").trim(),
               String(category || "").trim(),
               JSON.stringify(tagsArr),
@@ -1137,7 +1215,7 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
               String(vNotes).trim(),
               String(status),
               now,
-              String(format_size || "").trim(),
+              vFormatSize,
               parsedThickness,
               parsedPages,
               syncId,

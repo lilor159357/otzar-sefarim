@@ -277,6 +277,8 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
     sub_series?: string;
     set_global_number?: number | null;
     coverage_range?: string;
+    format_size?: string;
+    pub_year?: string;
     copiesCount: number;
     notes?: string;
   }>>([]);
@@ -508,6 +510,8 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
               sub_series: v.sub_series ? String(v.sub_series) : "",
               set_global_number: v.set_global_number ?? null,
               coverage_range: v.coverage_range ? String(v.coverage_range) : "",
+              format_size: (v as any).format_size ? String((v as any).format_size) : "",
+              pub_year: (v as any).pub_year ? String((v as any).pub_year) : "",
               copiesCount: Math.max(1, Number(v.copiesCount) || 1),
               notes: v.notes ? String(v.notes) : "",
             }))
@@ -515,11 +519,11 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
         : []
     );
     setRevPublisher(ex?.publisher || "");
-    setRevPubYear(ex?.pub_year || "");
+    setRevPubYear(ex?.pub_year || (rawVols.find((v: any) => v?.pub_year) as any)?.pub_year || "");
     setRevEdition(ex?.edition || "");
     setRevCategory(ex?.category || "הלכה");
     setRevTags(Array.isArray(ex?.tags) ? ex.tags.join(", ") : "");
-    setRevFormatSize((ex as any)?.format_size || "");
+    setRevFormatSize((ex as any)?.format_size || (rawVols.find((v: any) => v?.format_size) as any)?.format_size || "");
     setRevThicknessMm("");
     setRevPagesCount("");
     setRevNotes(ex?.notes || "");
@@ -1670,7 +1674,7 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
                 <button
                   type="button"
                   onClick={() => setUploadMode("batch_books")}
-                  className={"px-2.5 py-1 rounded-md text-xs font-semibold transition-colors cursor-pointer " + (uploadMode === "batch_books" ? "bg-[var(--otzar-accent)] text-white" : "bg-[var(--otzar-text-muted)] bg-[var(--otzar-surface-alt)] hover:text-[var(--otzar-text)]")}
+                  className={"px-2.5 py-1 rounded-md text-xs font-semibold transition-colors cursor-pointer " + (uploadMode === "batch_books" ? "bg-[var(--otzar-accent)] text-white" : "text-[var(--otzar-text-muted)] bg-[var(--otzar-surface-alt)] hover:text-[var(--otzar-text)]")}
                 >
                   מקבץ ספרים (תמונה לכל ספר)
                 </button>
