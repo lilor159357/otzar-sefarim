@@ -8,6 +8,7 @@ export interface ExtractedBookMetadata {
   sub_series?: string;
   set_global_number?: number | null;
   coverage_range?: string;
+  format_size?: string;
   author: string;
   volume: string;
   publisher: string;
@@ -26,6 +27,8 @@ export interface ExtractedShelfSetVolume {
   sub_series?: string;
   set_global_number?: number | null;
   coverage_range?: string;
+  format_size?: string;
+  pub_year?: string;
   copiesCount: number;
   notes?: string;
 }
@@ -794,6 +797,8 @@ export interface ExistingSetContext {
   edition?: string;
   category?: string;
   tags?: string[];
+  cabinet_id?: number | null;
+  shelf_number?: number | null;
 }
 
 export async function analyzeShelfSetImages(
@@ -912,6 +917,8 @@ export async function analyzeShelfSetImages(
         sub_series: v.sub_series ? String(v.sub_series).trim() : "",
         set_global_number: Number.isFinite(gn) && gn > 0 ? Math.round(gn) : null,
         coverage_range: v.coverage_range ? String(v.coverage_range).trim() : "",
+        format_size: v.format_size ? String(v.format_size).trim() : undefined,
+        pub_year: v.pub_year ? String(v.pub_year).trim() : undefined,
         copiesCount: Math.max(1, Number(v.copiesCount) || 1),
         notes: v.notes ? String(v.notes).trim() : undefined,
       };
@@ -1241,4 +1248,66 @@ export function buildBookEmbeddingText(book: {
   ]
     .filter(Boolean)
     .join(" | ");
+}
+
+export async function enrichBookWithGoogleSearch(
+  db: DbClient,
+  bookInfo: { title: string; author?: string; publisher?: string; set_name?: string }
+): Promise<{
+  standard_title?: string;
+  author?: string;
+  publisher?: string;
+  pub_year?: string;
+  description?: string;
+  category?: string;
+  tags?: string[];
+} | null> {
+  const cfg = getAiConfig(db);
+  if (!cfg.hasAnyKey) return null;
+
+  try {
+    const { result: response } = await executeWithModelAndKeyFallback(
+      db,
+      "gemini-3.1-flash-lite",
+      true,
+      async (apiKey, activeModel, _entry, signal) => {
+        const ai = createClient(apiKey);
+        return ai.models.generateContent({
+          model: activeModel,
+          contents: `חפש מידע ביבליוגרפי על הספר התורני הבא: "${bookInfo.title}" ${bookInfo.author ? `מאת ${bookInfo.author}` : ""} ${bookInfo.publisher ? `הוצאת ${bookInfo.publisher}` : ""}.
+החזר אך ורק אובייקט JSON תקין עם השדות:
+{
+  "standard_title": "שם הספר התקני והמלא",
+  "author": "שם המחבר המקובל",
+  "publisher": "הוצאה לאור מוכרת",
+  "pub_year": "שנת הדפסה עברית או לועזית",
+  "description": "תיאור תמציתי ומדויק של תוכן הספר ונושאיו (2-3 משפטים)",
+  "category": "קטגוריה תורנית ראשית",
+  "tags": ["תגית 1", "תגית 2", "תגית 3"]
+}`,
+          config: {
+            abortSignal: signal,
+            tools: [{ googleSearch: {} }],
+            responseMimeType: "application/json",
+          },
+        });
+      },
+      { timeoutMs: 12_000 }
+    );
+
+    const raw = (response.text || "{}").trim();
+    const parsed = JSON.parse(raw);
+    return {
+      standard_title: parsed.standard_title ? String(parsed.standard_title).trim() : undefined,
+      author: parsed.author ? String(parsed.author).trim() : undefined,
+      publisher: parsed.publisher ? String(parsed.publisher).trim() : undefined,
+      pub_year: parsed.pub_year ? String(parsed.pub_year).trim() : undefined,
+      description: parsed.description ? String(parsed.description).trim() : undefined,
+      category: parsed.category ? String(parsed.category).trim() : undefined,
+      tags: Array.isArray(parsed.tags) ? parsed.tags.map((t: any) => String(t).trim()).filter(Boolean).slice(0, 8) : undefined,
+    };
+  } catch (err: any) {
+    console.warn("[enrichBookWithGoogleSearch] Google search enrichment skipped safely:", err?.message || err);
+    return null;
+  }
 }

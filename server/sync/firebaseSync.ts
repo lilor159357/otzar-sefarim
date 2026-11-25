@@ -409,6 +409,7 @@ export class OtzarFirebaseSyncService {
   private appSeq = 0;
   private unsubscribers: Unsubscribe[] = [];
   private relayProcessing = new Set<string>();
+  private relayChunkStaging = new Map<string, { parts: Map<number, string>; total: number; meta: Record<string, unknown>; timer: NodeJS.Timeout }>();
   private syncInFlight: Promise<{ pushed: number; pulled: number }> | null = null;
   private flushTimer: NodeJS.Timeout | null = null;
   private periodicTimer: NodeJS.Timeout | null = null;
@@ -907,11 +908,97 @@ export class OtzarFirebaseSyncService {
     this.unsubscribers.push(unsubStrings);
   }
 
+  
+  private async finalizeChunkedRelay(groupId: string, staging: { parts: Map<number, string>; total: number; meta: Record<string, unknown> }): Promise<void> {
+    if (!this.firestore) return;
+    const sortedIndices = Array.from(staging.parts.keys()).sort((a, b) => a - b);
+    const savedPaths = sortedIndices.map((i) => staging.parts.get(i)!).filter(Boolean);
+    if (savedPaths.length === 0) return;
+
+    const data = staging.meta;
+    let defaultCabId: number | null = null;
+    const cabSyncId = String(data.default_cabinet_sync_id || "").trim();
+    const cabCode = String(data.default_cabinet_code || "").trim();
+    if (cabSyncId) {
+      defaultCabId =
+        this.db.get<{ id: number }>("SELECT id FROM cabinets WHERE sync_id = ? AND deleted_at IS NULL", cabSyncId)?.id ?? null;
+    }
+    if (!defaultCabId && cabCode) {
+      defaultCabId =
+        this.db.get<{ id: number }>("SELECT id FROM cabinets WHERE code = ? AND deleted_at IS NULL", cabCode)?.id ?? null;
+    }
+    const rawShelf = Number(data.default_shelf_number);
+    const defaultShelf = Number.isFinite(rawShelf) && rawShelf > 0 ? Math.round(rawShelf) : null;
+    const [firstPath, ...extraPaths] = savedPaths;
+    const createdAt = String(data.created_at || new Date().toISOString());
+    const setBatchId = data.set_batch_id ? String(data.set_batch_id).trim() : null;
+    const isShelfSet = data.is_shelf_set ? 1 : 0;
+    const presetSetName = data.preset_set_name ? String(data.preset_set_name).trim() : "";
+    const initialMeta: Record<string, unknown> = {};
+    if (presetSetName) initialMeta.set_name = presetSetName;
+    if (isShelfSet === 1 && typeof data.title_images_count === "number" && Number.isFinite(data.title_images_count)) {
+      initialMeta._title_images_count = Math.max(0, Math.round(data.title_images_count));
+    }
+    const initialExtractedJson = Object.keys(initialMeta).length > 0 ? JSON.stringify(initialMeta) : "";
+
+    this.db.run(
+      `INSERT INTO ai_catalog_queue 
+       (image_path, extra_images_json, default_cabinet_id, default_shelf_number, source_relay_id, set_batch_id, is_shelf_set, extracted_json, processing_status, approval_status, created_at) 
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'pending', ?)`,
+      firstPath,
+      JSON.stringify(extraPaths),
+      defaultCabId,
+      defaultShelf,
+      groupId,
+      setBatchId,
+      isShelfSet,
+      initialExtractedJson,
+      createdAt
+    );
+
+    setSyncStateVal(this.db, "last_sync_at", new Date().toISOString());
+    this.onRelayArrived();
+  }
+
+  public async submitBugReport(params: {
+    title: string;
+    description: string;
+    category: string;
+    platform: string;
+    appVersion: string;
+    diagnostics?: string;
+    screenshotBase64?: string;
+    userEmail?: string;
+  }): Promise<{ ok: boolean; reportId: string }> {
+    const reportId = `rep_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const nowIso = new Date().toISOString();
+
+    if (this.firestore && this.connected) {
+      await setDoc(doc(this.firestore, "bug_reports", reportId), {
+        report_id: reportId,
+        title: params.title,
+        description: params.description,
+        category: params.category || "כללי",
+        platform: params.platform || "Desktop",
+        app_version: params.appVersion || "v1.0.17",
+        diagnostics: params.diagnostics || "{}",
+        screenshot_base64: params.screenshotBase64 ? params.screenshotBase64.substring(0, 500000) : null,
+        user_email: params.userEmail || "anonymous",
+        status: "open",
+        created_at: nowIso,
+      });
+      return { ok: true, reportId };
+    }
+
+    return { ok: true, reportId };
+  }
+
   private async processRelayDocument(relayId: string, data: Record<string, unknown>): Promise<void> {
     if (!this.firestore) return;
     if (this.relayProcessing.has(relayId)) return;
     this.relayProcessing.add(relayId);
     try {
+      // Multi-part chunked relay handling (<450KB each from mobile)
       // Idempotency check in SQLite
       const already = this.db.get<{ id: number }>("SELECT id FROM ai_catalog_queue WHERE source_relay_id = ?", relayId);
       if (already) {
@@ -934,6 +1021,41 @@ export class OtzarFirebaseSyncService {
         fs.writeFileSync(dest, Buffer.from(clean, "base64"));
         return dest;
       };
+
+            // Multi-part chunked relay handling (<450KB each from mobile)
+      if (typeof data.group_id === "string" && typeof data.total_parts === "number" && (data.total_parts as number) > 1) {
+        const groupId = String(data.group_id).trim();
+        const totalParts = Number(data.total_parts) || 1;
+        const partIndex = Number(data.part_index) || 0;
+        let staging = this.relayChunkStaging.get(groupId);
+        if (!staging) {
+          staging = {
+            parts: new Map(),
+            total: totalParts,
+            meta: data,
+            timer: setTimeout(() => {
+              const currentSt = this.relayChunkStaging.get(groupId);
+              if (currentSt && currentSt.parts.size > 0) {
+                void this.finalizeChunkedRelay(groupId, currentSt);
+              }
+              this.relayChunkStaging.delete(groupId);
+            }, 300000),
+          };
+          this.relayChunkStaging.set(groupId, staging);
+        }
+        const savedPartPath = saveB64(data.image_base64, data.mime_type);
+        if (savedPartPath) {
+          staging.parts.set(partIndex, savedPartPath);
+        }
+        await deleteDoc(doc(this.firestore, "ai_relay_queue", relayId));
+        this.addSparkUsage({ deletes: 1, relayProcessed: 1 });
+        if (staging.parts.size >= staging.total) {
+          clearTimeout(staging.timer);
+          this.relayChunkStaging.delete(groupId);
+          await this.finalizeChunkedRelay(groupId, staging);
+        }
+        return;
+      }
 
       const savedPaths: string[] = [];
       const mainPath = saveB64(data.image_base64, data.mime_type);
@@ -1112,6 +1234,7 @@ export class OtzarFirebaseSyncService {
         }
       }
       try {
+        await this.pushLibraryMeta().catch(() => {});
         const pushed = await this.pushOutboxAll();
         const pulled = await this.pullDeltaAll();
         this.offline = false;

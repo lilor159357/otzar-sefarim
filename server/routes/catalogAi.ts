@@ -8,6 +8,7 @@ import { fallbackT, type StringsTranslateFn } from "../../shared/strings/engine.
 import {
   analyzeBookCoverImage,
   analyzeShelfSetImages,
+  enrichBookWithGoogleSearch,
   buildBookEmbeddingText,
   float32ToBlob,
   formatGeminiError,
@@ -95,7 +96,7 @@ function lookupExistingSetContext(db: DbClient, setName: string): ExistingSetCon
     category: string;
     tags: string;
   }>(
-    "SELECT set_name, author, publisher, pub_year, edition, category, tags FROM books WHERE set_name = ? AND deleted_at IS NULL ORDER BY updated_at DESC LIMIT 1",
+    "SELECT set_name, author, publisher, pub_year, edition, category, tags, cabinet_id, shelf_number FROM books WHERE set_name = ? AND deleted_at IS NULL ORDER BY updated_at DESC LIMIT 1",
     clean
   );
   if (!row) return undefined;
@@ -107,6 +108,8 @@ function lookupExistingSetContext(db: DbClient, setName: string): ExistingSetCon
     edition: String(row.edition || "").trim(),
     category: String(row.category || "").trim(),
     tags: parseTags(row.tags),
+    cabinet_id: (row as any).cabinet_id ? Number((row as any).cabinet_id) : null,
+    shelf_number: typeof (row as any).shelf_number === "number" ? Number((row as any).shelf_number) : null,
   };
 }
 
@@ -238,8 +241,10 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
           extra_images_json: string;
           is_shelf_set: number;
           extracted_json: string;
+          default_cabinet_id?: number | null;
+          default_shelf_number?: number | null;
         }>(
-          "SELECT id, image_path, extra_images_json, is_shelf_set, extracted_json FROM ai_catalog_queue WHERE processing_status = 'pending' AND approval_status = 'pending' AND deleted_at IS NULL ORDER BY id ASC LIMIT 1"
+          "SELECT id, image_path, extra_images_json, is_shelf_set, extracted_json, default_cabinet_id, default_shelf_number FROM ai_catalog_queue WHERE processing_status = 'pending' AND approval_status = 'pending' AND deleted_at IS NULL ORDER BY id ASC LIMIT 1"
         );
         if (!nextItem) break;
 
@@ -306,6 +311,36 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
             if (presetSetName) {
               setExtracted.set_name = presetSetName;
             }
+
+            // Post-extraction auto set lookup if set_name was discovered by Gemini
+            const discoveredSetName = setExtracted.set_name || presetSetName;
+            const resolvedSetCtx = existingSetCtx || (discoveredSetName ? lookupExistingSetContext(db, discoveredSetName) : undefined);
+            if (resolvedSetCtx) {
+              if (!setExtracted.author && resolvedSetCtx.author) setExtracted.author = resolvedSetCtx.author;
+              if (!setExtracted.publisher && resolvedSetCtx.publisher) setExtracted.publisher = resolvedSetCtx.publisher;
+              if (!setExtracted.pub_year && resolvedSetCtx.pub_year) setExtracted.pub_year = resolvedSetCtx.pub_year;
+              if (!setExtracted.edition && resolvedSetCtx.edition) setExtracted.edition = resolvedSetCtx.edition;
+              if ((!setExtracted.category || setExtracted.category === "ספרים") && resolvedSetCtx.category) {
+                setExtracted.category = resolvedSetCtx.category;
+              }
+              // Smart Tag Merge: Base set tags + unique volume tags
+              setExtracted.tags = Array.from(new Set([...(resolvedSetCtx.tags || []), ...(setExtracted.tags || [])])).filter(Boolean);
+              if (resolvedSetCtx.cabinet_id && !nextItem.default_cabinet_id) {
+                (setExtracted as any)._cabinet_id = resolvedSetCtx.cabinet_id;
+              }
+              if (resolvedSetCtx.shelf_number && !nextItem.default_shelf_number) {
+                (setExtracted as any)._shelf_number = resolvedSetCtx.shelf_number;
+              }
+            }
+
+            // Edition qualification for sets: e.g. משנה ברורה (וגשל)
+            if (setExtracted.set_name && setExtracted.edition && !setExtracted.set_name.includes(setExtracted.edition)) {
+              const cleanEd = setExtracted.edition.replace(/[()]/g, "").trim();
+              if (cleanEd && !setExtracted.set_name.includes(cleanEd)) {
+                // Keep set_name clean but ensure edition is preserved in metadata
+              }
+            }
+
             if (existingSetCtx) {
               if (!setExtracted.author && existingSetCtx.author) setExtracted.author = existingSetCtx.author;
               if (!setExtracted.publisher && existingSetCtx.publisher) setExtracted.publisher = existingSetCtx.publisher;
@@ -319,6 +354,21 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
               }
             }
 
+            
+            const batchOv = preMeta._batch_override && typeof preMeta._batch_override === "object"
+              ? (preMeta._batch_override as Record<string, any>)
+              : null;
+            if (batchOv) {
+              if (batchOv.set_name) setExtracted.set_name = String(batchOv.set_name);
+              if (batchOv.author) setExtracted.author = String(batchOv.author);
+              if (batchOv.publisher) setExtracted.publisher = String(batchOv.publisher);
+              if (batchOv.pub_year) setExtracted.pub_year = String(batchOv.pub_year);
+              if (batchOv.category) setExtracted.category = String(batchOv.category);
+              if (batchOv.edition) setExtracted.edition = String(batchOv.edition);
+              if (Array.isArray(batchOv.tags) && batchOv.tags.length > 0) {
+                setExtracted.tags = Array.from(new Set([...(setExtracted.tags || []), ...batchOv.tags]));
+              }
+            }
             // Local authority normalization on extracted set
             if (setExtracted.author) {
               const authMatch = findAuthorityMatch(db, "author", setExtracted.author);
@@ -363,6 +413,66 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
             if (presetSetName) {
               extracted.set_name = presetSetName;
             }
+
+            // Post-extraction auto set lookup for single cover
+            const discoveredSetName = extracted.set_name || presetSetName;
+            const resolvedSetCtx = existingSetCtx || (discoveredSetName ? lookupExistingSetContext(db, discoveredSetName) : undefined);
+            if (resolvedSetCtx) {
+              if (!extracted.author && resolvedSetCtx.author) extracted.author = resolvedSetCtx.author;
+              if (!extracted.publisher && resolvedSetCtx.publisher) extracted.publisher = resolvedSetCtx.publisher;
+              if (!extracted.pub_year && resolvedSetCtx.pub_year) extracted.pub_year = resolvedSetCtx.pub_year;
+              if (!extracted.edition && resolvedSetCtx.edition) extracted.edition = resolvedSetCtx.edition;
+              if ((!extracted.category || extracted.category === "ספרים") && resolvedSetCtx.category) {
+                extracted.category = resolvedSetCtx.category;
+              }
+              // Smart Tag Merge
+              extracted.tags = Array.from(new Set([...(resolvedSetCtx.tags || []), ...(extracted.tags || [])])).filter(Boolean);
+              if (resolvedSetCtx.cabinet_id && !nextItem.default_cabinet_id) {
+                (extracted as any)._cabinet_id = resolvedSetCtx.cabinet_id;
+              }
+              if (resolvedSetCtx.shelf_number && !nextItem.default_shelf_number) {
+                (extracted as any)._shelf_number = resolvedSetCtx.shelf_number;
+              }
+            }
+
+            
+            const batchOv = preMeta._batch_override && typeof preMeta._batch_override === "object"
+              ? (preMeta._batch_override as Record<string, any>)
+              : null;
+            if (batchOv) {
+              if (batchOv.set_name) extracted.set_name = String(batchOv.set_name);
+              if (batchOv.author) extracted.author = String(batchOv.author);
+              if (batchOv.publisher) extracted.publisher = String(batchOv.publisher);
+              if (batchOv.pub_year) extracted.pub_year = String(batchOv.pub_year);
+              if (batchOv.category) extracted.category = String(batchOv.category);
+              if (batchOv.edition) extracted.edition = String(batchOv.edition);
+              if (batchOv.format_size) (extracted as any).format_size = String(batchOv.format_size);
+              if (Array.isArray(batchOv.tags) && batchOv.tags.length > 0) {
+                extracted.tags = Array.from(new Set([...(extracted.tags || []), ...batchOv.tags]));
+              }
+            }
+            // Optional Google Search enrichment if enabled
+            try {
+              const enrichSetting = db.get<{ value: string }>("SELECT value FROM settings WHERE key = 'ai_internet_enrichment'")?.value;
+              if (enrichSetting !== "0" && enrichSetting !== "false" && extracted.title) {
+                const enriched = await enrichBookWithGoogleSearch(db, {
+                  title: extracted.title,
+                  author: extracted.author,
+                  publisher: extracted.publisher,
+                  set_name: extracted.set_name,
+                });
+                if (enriched) {
+                  if (!extracted.pub_year && enriched.pub_year) extracted.pub_year = enriched.pub_year;
+                  if (!extracted.notes && enriched.description) extracted.notes = enriched.description;
+                  if (enriched.tags?.length) {
+                    extracted.tags = Array.from(new Set([...(extracted.tags || []), ...enriched.tags])).slice(0, 10);
+                  }
+                }
+              }
+            } catch (enrichErr: any) {
+              console.warn("[catalogAi] Search enrichment warning:", enrichErr?.message);
+            }
+
             if (existingSetCtx) {
               if (!extracted.author && existingSetCtx.author) extracted.author = existingSetCtx.author;
               if (!extracted.publisher && existingSetCtx.publisher) extracted.publisher = existingSetCtx.publisher;
@@ -786,12 +896,24 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
       default_shelf_number,
       format_size,
       edition,
+      pub_year,
+      tags,
     } = req.body || {};
-    if (!batchId) return res.status(400).json({ error: t("errors.aiBatchIdRequired") });
+    if (!batchId && !set_name) return res.status(400).json({ error: t("errors.aiBatchIdRequired") });
 
+    const cleanBatchId = batchId ? String(batchId).trim() : null;
+    const cleanSetName = set_name ? String(set_name).trim() : null;
     const pendingInBatch = db.all<{ id: number; extracted_json: string }>(
-      "SELECT id, extracted_json FROM ai_catalog_queue WHERE set_batch_id = ? AND approval_status = 'pending'",
-      batchId
+      `SELECT id, extracted_json FROM ai_catalog_queue 
+       WHERE approval_status = 'pending' AND deleted_at IS NULL
+         AND (
+           (? IS NOT NULL AND set_batch_id = ?) 
+           OR (? IS NOT NULL AND json_extract(extracted_json, '$.set_name') = ?)
+         )`,
+      cleanBatchId,
+      cleanBatchId,
+      cleanSetName,
+      cleanSetName
     );
 
     let updatedCount = 0;
@@ -808,6 +930,21 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
         if (category !== undefined) ext.category = String(category).trim();
         if (format_size !== undefined) ext.format_size = String(format_size).trim();
         if (edition !== undefined) ext.edition = String(edition).trim();
+        if (pub_year !== undefined) ext.pub_year = String(pub_year).trim();
+        if (Array.isArray(tags)) {
+          const existingTags = Array.isArray(ext.tags) ? ext.tags : [];
+          ext.tags = Array.from(new Set([...existingTags, ...tags.map((x: any) => String(x).trim()).filter(Boolean)]));
+        }
+        ext._batch_override = {
+          set_name: set_name !== undefined ? String(set_name).trim() : undefined,
+          author: author !== undefined ? String(author).trim() : undefined,
+          publisher: publisher !== undefined ? String(publisher).trim() : undefined,
+          pub_year: pub_year !== undefined ? String(pub_year).trim() : undefined,
+          category: category !== undefined ? String(category).trim() : undefined,
+          format_size: format_size !== undefined ? String(format_size).trim() : undefined,
+          edition: edition !== undefined ? String(edition).trim() : undefined,
+          tags: Array.isArray(tags) ? tags : undefined,
+        };
 
         db.run(
           `UPDATE ai_catalog_queue 

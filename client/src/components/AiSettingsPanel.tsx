@@ -456,6 +456,23 @@ export const AiSettingsPanel: React.FC<AiSettingsPanelProps> = ({ settings, setS
                   חלוקת המפתחות פותרת מגבלת מכסה (429), ואילו בעומס 503 על מודל מסוים המערכת עוברת אוטומטית למודל גיבוי יציב (gemini-3.5-flash / gemini-2.5-flash) בלי לעצור את התור.
                 </span>
               </span>
+
+            <label className="mt-2.5 flex items-start gap-2 text-xs cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={settings.ai_internet_enrichment !== "false" && settings.ai_internet_enrichment !== "0"}
+                onChange={(e) =>
+                  setSettings((p) => ({ ...p, ai_internet_enrichment: e.target.checked ? "true" : "false" }))
+                }
+                className="mt-0.5 rounded accent-[var(--otzar-accent)]"
+              />
+              <span>
+                <strong>השלמה ודיוק ביבליוגרפי מהאינטרנט (gemini-3.1-flash-lite + חיפוש גוגל):</strong>{" "}
+                <span className="text-[var(--otzar-text-muted)]">
+                  לאחר זיהוי ראשוני מהתמונה, המערכת מבצעת אימות מהיר ברשת להשלמת שם ספר תקני, שנת הוצאה ותיאור תוכן מדויק (אינו פוגע או חוסם במקרה של מגבלת מכסה).
+                </span>
+              </span>
+            </label>
             </label>
           </div>
 

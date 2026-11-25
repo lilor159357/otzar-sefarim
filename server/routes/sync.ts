@@ -25,6 +25,28 @@ function parseTagsSafe(raw: unknown): string[] {
 }
 
 export function registerSyncRoutes(app: Express, db: DbClient, syncService: OtzarFirebaseSyncService, t: StringsTranslateFn = fallbackT) {
+  app.post("/api/bug-report", async (req, res) => {
+    try {
+      const { title, description, category, diagnostics, screenshotBase64 } = req.body || {};
+      if (!title || typeof title !== "string" || !title.trim()) {
+        return res.status(400).json({ error: "כותרת התקלה היא שדה חובה" });
+      }
+      const userEmail = "desktop-user";
+      const result = await syncService.submitBugReport({
+        title: title.trim(),
+        description: String(description || "").trim(),
+        category: String(category || "כללי").trim(),
+        platform: "Desktop",
+        appVersion: "1.0.17",
+        diagnostics: typeof diagnostics === "string" ? diagnostics : JSON.stringify(diagnostics || {}),
+        screenshotBase64: typeof screenshotBase64 === "string" ? screenshotBase64 : undefined,
+        userEmail,
+      });
+      res.json({ ok: true, reportId: result.reportId });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "שגיאה בשמירת דיווח התקלה" });
+    }
+  });
   app.get("/api/sync/status", (req, res) => {
     const status = syncService.getStatus();
     if (!isAdminRequest(req)) {

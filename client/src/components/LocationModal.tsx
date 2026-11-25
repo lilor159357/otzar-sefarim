@@ -186,6 +186,43 @@ export const LocationModal: React.FC<LocationModalProps> = ({
     };
   }, [book.set_name, book.barcode]);
 
+  // Auto-pull set details in LocationModal edit mode
+  const handlePullSetDetailsInEdit = async (targetSetName: string, overwrite = false) => {
+    const q = targetSetName.trim();
+    if (!q) return;
+    try {
+      const res = await fetch("/api/books/set-details?setName=" + encodeURIComponent(q));
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data.found && data.details) {
+        const d = data.details;
+        if (d.author) setAuthor((p) => (overwrite || !p.trim() ? d.author : p));
+        if (d.publisher) setPublisher((p) => (overwrite || !p.trim() ? d.publisher : p));
+        if (d.pub_year) setPubYear((p) => (overwrite || !p.trim() ? d.pub_year : p));
+        if (d.edition) setEdition((p) => (overwrite || !p.trim() ? d.edition : p));
+        if (d.category) setCategory((p) => (overwrite || !p.trim() || p === "ספרים" ? d.category : p));
+        if (d.cabinet_id && (overwrite || !cabinetId)) setCabinetId(String(d.cabinet_id));
+        if (d.shelf_number && overwrite) setShelfNumber(Number(d.shelf_number));
+        if (Array.isArray(d.tags) && d.tags.length > 0) {
+          setTagsText((prev) => {
+            const cur = prev.split(",").map((x) => x.trim()).filter(Boolean);
+            return Array.from(new Set([...d.tags, ...cur])).filter(Boolean).join(", ");
+          });
+        }
+      }
+    } catch {}
+  };
+
+  useEffect(() => {
+    if (!editing) return;
+    const q = setName.trim();
+    if (!q || q === (book.set_name || "").trim()) return;
+    const t = setTimeout(() => {
+      void handlePullSetDetailsInEdit(q, false);
+    }, 350);
+    return () => clearTimeout(t);
+  }, [setName, editing]);
+
   const activeCabId = editing ? (cabinetId ? Number(cabinetId) : null) : book.cabinet_id;
   const cabinet = cabinets.find((c) => c.id === activeCabId) || null;
   const totalShelves = cabinet?.shelves_count || book.cabinet_shelves_count || 5;

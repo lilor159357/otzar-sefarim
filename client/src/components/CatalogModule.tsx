@@ -173,6 +173,8 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
   const [queueItems, setQueueItems] = useState<AiQueueItem[]>([]);
   const [workerRunning, setWorkerRunning] = useState(false);
   const [uploadingAi, setUploadingAi] = useState(false);
+  const [uploadMode, setUploadMode] = useState<"single_book" | "batch_books">("single_book");
+  const [refreshingQueue, setRefreshingQueue] = useState(false);
   const [compressionStats, setCompressionStats] = useState<string | null>(null);
   const [aiError, setAiError] = useState<string | null>(null);
 
@@ -331,14 +333,19 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
         const books = Array.isArray(data.books) ? data.books : [];
         if (books.length > 0) {
           const sample = books[books.length - 1];
+          const foundCabId = sample.cabinet_id ? Number(sample.cabinet_id) : null;
+          const foundShelf = sample.shelf_number ? Number(sample.shelf_number) : null;
+          // Auto-apply shelfExistingSet location
+          if (foundCabId) setShelfCabId(String(foundCabId));
+          if (foundShelf) setShelfNum(foundShelf);
           setShelfExistingSet({
             set_name: q,
             count: books.length,
             author: String(sample.author || ""),
             publisher: String(sample.publisher || ""),
-            cabinet_id: sample.cabinet_id ? Number(sample.cabinet_id) : null,
+            cabinet_id: foundCabId,
             cabinet_code: String(sample.cabinet_code || ""),
-            shelf_number: sample.shelf_number ? Number(sample.shelf_number) : null,
+            shelf_number: foundShelf,
           });
         } else {
           setShelfExistingSet(null);
@@ -364,7 +371,7 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
         const books = Array.isArray(data.books) ? data.books : [];
         if (books.length > 0) {
           const sample = books[books.length - 1];
-          setRevExistingSet({
+          const ctxInfo = {
             set_name: q,
             count: books.length,
             author: String(sample.author || ""),
@@ -376,7 +383,26 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
             cabinet_id: sample.cabinet_id ? Number(sample.cabinet_id) : null,
             cabinet_code: String(sample.cabinet_code || ""),
             shelf_number: sample.shelf_number ? Number(sample.shelf_number) : null,
-          });
+          };
+          setRevExistingSet(ctxInfo);
+          // Auto-apply revExistingSet details + merge tags
+          if (ctxInfo.author) setRevAuthor((prev) => prev.trim() || ctxInfo.author);
+          if (ctxInfo.publisher) setRevPublisher((prev) => prev.trim() || ctxInfo.publisher);
+          if (ctxInfo.pub_year) setRevPubYear((prev) => prev.trim() || ctxInfo.pub_year);
+          if (ctxInfo.edition) setRevEdition((prev) => prev.trim() || ctxInfo.edition);
+          if (ctxInfo.category) setRevCategory((prev) => (!prev.trim() || prev === "ספרים") ? ctxInfo.category : prev);
+          if (ctxInfo.format_size) setRevFormatSize((prev) => prev.trim() || ctxInfo.format_size);
+          if (ctxInfo.cabinet_id) setRevCabinetId((prev) => prev || String(ctxInfo.cabinet_id));
+          if (ctxInfo.shelf_number) setRevShelf(ctxInfo.shelf_number);
+          try {
+            const setTagsRaw = Array.isArray(sample.tags) ? sample.tags : (typeof sample.tags === "string" ? JSON.parse(sample.tags) : []);
+            if (Array.isArray(setTagsRaw) && setTagsRaw.length > 0) {
+              setRevTags((prev) => {
+                const cur = prev.split(",").map((x) => x.trim()).filter(Boolean);
+                return Array.from(new Set([...setTagsRaw.map((x: any) => String(x).trim()), ...cur])).filter(Boolean).join(", ");
+              });
+            }
+          } catch {}
         } else {
           setRevExistingSet(null);
         }
@@ -386,6 +412,37 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
     }, 280);
     return () => clearTimeout(t);
   }, [revSetName]);
+
+  // Auto-apply existing set in manual form
+  useEffect(() => {
+    const q = setName.trim();
+    if (!q) return;
+    const timer = setTimeout(async () => {
+      try {
+        const res = await fetch("/api/books/set-details?setName=" + encodeURIComponent(q));
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data.found && data.details) {
+          const d = data.details;
+          if (d.author) setAuthor((p) => p.trim() || d.author);
+          if (d.publisher) setPublisher((p) => p.trim() || d.publisher);
+          if (d.pub_year) setPubYear((p) => p.trim() || d.pub_year);
+          if (d.edition) setEdition((p) => p.trim() || d.edition);
+          if (d.category) setCategory((p) => (!p.trim() || p === "ספרים") ? d.category : p);
+          if (d.cabinet_id) setCabinetId(String(d.cabinet_id));
+          if (d.shelf_number) setShelfNumber(Number(d.shelf_number));
+          if (Array.isArray(d.tags) && d.tags.length > 0) {
+            setTagsText((prev) => {
+              const cur = prev.split(",").map((x) => x.trim()).filter(Boolean);
+              return Array.from(new Set([...d.tags, ...cur])).filter(Boolean).join(", ");
+            });
+          }
+          setManualNotice('זוהה סט קיים "' + q + '" — פרטי הסט והמיקום הוחלו אוטומטית!');
+        }
+      } catch {}
+    }, 320);
+    return () => clearTimeout(timer);
+  }, [setName]);
 
   const selectedManualCab = cabinets.find((c) => String(c.id) === cabinetId) || cabinets[0];
   const selectedRevCab = cabinets.find((c) => String(c.id) === revCabinetId) || cabinets[0];
@@ -448,6 +505,9 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
         ? rawVols.length > 0
           ? rawVols.map((v) => ({
               volume: String(v.volume || ""),
+              sub_series: v.sub_series ? String(v.sub_series) : "",
+              set_global_number: v.set_global_number ?? null,
+              coverage_range: v.coverage_range ? String(v.coverage_range) : "",
               copiesCount: Math.max(1, Number(v.copiesCount) || 1),
               notes: v.notes ? String(v.notes) : "",
             }))
@@ -467,9 +527,13 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
     setRevStatus("available");
     if (activeReviewItem.default_cabinet_id) {
       setRevCabinetId(String(activeReviewItem.default_cabinet_id));
+    } else if ((ex as any)?._cabinet_id) {
+      setRevCabinetId(String((ex as any)._cabinet_id));
     }
     if (activeReviewItem.default_shelf_number) {
       setRevShelf(activeReviewItem.default_shelf_number);
+    } else if ((ex as any)?._shelf_number) {
+      setRevShelf(Number((ex as any)._shelf_number));
     }
   }, [activeReviewItem?.id, activeReviewItem?.processing_status]);
 
@@ -592,11 +656,22 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
         });
       }
 
+      const payloadItems =
+        uploadMode === "single_book" && compressedItems.length > 1
+          ? [
+              {
+                images: compressedItems.map((c) => ({
+                  imageBase64: c.imageBase64,
+                  mimeType: c.mimeType,
+                })),
+              },
+            ]
+          : compressedItems;
       const resp = await fetch("/api/ai-queue/upload", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          items: compressedItems,
+          items: payloadItems,
           autoProcess: hasApiKey,
           set_batch_id: stickySetEnabled ? stickyBatchId : null,
           preset_set_name: stickySetEnabled ? stickyPresetSetName.trim() : "",
@@ -802,7 +877,7 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
   };
 
   const handleApplyBatchDetails = async () => {
-    if (!activeReviewItem?.set_batch_id) return;
+    if (!activeReviewItem?.set_batch_id && !revSetName.trim()) return;
     setApplyingBatch(true);
     setReviewNotice(null);
     try {
@@ -819,6 +894,8 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
           default_shelf_number: revShelf,
           format_size: revFormatSize.trim(),
           edition: revEdition.trim(),
+          pub_year: revPubYear.trim(),
+          tags: revTags.split(",").map((x) => x.trim()).filter(Boolean),
         }),
       });
       const data = await res.json();
@@ -1580,6 +1657,25 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
                 </p>
               </div>
               <div className="flex flex-wrap justify-center gap-2 pt-1">
+
+              <div className="w-full flex flex-wrap items-center justify-center gap-1.5 pb-1">
+                <span className="text-[11px] font-bold text-[var(--otzar-text-muted)]">מצב בחירת קבצים:</span>
+                <button
+                  type="button"
+                  onClick={() => setUploadMode("single_book")}
+                  className={"px-2.5 py-1 rounded-md text-xs font-semibold transition-colors cursor-pointer " + (uploadMode === "single_book" ? "bg-[var(--otzar-accent)] text-white" : "bg-[var(--otzar-surface-alt)] text-[var(--otzar-text-muted)] hover:text-[var(--otzar-text)]")}
+                >
+                  ספר יחיד (ריבוי דפים/שערים)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setUploadMode("batch_books")}
+                  className={"px-2.5 py-1 rounded-md text-xs font-semibold transition-colors cursor-pointer " + (uploadMode === "batch_books" ? "bg-[var(--otzar-accent)] text-white" : "bg-[var(--otzar-text-muted)] bg-[var(--otzar-surface-alt)] hover:text-[var(--otzar-text)]")}
+                >
+                  מקבץ ספרים (תמונה לכל ספר)
+                </button>
+              </div>
+
                 <input
                   ref={fileInputRef}
                   type="file"
@@ -1770,6 +1866,22 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
               </div>
 
               <div className="flex gap-2">
+                <button
+                  type="button"
+                  disabled={refreshingQueue}
+                  onClick={async () => {
+                    setRefreshingQueue(true);
+                    try {
+                      await loadQueue();
+                    } finally {
+                      setRefreshingQueue(false);
+                    }
+                  }}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold border border-[var(--otzar-border)] bg-[var(--otzar-surface)] text-[var(--otzar-text)] hover:bg-[var(--otzar-surface-alt)] cursor-pointer disabled:opacity-40"
+                >
+                  <RefreshCw className={"w-3.5 h-3.5 " + (refreshingQueue ? "animate-spin" : "")} />
+                  רענן תור AI
+                </button>
                 <button
                   type="button"
                   onClick={async () => {
@@ -2040,12 +2152,17 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
                   {/* Sticky Set Batch Banner */}
                   {(() => {
                     const batchId = activeReviewItem.set_batch_id;
-                    const otherCount = batchId
+                    const cleanSet = revSetName.trim();
+                    const otherCount = (batchId || cleanSet)
                       ? queueItems.filter(
-                          (q) => q.id !== activeReviewItem.id && q.set_batch_id === batchId && q.approval_status === "pending"
+                          (q) =>
+                            q.id !== activeReviewItem.id &&
+                            q.approval_status === "pending" &&
+                            ((batchId && q.set_batch_id === batchId) ||
+                              (cleanSet && String(q.extracted?.set_name || "").trim() === cleanSet))
                         ).length
                       : 0;
-                    if (!batchId || otherCount === 0) return null;
+                    if (otherCount === 0) return null;
                     return (
                       <div className="p-3 rounded-lg border border-amber-300 bg-amber-50 dark:bg-amber-950/40 dark:border-amber-800/60 text-amber-900 dark:text-amber-200 text-xs flex flex-wrap items-center justify-between gap-2">
                         <span className="font-semibold">

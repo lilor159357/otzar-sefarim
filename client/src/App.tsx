@@ -40,6 +40,8 @@ import { useStrings } from "./lib/stringsContext.tsx";
 import { WhatsNewModal, type RecentUpdateInfo } from "./components/WhatsNewModal.tsx";
 import { LabelsModule } from "./components/LabelsModule.tsx";
 import { AdminPinModal } from "./components/AdminPinModal.tsx";
+import { BugReportModal } from "./components/BugReportModal.tsx";
+import { Bug } from "lucide-react";
 import { installFetchAdminInterceptor, setAdminToken } from "./lib/adminSession.ts";
 
 installFetchAdminInterceptor();
@@ -72,6 +74,7 @@ export default function App() {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [isAdmin, setIsAdmin] = useState(false);
   const [showPinModal, setShowPinModal] = useState(false);
+  const [showBugReportModal, setShowBugReportModal] = useState(false);
   const [newPin, setNewPin] = useState("");
   const [pinMsg, setPinMsg] = useState<string | null>(null);
   const [backupMsg, setBackupMsg] = useState<string | null>(null);
@@ -318,6 +321,15 @@ export default function App() {
               </button>
             </>
           )}
+          <button
+            type="button"
+            onClick={() => setShowBugReportModal(true)}
+            title="דיווח על באג / תקלה"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border border-red-300 dark:border-red-900 bg-red-50 text-red-700 dark:bg-red-950/40 dark:text-red-300 hover:bg-red-100 transition-colors cursor-pointer shrink-0"
+          >
+            <Bug className="w-3.5 h-3.5" />
+            <span>דווח תקלה</span>
+          </button>
           <button
             type="button"
             onClick={toggleFullscreen}
@@ -1104,6 +1116,13 @@ export default function App() {
           }}
         />
       )}
+      <BugReportModal
+        isOpen={showBugReportModal}
+        onClose={() => setShowBugReportModal(false)}
+        appVersion="v1.0.17"
+        totalBooks={books.length}
+        totalCabinets={cabinets.length}
+      />
       {showPinModal && (
         <AdminPinModal
           onSuccess={async (t) => {

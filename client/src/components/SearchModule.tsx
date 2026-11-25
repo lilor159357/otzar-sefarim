@@ -1,5 +1,5 @@
 import React, { useMemo, useRef, useState } from "react";
-import { Search, MapPin, Plus, CheckCircle2, X, BookOpen, Pencil, Barcode } from "lucide-react";
+import { Search, MapPin, Plus, CheckCircle2, X, BookOpen, Pencil, Barcode, ArrowUpDown, Filter } from "lucide-react";
 import type { BookRow, CabinetRow, MapEntrance, RoomDimensions, VolumeNotationRule } from "../types.ts";
 import { STATUS_LABELS } from "../types.ts";
 import { LocationModal } from "./LocationModal.tsx";
@@ -47,6 +47,50 @@ export const SearchModule: React.FC<SearchModuleProps> = ({
   const { t } = useStrings();
   const [selectedBarcode, setSelectedBarcode] = useState<string | null>(null);
   const [openInEditMode, setOpenInEditMode] = useState(false);
+  const [sortBy, setSortBy] = useState<string>("title_asc");
+  const [cabinetFilter, setCabinetFilter] = useState<string>("all");
+  const [setTypeFilter, setSetTypeFilter] = useState<string>("all");
+  const displayBooks = useMemo(() => {
+    let list = [...books];
+    if (cabinetFilter !== "all") {
+      list = list.filter((b) => String(b.cabinet_id) === cabinetFilter);
+    }
+    if (setTypeFilter === "set_only") {
+      list = list.filter((b) => Boolean(b.set_name?.trim()));
+    } else if (setTypeFilter === "single_only") {
+      list = list.filter((b) => !b.set_name?.trim());
+    }
+    list.sort((a, b) => {
+      switch (sortBy) {
+        case "title_asc":
+          return (a.title || "").localeCompare(b.title || "", "he");
+        case "title_desc":
+          return (b.title || "").localeCompare(a.title || "", "he");
+        case "author_asc":
+          return (a.author || "").localeCompare(b.author || "", "he");
+        case "publisher_asc":
+          return (a.publisher || "").localeCompare(b.publisher || "", "he");
+        case "year_desc":
+          return (b.pub_year || "").localeCompare(a.pub_year || "", "he");
+        case "year_asc":
+          return (a.pub_year || "").localeCompare(b.pub_year || "", "he");
+        case "barcode_asc":
+          return (a.barcode || "").localeCompare(b.barcode || "");
+        case "location_asc": {
+          const cabA = a.cabinet_code || "";
+          const cabB = b.cabinet_code || "";
+          if (cabA !== cabB) return cabA.localeCompare(cabB, "he");
+          return (a.shelf_number || 0) - (b.shelf_number || 0);
+        }
+        case "recent_desc":
+          return (b.created_at || "").localeCompare(a.created_at || "");
+        default:
+          return 0;
+      }
+    });
+    return list;
+  }, [books, cabinetFilter, setTypeFilter, sortBy]);
+
   const selectedBook = books.find((b) => b.barcode === selectedBarcode) || null;
   const [showQuickAdd, setShowQuickAdd] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -221,7 +265,7 @@ export const SearchModule: React.FC<SearchModuleProps> = ({
             </select>
 
             <span className="text-[var(--otzar-text-muted)] tabular-nums">
-              {t("search.showingCount", { count: books.length })}
+              {t("search.showingCount", { count: displayBooks.length })}
             </span>
           </div>
         </div>
@@ -331,7 +375,7 @@ export const SearchModule: React.FC<SearchModuleProps> = ({
                   מחפש במאגר המקומי...
                 </td>
               </tr>
-            ) : books.length === 0 ? (
+            ) : displayBooks.length === 0 ? (
               <tr>
                 <td colSpan={6} className="py-10 text-center text-[var(--otzar-text-muted)]">
                   לא נמצאו ספרים התואמים לחיפוש &quot;{searchQuery}&quot;. נסה לקצר מילים או להחליף סינון.

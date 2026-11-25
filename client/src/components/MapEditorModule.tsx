@@ -21,13 +21,17 @@ function clampRotatedCabinet(c: CabinetRow, targetX: number, targetY: number) {
   const rad = ((c.rotation || 0) * Math.PI) / 180;
   const halfW = (Math.abs(c.width * Math.cos(rad)) + Math.abs(c.height * Math.sin(rad))) / 2;
   const halfH = (Math.abs(c.width * Math.sin(rad)) + Math.abs(c.height * Math.cos(rad))) / 2;
-  const minX = 15 + halfW - c.width / 2;
-  const maxX = MAP_WIDTH - 15 - halfW - c.width / 2;
-  const minY = 15 + halfH - c.height / 2;
-  const maxY = MAP_HEIGHT - 25 - halfH - c.height / 2;
+  const minCx = 15 + halfW;
+  const maxCx = Math.max(minCx, MAP_WIDTH - 15 - halfW);
+  const minCy = 15 + halfH;
+  const maxCy = Math.max(minCy, MAP_HEIGHT - 20 - halfH);
+  const targetCx = targetX + c.width / 2;
+  const targetCy = targetY + c.height / 2;
+  const clampedCx = Math.max(minCx, Math.min(maxCx, targetCx));
+  const clampedCy = Math.max(minCy, Math.min(maxCy, targetCy));
   return {
-    x: Math.round(Math.max(minX, Math.min(maxX, targetX))),
-    y: Math.round(Math.max(minY, Math.min(maxY, targetY))),
+    x: Math.round(clampedCx - c.width / 2),
+    y: Math.round(clampedCy - c.height / 2),
   };
 }
 
@@ -337,8 +341,12 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
           code: newCode.trim(),
           main_subject: newSubject.trim(),
           shelves_count: Number(newShelves) || 5,
-          x: 60 + ((draftCabinets.length * 30) % 400),
-          y: 260,
+          ...(() => {
+            const rawW = Math.max(40, Math.min(420, Math.round((Number(newWidthCm) || 120) * pxPerCmX)));
+            const rawH = Math.max(30, Math.min(300, Math.round((Number(newDepthCm) || 40) * pxPerCmY)));
+            const clampedNew = clampRotatedCabinet({ width: rawW, height: rawH, rotation: 0 } as any, 60 + ((draftCabinets.length * 30) % 400), 240);
+            return { x: clampedNew.x, y: clampedNew.y };
+          })(),
           width: Math.max(40, Math.min(420, Math.round((Number(newWidthCm) || 120) * pxPerCmX))),
           height: Math.max(30, Math.min(300, Math.round((Number(newDepthCm) || 40) * pxPerCmY))),
           width_cm: Number(newWidthCm) || 120,
