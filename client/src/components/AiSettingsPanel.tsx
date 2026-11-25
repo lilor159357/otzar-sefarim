@@ -467,7 +467,7 @@ export const AiSettingsPanel: React.FC<AiSettingsPanelProps> = ({ settings, setS
                 className="mt-0.5 rounded accent-[var(--otzar-accent)]"
               />
               <span>
-                <strong>השלמה ודיוק ביבליוגרפי מהאינטרנט (gemini-3.1-flash-lite + חיפוש גוגל):</strong>{" "}
+                <strong>השלמה ודיוק ביבליוגרפי מהאינטרנט (gemini-flash-lite-latest + חיפוש גוגל):</strong>{" "}
                 <span className="text-[var(--otzar-text-muted)]">
                   לאחר זיהוי ראשוני מהתמונה, המערכת מבצעת אימות מהיר ברשת להשלמת שם ספר תקני, שנת הוצאה ותיאור תוכן מדויק (אינו פוגע או חוסם במקרה של מגבלת מכסה).
                 </span>

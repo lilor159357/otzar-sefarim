@@ -1274,8 +1274,8 @@ export async function enrichBookWithGoogleSearch(
   try {
     const { result: response } = await executeWithModelAndKeyFallback(
       db,
-      "gemini-3.1-flash-lite",
-      true,
+      "gemini-flash-lite-latest",
+      false,
       async (apiKey, activeModel, _entry, signal) => {
         const ai = createClient(apiKey);
         return ai.models.generateContent({
