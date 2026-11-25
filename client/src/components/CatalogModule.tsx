@@ -21,11 +21,13 @@ import {
   Sparkles,
   BookCopy,
   ArrowLeftRight,
+  Wand2,
 } from "lucide-react";
 import { FORMAT_SIZE_OPTIONS, type AiQueueItem, type CabinetRow, type VolumeNotationRule } from "../types.ts";
 import { RecycleBinModal } from "./RecycleBinModal.tsx";
 import { getAdminToken } from "../lib/adminSession.ts";
 import { AutocompleteInput } from "./AutocompleteInput.tsx";
+import { SetPatternBuilderModal } from "./SetPatternBuilderModal.tsx";
 import { suggestNextVolume, compareSetBooks } from "../lib/torahUtils.ts";
 import { useStrings } from "../lib/stringsContext.tsx";
 
@@ -298,6 +300,13 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
   const [revNotes, setRevNotes] = useState("");
   const [approving, setApproving] = useState(false);
   const [reviewNotice, setReviewNotice] = useState<string | null>(null);
+  const [reanalyzeItemId, setReanalyzeItemId] = useState<number | null>(null);
+  const [reanalyzeHint, setReanalyzeHint] = useState("");
+  const [reanalyzeStrongModel, setReanalyzeStrongModel] = useState(false);
+  const [reanalyzingQueue, setReanalyzingQueue] = useState(false);
+  const [revSyncFields, setRevSyncFields] = useState<Record<string, boolean>>({});
+  const [revSetSyncCount, setRevSetSyncCount] = useState<{ booksCount: number; queueCount: number } | null>(null);
+  const [showRevPatternBuilder, setShowRevPatternBuilder] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
@@ -529,6 +538,11 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
     setRevNotes(ex?.notes || "");
     setRevCopies(1);
     setRevStatus("available");
+    setRevSyncFields({});
+    setShowRevPatternBuilder(false);
+    setReanalyzeItemId(null);
+    setReanalyzeHint("");
+    setReanalyzeStrongModel(false);
     if (activeReviewItem.default_cabinet_id) {
       setRevCabinetId(String(activeReviewItem.default_cabinet_id));
     } else if ((ex as any)?._cabinet_id) {
@@ -540,6 +554,79 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
       setRevShelf(Number((ex as any)._shelf_number));
     }
   }, [activeReviewItem?.id, activeReviewItem?.processing_status]);
+
+  useEffect(() => {
+    if (subTab !== "ai-review" || !activeReviewItem || !revSetName.trim()) {
+      setRevSetSyncCount(null);
+      return;
+    }
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      fetch(
+        `/api/books/set-sync-count?setName=${encodeURIComponent(revSetName.trim())}&excludeQueueId=${activeReviewItem.id}`
+      )
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d) => {
+          if (!cancelled && d) {
+            setRevSetSyncCount({
+              booksCount: Number(d.booksCount || 0),
+              queueCount: Number(d.queueCount || 0),
+            });
+          }
+        })
+        .catch(() => {});
+    }, 240);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [subTab, activeReviewItem?.id, revSetName]);
+
+  const renderRevSyncCheckbox = (fieldKey: string) => {
+    if (!revSetName.trim()) return null;
+    return (
+      <label className="inline-flex items-center gap-1 text-[11px] font-semibold text-[var(--otzar-accent)] cursor-pointer select-none">
+        <input
+          type="checkbox"
+          checked={Boolean(revSyncFields[fieldKey])}
+          onChange={(e) => setRevSyncFields((p) => ({ ...p, [fieldKey]: e.target.checked }))}
+          className="rounded accent-[var(--otzar-accent)]"
+        />
+        <span>לכל הסט</span>
+      </label>
+    );
+  };
+
+  const handleReanalyzeQueueItem = async (
+    itemId: number,
+    customPrompt?: string,
+    useStrongModel?: boolean
+  ) => {
+    setReanalyzingQueue(true);
+    setAiError(null);
+    setReviewNotice(null);
+    try {
+      const res = await fetch(`/api/ai-queue/${itemId}/retry`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          customPrompt: (customPrompt || "").trim(),
+          useStrongModel: Boolean(useStrongModel),
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "שגיאה בהפעלת פענוח מחדש");
+      setReanalyzeItemId(null);
+      setReanalyzeHint("");
+      setReanalyzeStrongModel(false);
+      setReviewNotice("הפריט הוחזר לתור לפענוח מחדש תוך שמירת כל התמונות המקוריות");
+      await loadQueue();
+    } catch (err: any) {
+      setAiError(err?.message || "שגיאה בהפעלת פענוח מחדש");
+    } finally {
+      setReanalyzingQueue(false);
+    }
+  };
 
   // Cleanup webcam when leaving tab or closing
   useEffect(() => {
@@ -960,7 +1047,46 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "שגיאה באישור");
-      setReviewNotice(`הספר אושר! ברקודים: ${data.barcodes.join(", ")}`);
+      let syncMsg = "";
+      const checkedSyncKeys = Object.entries(revSyncFields)
+        .filter(([, v]) => Boolean(v))
+        .map(([k]) => k);
+      if (revSetName.trim() && checkedSyncKeys.length > 0) {
+        const syncPayloadFields: Record<string, any> = {};
+        if (revSyncFields.author) syncPayloadFields.author = revAuthor.trim();
+        if (revSyncFields.category) syncPayloadFields.category = revCategory.trim();
+        if (revSyncFields.publisher) syncPayloadFields.publisher = revPublisher.trim();
+        if (revSyncFields.edition) syncPayloadFields.edition = revEdition.trim();
+        if (revSyncFields.pub_year) syncPayloadFields.pub_year = revPubYear.trim();
+        if (revSyncFields.format_size) syncPayloadFields.format_size = revFormatSize.trim();
+        if (revSyncFields.tags) {
+          syncPayloadFields.tags = revTags
+            .split(",")
+            .map((t) => t.trim())
+            .filter(Boolean);
+        }
+        if (revSyncFields.location) {
+          syncPayloadFields.cabinet_id = revCabinetId ? Number(revCabinetId) : null;
+          syncPayloadFields.shelf_number = revShelf;
+        }
+        try {
+          const sRes = await fetch("/api/books/sync-set-fields", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              setName: revSetName.trim(),
+              excludeQueueId: activeReviewItem.id,
+              fields: syncPayloadFields,
+            }),
+          });
+          if (sRes.ok) {
+            const sData = await sRes.json();
+            syncMsg = ` · עודכנו עוד ${sData.updatedBooks || 0} ספרים במאגר ו-${sData.updatedQueue || 0} בתור`;
+          }
+        } catch {}
+      }
+      setRevSyncFields({});
+      setReviewNotice(`הספר אושר! ברקודים: ${data.barcodes.join(", ")}${syncMsg}`);
       await Promise.all([loadQueue(), onReload()]);
     } catch (err: any) {
       setAiError(err?.message || "שגיאה באישור");
@@ -1927,7 +2053,8 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
             {queueItems.length > 0 && (
               <div className="divide-y divide-[var(--otzar-border-muted)] max-h-64 overflow-y-auto">
                 {queueItems.map((item) => (
-                  <div key={item.id} className="py-2.5 flex items-center justify-between gap-3 text-sm">
+                  <div key={item.id} className="py-2.5 space-y-2 text-sm">
+                  <div className="flex items-center justify-between gap-3">
                     <div className="flex items-center gap-3">
                       {item.has_image && (
                         <img
@@ -1987,6 +2114,25 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
                           נסה שנית
                         </button>
                       )}
+                      {(item.processing_status === "done" || item.processing_status === "error") && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (reanalyzeItemId === item.id) {
+                              setReanalyzeItemId(null);
+                            } else {
+                              setReanalyzeItemId(item.id);
+                              setReanalyzeHint("");
+                              setReanalyzeStrongModel(false);
+                            }
+                          }}
+                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded text-xs font-medium border border-[var(--otzar-border-muted)] hover:bg-[var(--otzar-surface)] cursor-pointer"
+                          title="פענוח מחדש בלי למחוק מהתור (משמר את כל התמונות)"
+                        >
+                          <Sparkles className="w-3 h-3 text-[var(--otzar-accent)]" />
+                          פענוח מחדש
+                        </button>
+                      )}
                       {item.processing_status === "done" && (
                         <button
                           type="button"
@@ -2011,6 +2157,44 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
                         <Trash2 className="w-3.5 h-3.5" />
                       </button>
                     </div>
+                  </div>
+                  {reanalyzeItemId === item.id && (
+                    <div className="p-2.5 rounded-lg border border-[var(--otzar-border)] bg-[var(--otzar-surface-alt)] space-y-2 text-xs">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <input
+                          type="text"
+                          value={reanalyzeHint}
+                          onChange={(e) => setReanalyzeHint(e.target.value)}
+                          placeholder="הנחיית תיקון אופציונלית ל-Gemini (למשל: מהדורת דרשו, בדוק מסכת ושנה...)"
+                          className="flex-1 min-w-[220px] px-2.5 py-1.5 rounded border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)]"
+                        />
+                        <label className="inline-flex items-center gap-1.5 cursor-pointer select-none">
+                          <input
+                            type="checkbox"
+                            checked={reanalyzeStrongModel}
+                            onChange={(e) => setReanalyzeStrongModel(e.target.checked)}
+                            className="rounded accent-[var(--otzar-accent)]"
+                          />
+                          <span>מודל מדויק (מדף/גיבוי)</span>
+                        </label>
+                        <button
+                          type="button"
+                          disabled={reanalyzingQueue}
+                          onClick={() => handleReanalyzeQueueItem(item.id, reanalyzeHint, reanalyzeStrongModel)}
+                          className="px-3 py-1.5 rounded bg-[var(--otzar-accent)] text-white font-bold hover:bg-[var(--otzar-accent-hover)] cursor-pointer disabled:opacity-50"
+                        >
+                          {reanalyzingQueue ? "מפעיל..." : "הפעל פענוח מחדש"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setReanalyzeItemId(null)}
+                          className="px-2 py-1.5 rounded border border-[var(--otzar-border-muted)] cursor-pointer"
+                        >
+                          ביטול
+                        </button>
+                      </div>
+                    </div>
+                  )}
                   </div>
                 ))}
               </div>
@@ -2137,6 +2321,73 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
                   onSubmit={handleApproveReview}
                   className="lg:col-span-7 rounded-xl border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] p-5 space-y-3.5 text-sm"
                 >
+                  <div className="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-[var(--otzar-border-muted)]">
+                    <div className="text-xs text-[var(--otzar-text-muted)]">
+                      פריט תור #{activeReviewItem.id} · {(activeReviewItem.image_count ?? 1)} תמונות שמורות
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (reanalyzeItemId === activeReviewItem.id) {
+                          setReanalyzeItemId(null);
+                        } else {
+                          setReanalyzeItemId(activeReviewItem.id);
+                          setReanalyzeHint("");
+                          setReanalyzeStrongModel(false);
+                        }
+                      }}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--otzar-border)] bg-[var(--otzar-surface)] text-xs font-semibold text-[var(--otzar-accent)] hover:bg-[var(--otzar-surface-alt)] cursor-pointer"
+                    >
+                      <Sparkles className="w-3.5 h-3.5" />
+                      פענוח מחדש (עם כל התמונות)
+                    </button>
+                  </div>
+
+                  {reanalyzeItemId === activeReviewItem.id && (
+                    <div className="p-3 rounded-lg border border-[var(--otzar-border)] bg-[var(--otzar-surface-alt)] space-y-2 text-xs">
+                      <div className="font-semibold text-[var(--otzar-text)]">
+                        פענוח מחדש ע״י Gemini (ישתמש מחדש בכל {activeReviewItem.image_count ?? 1} התמונות המצורפות)
+                      </div>
+                      <input
+                        type="text"
+                        value={reanalyzeHint}
+                        onChange={(e) => setReanalyzeHint(e.target.value)}
+                        placeholder="הנחיית תיקון אופציונלית (למשל: בדוק הוצאה, שנה, או שמות מסכתות...)"
+                        className="w-full px-3 py-1.5 rounded border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)]"
+                      />
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <label className="inline-flex items-center gap-1.5 cursor-pointer select-none">
+                          <input
+                            type="checkbox"
+                            checked={reanalyzeStrongModel}
+                            onChange={(e) => setReanalyzeStrongModel(e.target.checked)}
+                            className="rounded accent-[var(--otzar-accent)]"
+                          />
+                          <span>שדרג למודל מדף מדויק לפענוח זה</span>
+                        </label>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => setReanalyzeItemId(null)}
+                            className="px-2.5 py-1.5 rounded border border-[var(--otzar-border-muted)] cursor-pointer"
+                          >
+                            ביטול
+                          </button>
+                          <button
+                            type="button"
+                            disabled={reanalyzingQueue}
+                            onClick={() =>
+                              handleReanalyzeQueueItem(activeReviewItem.id, reanalyzeHint, reanalyzeStrongModel)
+                            }
+                            className="px-3.5 py-1.5 rounded bg-[var(--otzar-accent)] text-white font-bold hover:bg-[var(--otzar-accent-hover)] cursor-pointer disabled:opacity-50"
+                          >
+                            {reanalyzingQueue ? "מחזיר לתור..." : "בצע פענוח מחדש עכשיו"}
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
                   {activeReviewItem.processing_status === "error" && (
                     <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-red-800 text-xs flex items-center justify-between">
                       <span>{activeReviewItem.error_message}</span>
@@ -2208,9 +2459,21 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
 
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                     <div>
-                      <label className="block text-xs font-medium mb-1">
-                        {activeReviewItem.is_shelf_set ? "שם הספר הכללי (אופציונלי אם הוזן שם סט)" : "שם הספר *"}
-                      </label>
+                      <div className="flex items-center justify-between gap-2 mb-1">
+                        <label className="block text-xs font-medium">
+                          {activeReviewItem.is_shelf_set ? "שם הספר הכללי (אופציונלי אם הוזן שם סט)" : "שם הספר *"}
+                        </label>
+                        {revSetName.trim() && (
+                          <button
+                            type="button"
+                            onClick={() => setShowRevPatternBuilder(true)}
+                            className="inline-flex items-center gap-1 text-[11px] font-bold text-[var(--otzar-accent)] hover:underline cursor-pointer"
+                          >
+                            <Wand2 className="w-3 h-3" />
+                            קבע תבנית לסט
+                          </button>
+                        )}
+                      </div>
                       <input
                         type="text"
                         required={!activeReviewItem.is_shelf_set}
@@ -2258,6 +2521,7 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
                         return (
                           <AutocompleteInput
                             label="מחבר / מפרש"
+                            labelAction={renderRevSyncCheckbox("author")}
                             field="author"
                             value={revAuthor}
                             onChange={setRevAuthor}
@@ -2312,6 +2576,7 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
                     <div>
                       <AutocompleteInput
                         label="קטגוריה"
+                        labelAction={renderRevSyncCheckbox("category")}
                         field="category"
                         value={revCategory}
                         onChange={setRevCategory}
@@ -2320,13 +2585,17 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
                     <div>
                       <AutocompleteInput
                         label="הוצאה לאור"
+                        labelAction={renderRevSyncCheckbox("publisher")}
                         field="publisher"
                         value={revPublisher}
                         onChange={setRevPublisher}
                       />
                     </div>
                     <div>
-                      <label className="block text-xs font-medium mb-1">מהדורה (אופציונלי)</label>
+                      <div className="flex items-center justify-between gap-2 mb-1">
+                        <label className="block text-xs font-medium">מהדורה (אופציונלי)</label>
+                        {renderRevSyncCheckbox("edition")}
+                      </div>
                       <input
                         type="text"
                         value={revEdition}
@@ -2336,7 +2605,10 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
                       />
                     </div>
                     <div>
-                      <label className="block text-xs font-medium mb-1">שנת הוצאה (אופציונלי)</label>
+                      <div className="flex items-center justify-between gap-2 mb-1">
+                        <label className="block text-xs font-medium">שנת הוצאה (אופציונלי)</label>
+                        {renderRevSyncCheckbox("pub_year")}
+                      </div>
                       <input
                         type="text"
                         value={revPubYear}
@@ -2347,7 +2619,10 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
                     </div>
                     <div className="md:col-span-2 grid grid-cols-1 sm:grid-cols-3 gap-2.5">
                       <div>
-                        <label className="block text-xs font-medium mb-1">גודל / פורמט</label>
+                        <div className="flex items-center justify-between gap-2 mb-1">
+                          <label className="block text-xs font-medium">גודל / פורמט</label>
+                          {renderRevSyncCheckbox("format_size")}
+                        </div>
                         <input
                           list="otzar-format-sizes-rev"
                           value={revFormatSize}
@@ -2540,7 +2815,10 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
                       </div>
                     )}
                     <div className="md:col-span-2">
-                      <label className="block text-xs font-medium mb-1">תגיות חיפוש ונושאים (ניתנות לעריכה)</label>
+                      <div className="flex items-center justify-between gap-2 mb-1">
+                        <label className="block text-xs font-medium">תגיות חיפוש ונושאים (ניתנות לעריכה · מסונכרנות במיזוג בלבד)</label>
+                        {renderRevSyncCheckbox("tags")}
+                      </div>
                       <input
                         type="text"
                         value={revTags}
@@ -2549,7 +2827,10 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
                       />
                     </div>
                     <div>
-                      <label className="block text-xs font-medium mb-1">ארון במפה</label>
+                      <div className="flex items-center justify-between gap-2 mb-1">
+                        <label className="block text-xs font-medium">ארון במפה</label>
+                        {renderRevSyncCheckbox("location")}
+                      </div>
                       <select
                         value={revCabinetId}
                         onChange={(e) => {
@@ -2613,6 +2894,15 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
                     </div>
                   </div>
 
+                  {revSetName.trim() && Object.values(revSyncFields).some(Boolean) && revSetSyncCount && (
+                    <div className="p-2.5 rounded-lg border border-amber-300 bg-amber-50 dark:bg-amber-950/30 dark:border-amber-800 text-amber-900 dark:text-amber-200 text-xs font-medium">
+                      סינכרון שדות בסט: השדות המסומנים יעדכנו יחד{" "}
+                      <strong>{revSetSyncCount.booksCount} ספרים במאגר</strong> ו-
+                      <strong>{revSetSyncCount.queueCount} פריטים ממתינים בתור ה-AI</strong>{" "}
+                      (תגיות יתמזגו ללא מחיקת תגיות ייחודיות, שם הסט עצמו מוחרג).
+                    </div>
+                  )}
+
                   <div className="pt-3 border-t border-[var(--otzar-border-muted)] flex items-center justify-between">
                     <button
                       type="button"
@@ -2645,6 +2935,23 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
             </>
           )}
         </div>
+      )}
+
+      {showRevPatternBuilder && activeReviewItem && revSetName.trim() && (
+        <SetPatternBuilderModal
+          setName={revSetName.trim()}
+          sampleTitle={revTitle.trim() || revSetName.trim()}
+          currentKind="queue"
+          currentId={activeReviewItem.id}
+          currentVolume={revVolume}
+          currentSubSeries={revSubSeries}
+          onApplied={async (updatedTitle, updatedSubSeries) => {
+            if (updatedTitle) setRevTitle(updatedTitle);
+            if (typeof updatedSubSeries === "string") setRevSubSeries(updatedSubSeries);
+            await Promise.all([loadQueue(), onReload()]);
+          }}
+          onClose={() => setShowRevPatternBuilder(false)}
+        />
       )}
 
       {showRecycleBin && (

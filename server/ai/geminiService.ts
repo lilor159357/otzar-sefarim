@@ -1,5 +1,5 @@
 import crypto from "crypto";
-import { GoogleGenAI, Type } from "@google/genai";
+import { GoogleGenAI, ThinkingLevel, Type } from "@google/genai";
 import type { DbClient } from "../db/adapter.ts";
 
 export interface ExtractedBookMetadata {
@@ -69,20 +69,34 @@ export interface AiPoolKeyPublicStatus {
 export interface AiRuntimeConfig {
   apiKey: string;
   hasAnyKey: boolean;
+  coverModel: string;
   aiModel: string;
+  fallbackModel: string;
   autoFallback: boolean;
   embeddingModel: string;
   delayMs: number;
+  requestTimeoutMs: number;
+  keyCooldownMs: number;
 }
 
-const DEFAULT_VISION_FALLBACK_MODELS = [
-  "gemini-3.5-flash",
-  "gemini-2.5-flash",
-  "gemini-3.5-flash-lite",
-  "gemini-2.5-flash-lite",
+export const DEFAULT_VISION_FALLBACK_MODELS = [
   "gemini-3.8-flash",
   "gemini-4-hydrogen",
+  "gemini-3.6-flash",
+  "gemini-3.5-flash-lite",
+  "gemini-2.5-flash",
+  "gemini-2.5-flash-lite",
 ];
+
+function normalizeModelId(raw: string, fallback: string): string {
+  const cleaned = String(raw || "").replace(/^models\//, "").trim();
+  if (!cleaned || cleaned === "gemini-3.5-flash") return fallback;
+  return cleaned;
+}
+
+function isFlashLiteModel(modelName: string): boolean {
+  return modelName.toLowerCase().includes("flash-lite");
+}
 
 interface KeyRuntimeState {
   activeInFlight: number;
@@ -248,14 +262,20 @@ export function getAiConfig(db: DbClient): AiRuntimeConfig {
   const entries = getAiKeyPoolEntries(db).filter((k) => k.enabled);
   const envKey = (process.env.GEMINI_API_KEY || "").trim();
   const primaryCandidate = entries[0]?.apiKey || envKey;
+  const timeoutSec = Math.min(300, Math.max(15, Number(getSetting(db, "ai_request_timeout_sec", "60")) || 60));
+  const cooldownSec = Math.min(300, Math.max(5, Number(getSetting(db, "ai_key_cooldown_sec", "45")) || 45));
 
   return {
     apiKey: primaryCandidate,
     hasAnyKey: entries.length > 0 || Boolean(envKey),
-    aiModel: getSetting(db, "ai_model", "gemini-3.5-flash").trim() || "gemini-3.5-flash",
+    coverModel: normalizeModelId(getSetting(db, "ai_cover_model", "gemini-3.5-flash-lite"), "gemini-3.5-flash-lite"),
+    aiModel: normalizeModelId(getSetting(db, "ai_model", "gemini-3.8-flash"), "gemini-3.8-flash"),
+    fallbackModel: normalizeModelId(getSetting(db, "ai_fallback_model", "gemini-4-hydrogen"), "gemini-4-hydrogen"),
     autoFallback: getSetting(db, "ai_auto_fallback", "true").trim() !== "false",
     embeddingModel: getSetting(db, "embedding_model", "gemini-embedding-001").trim() || "gemini-embedding-001",
     delayMs: Math.max(500, Number(getSetting(db, "ai_delay_ms", "4200")) || 4200),
+    requestTimeoutMs: timeoutSec * 1000,
+    keyCooldownMs: cooldownSec * 1000,
   };
 }
 
@@ -342,7 +362,7 @@ export function formatGeminiError(err: unknown): string {
     return "חריגה ממגבלת הבקשות הזמנית (429). המפתחות בהשהיה זמנית — המתן מעט או הוסף מפתח נוסף מחשבון אחר.";
   }
   if (kind === "model") {
-    return "שם המודל שהוגדר אינו זמין (404). ניתן לבחור מודל אחר בהגדרות (למשל gemini-3.5-flash או gemini-2.5-flash).";
+    return "שם המודל שהוגדר אינו זמין (404). ניתן לבחור מודל פעיל או לטעון מודלים חיים בהגדרות (למשל gemini-3.5-flash-lite או gemini-3.8-flash).";
   }
   if (kind === "network") {
     return "אין חיבור זמין לשרתי Gemini (מצב אופליין או חסימת/תעודת סינון רשת כמו אתרוג).";
@@ -390,6 +410,8 @@ export async function executeWithKeyRoulette<T>(
     onKeyPicked?: (entry: AiKeyEntry) => void;
   }
 ): Promise<{ result: T; usedEntry: AiKeyEntry }> {
+  const cfg = getAiConfig(db);
+  const effectiveTimeoutMs = options?.timeoutMs !== undefined ? options.timeoutMs : cfg.requestTimeoutMs;
   const entries = getAiKeyPoolEntries(db).filter((k) => k.enabled);
   if (entries.length === 0) {
     throw new Error("לא הוגדרו מפתחות Gemini API פעילים בהגדרות המערכת");
@@ -431,17 +453,17 @@ export async function executeWithKeyRoulette<T>(
       options.abortSignal.addEventListener("abort", onExternalAbort, { once: true });
     }
     const timer =
-      options?.timeoutMs && options.timeoutMs > 0
+      effectiveTimeoutMs && effectiveTimeoutMs > 0
         ? setTimeout(() => {
             timedOut = true;
             attemptController.abort(new Error("timeout"));
-          }, options.timeoutMs)
+          }, effectiveTimeoutMs)
         : null;
 
     try {
       const taskPromise = task(picked.apiKey, picked, attemptController.signal);
       const racePromise =
-        options?.timeoutMs && options.timeoutMs > 0
+        effectiveTimeoutMs && effectiveTimeoutMs > 0
           ? Promise.race([
               taskPromise,
               new Promise<T>((_, reject) => {
@@ -467,17 +489,18 @@ export async function executeWithKeyRoulette<T>(
         throw err;
       }
       const kind = timedOut ? "timeout" : classifyGeminiError(err);
+      const cooldownSecLabel = Math.round(cfg.keyCooldownMs / 1000);
       if (kind === "timeout") {
-        st.cooldownUntil = Date.now() + 30_000;
-        st.lastError = "חשיבה ארוכה מדי (Timeout) — המפתח הועבר להשהיה קצרה";
+        st.cooldownUntil = Date.now() + cfg.keyCooldownMs;
+        st.lastError = `חשיבה ארוכה מדי (Timeout) — המפתח הועבר להשהיה של ${cooldownSecLabel} שניות`;
         if (tried.size < entries.length) {
           continue; // Rotate immediately to next healthy key!
         }
         throw new Error("timeout: פג זמן ההמתנה לפענוח ב-Gemini");
       }
       if (kind === "quota") {
-        st.cooldownUntil = Date.now() + 60_000;
-        st.lastError = "השהיה זמנית (60 שניות) עקב חריגת מכסה (429)";
+        st.cooldownUntil = Date.now() + cfg.keyCooldownMs;
+        st.lastError = `השהיה זמנית (${cooldownSecLabel} שניות) עקב חריגת מכסה (429)`;
         continue; // Try next least-loaded healthy key in the roulette
       }
       if (kind === "invalid_key") {
@@ -487,6 +510,7 @@ export async function executeWithKeyRoulette<T>(
       }
       if (kind === "overloaded") {
         overloadAttempts += 1;
+        st.cooldownUntil = Date.now() + Math.min(cfg.keyCooldownMs, 25_000);
         st.lastError = "עומס רגעי בשרת המודל (503)";
         if (overloadAttempts < maxOverloadRetries && tried.size < entries.length) {
           await waitMs(650 + Math.round(Math.random() * 550));
@@ -532,9 +556,13 @@ export async function executeWithModelAndKeyFallback<T>(
   task: (apiKey: string, modelName: string, entry: AiKeyEntry, signal: AbortSignal) => Promise<T>,
   options?: { abortSignal?: AbortSignal; timeoutMs?: number; onKeyPicked?: (entry: AiKeyEntry) => void }
 ): Promise<{ result: T; usedEntry: AiKeyEntry; usedModel: string; usedFallback: boolean }> {
-  const cleanPrimary = primaryModel.trim() || "gemini-3.5-flash";
+  const cfg = getAiConfig(db);
+  const cleanPrimary = normalizeModelId(primaryModel, cfg.aiModel || "gemini-3.8-flash");
+  const fallbackModelsOrdered = Array.from(
+    new Set([cfg.fallbackModel, ...DEFAULT_VISION_FALLBACK_MODELS].filter((m) => m && m !== cleanPrimary))
+  );
   const modelChain = allowFallback
-    ? [cleanPrimary, ...DEFAULT_VISION_FALLBACK_MODELS.filter((m) => m !== cleanPrimary)]
+    ? [cleanPrimary, ...fallbackModelsOrdered]
     : [cleanPrimary];
 
   let lastErr: unknown = null;
@@ -680,6 +708,143 @@ export async function testGeminiConnection(
   }
 }
 
+export interface DiscoveredGeminiModel {
+  id: string;
+  displayName: string;
+  description: string;
+  supportsGenerate: boolean;
+  supportsEmbed: boolean;
+}
+
+export async function listSupportedGeminiModels(db: DbClient): Promise<{
+  generateModels: DiscoveredGeminiModel[];
+  embeddingModels: DiscoveredGeminiModel[];
+  usedLabel: string;
+}> {
+  const cfg = getAiConfig(db);
+  if (!cfg.hasAnyKey) {
+    throw new Error("לא הוגדרו מפתחות Gemini API פעילים בהגדרות המערכת");
+  }
+  const { result, usedEntry } = await executeWithKeyRoulette(
+    db,
+    async (apiKey) => {
+      const ai = createClient(apiKey);
+      const pager = await ai.models.list({ config: { pageSize: 100 } });
+      const rawList: any[] = [];
+      if (pager && typeof (pager as any)[Symbol.asyncIterator] === "function") {
+        for await (const m of pager as any) {
+          rawList.push(m);
+        }
+      } else if (Array.isArray((pager as any)?.page)) {
+        rawList.push(...(pager as any).page);
+      } else if (Array.isArray((pager as any)?.models)) {
+        rawList.push(...(pager as any).models);
+      }
+      return rawList;
+    },
+    { timeoutMs: 20_000 }
+  );
+
+  const seen = new Set<string>();
+  const generateModels: DiscoveredGeminiModel[] = [];
+  const embeddingModels: DiscoveredGeminiModel[] = [];
+
+  for (const m of result) {
+    const id = String(m?.name || "").replace(/^models\//, "").trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    const actions: string[] = Array.isArray(m?.supportedActions)
+      ? m.supportedActions
+      : Array.isArray(m?.supportedGenerationMethods)
+      ? m.supportedGenerationMethods
+      : [];
+    const actionsLower = actions.map((a) => String(a).toLowerCase());
+    const idLower = id.toLowerCase();
+    const isEmbed = actionsLower.includes("embedcontent") || idLower.includes("embedding");
+    const isGen =
+      actionsLower.includes("generatecontent") ||
+      (actionsLower.length === 0 &&
+        idLower.includes("gemini") &&
+        !isEmbed &&
+        !idLower.includes("imagen") &&
+        !idLower.includes("veo"));
+
+    const item: DiscoveredGeminiModel = {
+      id,
+      displayName: String(m?.displayName || id).trim(),
+      description: String(m?.description || "").trim(),
+      supportsGenerate: isGen,
+      supportsEmbed: isEmbed,
+    };
+    if (isGen) generateModels.push(item);
+    if (isEmbed) embeddingModels.push(item);
+  }
+
+  generateModels.sort((a, b) => a.id.localeCompare(b.id));
+  embeddingModels.sort((a, b) => a.id.localeCompare(b.id));
+
+  return {
+    generateModels,
+    embeddingModels,
+    usedLabel: usedEntry.label,
+  };
+}
+
+export async function testGeminiModel(
+  db: DbClient,
+  modelName: string,
+  mode: "generate" | "embed" = "generate"
+): Promise<{ ok: boolean; model: string; latencyMs: number; message: string; usedLabel?: string }> {
+  const cfg = getAiConfig(db);
+  const targetModel = String(modelName || "").replace(/^models\//, "").trim();
+  if (!targetModel) {
+    return { ok: false, model: "", latencyMs: 0, message: "לא הוזן שם מודל לבדיקה." };
+  }
+  if (!cfg.hasAnyKey) {
+    return { ok: false, model: targetModel, latencyMs: 0, message: "לא הוגדרו מפתחות Gemini API בהגדרות." };
+  }
+  const t0 = Date.now();
+  try {
+    const { result, usedEntry } = await executeWithKeyRoulette(
+      db,
+      async (apiKey, _entry, signal) => {
+        const ai = createClient(apiKey);
+        if (mode === "embed") {
+          const emb = await ai.models.embedContent({
+            model: targetModel,
+            contents: "בדיקה",
+            config: { outputDimensionality: 768 },
+          });
+          const len = emb.embeddings?.[0]?.values?.length || 0;
+          if (len === 0) throw new Error("לא התקבל וקטור מהמודל");
+          return `${len} ממדים`;
+        }
+        const resp = await ai.models.generateContent({
+          model: targetModel,
+          contents: "Reply with a single word: OK",
+          config: { abortSignal: signal },
+        });
+        return (resp.text || "").trim() || "OK";
+      },
+      { timeoutMs: 18_000, maxOverloadRetries: 1 }
+    );
+    return {
+      ok: true,
+      model: targetModel,
+      latencyMs: Date.now() - t0,
+      usedLabel: usedEntry.label,
+      message: `OK — המודל ${targetModel} זמין ומגיב דרך ${usedEntry.label} (${result})`,
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      model: targetModel,
+      latencyMs: Date.now() - t0,
+      message: formatGeminiError(err),
+    };
+  }
+}
+
 export interface CoverImagePart {
   buffer: Buffer;
   mimeType?: string;
@@ -689,7 +854,7 @@ export async function analyzeBookCoverImage(
   db: DbClient,
   imageInput: Buffer | CoverImagePart[],
   mimeType = "image/jpeg",
-  options?: { abortSignal?: AbortSignal; timeoutMs?: number; customPrompt?: string; onKeyPicked?: (entry: AiKeyEntry) => void }
+  options?: { abortSignal?: AbortSignal; timeoutMs?: number; customPrompt?: string; useStrongModel?: boolean; onKeyPicked?: (entry: AiKeyEntry) => void }
 ): Promise<ExtractedBookMetadata> {
   const cfg = getAiConfig(db);
   if (!cfg.hasAnyKey) {
@@ -718,9 +883,10 @@ export async function analyzeBookCoverImage(
     },
   }));
 
+  const preferredCoverModel = options?.useStrongModel ? cfg.aiModel : cfg.coverModel;
   const { result: response } = await executeWithModelAndKeyFallback(
     db,
-    cfg.aiModel,
+    preferredCoverModel,
     cfg.autoFallback,
     async (apiKey, activeModel, _entry, signal) => {
       const ai = createClient(apiKey);
@@ -734,6 +900,7 @@ export async function analyzeBookCoverImage(
         },
         config: {
           abortSignal: signal,
+          ...(isFlashLiteModel(activeModel) ? { thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL } } : {}),
           systemInstruction: systemPrompt,
           responseMimeType: "application/json",
           responseSchema: {
@@ -763,7 +930,7 @@ export async function analyzeBookCoverImage(
         },
       });
     },
-    { abortSignal: options?.abortSignal, timeoutMs: options?.timeoutMs ?? 45_000, onKeyPicked: options?.onKeyPicked }
+    { abortSignal: options?.abortSignal, timeoutMs: options?.timeoutMs ?? cfg.requestTimeoutMs, onKeyPicked: options?.onKeyPicked }
   );
 
   const rawText = (response.text || "{}").trim();
@@ -808,7 +975,7 @@ export async function analyzeShelfSetImages(
   titlePageInput: CoverImagePart | CoverImagePart[],
   spineImageParts: CoverImagePart[],
   existingSetContext?: ExistingSetContext,
-  options?: { abortSignal?: AbortSignal; timeoutMs?: number; onKeyPicked?: (entry: AiKeyEntry) => void }
+  options?: { abortSignal?: AbortSignal; timeoutMs?: number; customPrompt?: string; onKeyPicked?: (entry: AiKeyEntry) => void }
 ): Promise<ExtractedShelfSet> {
   const cfg = getAiConfig(db);
   if (!cfg.hasAnyKey) {
@@ -841,10 +1008,13 @@ export async function analyzeShelfSetImages(
     titleParts.length === 0 && existingSetContext?.set_name
       ? `אתה ספרן תורני מומחה בישיבה. לפניך ${spineImageParts.length} תמונות של שדרות כרכים נוספים מהסט הקיים "${existingSetContext.set_name}" (מחבר: ${existingSetContext.author || "לא צוין"}, הוצאה: ${existingSetContext.publisher || "לא צוינה"}). פרטי הסט הכלליים כבר שמורים במאגר ואין תמונת שער מצורפת.\nתפקידך:\n1. השאר את פרטי הסט הכלליים כפי שסופקו (או השלם קטגוריה ותגיות אם חסר).\n2. זהה בעיון מתוך שדרות הספרים שעל המדף לפי הסדר מהמדף את רשימת כל הכרכים והחלקים המופיעים בתמונות אלו (volumes). לכל כרך ציין: volume (הסימון על השדרה גם אם *, **, II, א׳-1, ברכות), sub_series (אם יש תת-סדרה/מסכת, כגון 'מסכת שבת' או 'אורח חיים'), set_global_number (מספר סידורי כללי בסדרה אם מופיע על השדרה, אחרת 0), ו-coverage_range (טווח סימנים/דפים/פרקים אם נראה על השדרה). אם כרך מופיע פעמיים, ציין copiesCount: 2.\n3. איסור קיצור שמות תוכן מפורשים (מקראות גדולות/ש״ס): אם לכרכים יש שמות תוכן מפורשים (בראשית, שמות, ויקרא, במדבר, דברים, מסכת ברכות, שבת וכו׳), אסור לקצרם לאותיות סתמיות (א׳, ב׳) בלבד — חובה לשבץ את השם המפורש בשדה volume או sub_series (למשל sub_series: 'בראשית', volume: 'בראשית / חלק א׳'). לכל כרך השלם גם format_size (גדול/רגיל/כיס/מוגדל) ו-pub_year אם נראה.\n4. בידול מהדורות בסטים: בסטים קלאסיים מרובי מהדורות (משנה ברורה, מקראות גדולות, שו״ע, רמב״ם, ש״ס וכו׳) שלב את שם המהדורה/ההוצאה בסוגריים בתוך set_name (למשל 'משנה ברורה (דרשו)') כשניתן לזהותו.`
       : `אתה ספרן תורני מומחה בישיבה. לפניך ${allParts.length} צילומים של סט ספרים: ${titleParts.length === 1 ? "התמונה הראשונה היא עמוד שער מייצג של הסט" : `${titleParts.length} התמונות הראשונות הן צילומי השער ופרטי המהדורה/ההוצאה של הסט (כגון עמוד שער ראשי, גב השער, דף הסכמות)`}, ושאר ${spineImageParts.length} התמונות הן צילום שדרות כרכי הסט העומדים על המדף בספרייה.\nתפקידך:\n1. מזג את המידע מכל תמונות השער והפרטים וחלץ את פרטי הסט הכלליים: שם הסט (set_name), שם המחבר/מפרש (author), הוצאה/מכון (publisher), שנת הוצאה (pub_year), מהדורה (edition), קטגוריה ראשית (category), הערות (notes) ותגיות (tags).\n2. זהה בעיון מתוך שדרות הספרים שעל המדף את רשימת כל הכרכים המופיעים לפי סדר עמידתם על המדף (volumes). לכל כרך חלץ גם sub_series (תת-סדרה/מסכת אם קיימת), set_global_number (מספר כרך כללי אם מצוין על השדרה, אחרת 0), ו-coverage_range (טווח סימנים/דפים אם כתוב על השדרה). אם כרך מסוים מופיע פעמיים על המדף, ציין copiesCount: 2.\n3. איסור קיצור שמות תוכן מפורשים (מקראות גדולות/ש״ס): אם לכרכים יש שמות תוכן מפורשים (בראשית, שמות, ויקרא, במדבר, דברים, מסכת ברכות, שבת וכו׳), אסור לקצרם לאותיות סתמיות (א׳, ב׳) בלבד — חובה לשבץ את השם המפורש בשדה volume או sub_series (למשל sub_series: 'בראשית', volume: 'בראשית / חלק א׳'). לכל כרך השלם גם format_size (גדול/רגיל/כיס/מוגדל) ו-pub_year אם נראה.\n4. בידול מהדורות בסטים: בסטים קלאסיים מרובי מהדורות (משנה ברורה, מקראות גדולות, שו״ע, רמב״ם, ש״ס וכו׳) שלב את שם המהדורה/ההוצאה בסוגריים בתוך set_name (למשל 'משנה ברורה (דרשו)') כשניתן לזהותו.`;
-  const userPrompt =
+  const baseShelfPrompt =
     titleParts.length === 0 && existingSetContext?.set_name
       ? `פענח את תמונות השדרות של הסט הקיים "${existingSetContext.set_name}" וחלץ את רשימת כל הכרכים והעותקים שעל המדף בפורמט JSON מדויק.`
       : "פענח את צילומי השער והפרטים ואת צילומי השדרות של הסט, וחלץ את פרטי הסט ורשימת כל הכרכים שעל המדף בפורמט JSON מדויק.";
+  const userPrompt = options?.customPrompt?.trim()
+    ? `${baseShelfPrompt}\nהנחיית עריכה מיוחדת מהמשתמש: ${options.customPrompt.trim()}`
+    : baseShelfPrompt;
   const { result: response } = await executeWithModelAndKeyFallback(
     db,
     cfg.aiModel,
@@ -899,7 +1069,7 @@ export async function analyzeShelfSetImages(
         },
       });
     },
-    { abortSignal: options?.abortSignal, timeoutMs: options?.timeoutMs ?? 60_000, onKeyPicked: options?.onKeyPicked }
+    { abortSignal: options?.abortSignal, timeoutMs: options?.timeoutMs ?? cfg.requestTimeoutMs, onKeyPicked: options?.onKeyPicked }
   );
 
   const rawText = (response.text || "{}").trim();
@@ -1096,7 +1266,7 @@ ${customPrompt?.trim() ? `\nבקשת העריכה של הספרן: ${customPromp
         },
       });
     },
-    { abortSignal: options?.abortSignal, timeoutMs: options?.timeoutMs ?? 45_000, onKeyPicked: options?.onKeyPicked }
+    { abortSignal: options?.abortSignal, timeoutMs: options?.timeoutMs ?? cfg.requestTimeoutMs, onKeyPicked: options?.onKeyPicked }
   );
 
   const rawText = (response.text || "{}").trim();

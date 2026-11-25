@@ -19,6 +19,7 @@ interface AutocompleteInputProps {
   badgeText?: string;
   onRestoreRaw?: () => void;
   rawRestorableValue?: string;
+  labelAction?: React.ReactNode;
 }
 
 export const AutocompleteInput: React.FC<AutocompleteInputProps> = ({
@@ -34,6 +35,7 @@ export const AutocompleteInput: React.FC<AutocompleteInputProps> = ({
   badgeText,
   onRestoreRaw,
   rawRestorableValue,
+  labelAction,
 }) => {
   const [suggestions, setSuggestions] = useState<SuggestionItem[]>([]);
   const [isOpen, setIsOpen] = useState(false);
@@ -120,10 +122,15 @@ export const AutocompleteInput: React.FC<AutocompleteInputProps> = ({
 
   return (
     <div ref={containerRef} className={`relative ${className}`} dir="rtl">
-      {label && (
-        <label className="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1">
-          {label} {required && <span className="text-red-500">*</span>}
-        </label>
+      {(label || labelAction) && (
+        <div className="flex items-center justify-between gap-2 mb-1">
+          {label ? (
+            <label className="block text-xs font-semibold text-slate-600 dark:text-slate-300">
+              {label} {required && <span className="text-red-500">*</span>}
+            </label>
+          ) : <span />}
+          {labelAction}
+        </div>
       )}
 
       <div className="relative flex items-center">

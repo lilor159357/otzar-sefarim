@@ -21,13 +21,32 @@ interface AiSettingsPanelProps {
   onReload: () => Promise<void>;
 }
 
-const PRESET_MODELS = [
-  { id: "gemini-3.5-flash", label: "gemini-3.5-flash (יציב ומהיר — מומלץ)" },
-  { id: "gemini-2.5-flash", label: "gemini-2.5-flash (גיבוי אמין)" },
-  { id: "gemini-3.8-flash", label: "gemini-3.8-flash" },
-  { id: "gemini-4-hydrogen", label: "gemini-4-hydrogen" },
-  { id: "gemini-3.5-flash-lite", label: "gemini-3.5-flash-lite" },
+const PRESET_COVER_MODELS = [
+  { id: "gemini-3.5-flash-lite", label: "gemini-3.5-flash-lite (OCR מהיר לשערים — מומלץ)" },
+  { id: "gemini-flash-lite-latest", label: "gemini-flash-lite-latest (כינוי עדכני)" },
+  { id: "gemini-2.5-flash-lite", label: "gemini-2.5-flash-lite" },
 ];
+
+const PRESET_SHELF_MODELS = [
+  { id: "gemini-3.8-flash", label: "gemini-3.8-flash (מדויק למדף — מומלץ)" },
+  { id: "gemini-4-hydrogen", label: "gemini-4-hydrogen" },
+  { id: "gemini-3.6-flash", label: "gemini-3.6-flash" },
+  { id: "gemini-2.5-flash", label: "gemini-2.5-flash (גיבוי)" },
+];
+
+const PRESET_FALLBACK_MODELS = [
+  { id: "gemini-4-hydrogen", label: "gemini-4-hydrogen" },
+  { id: "gemini-3.8-flash", label: "gemini-3.8-flash" },
+  { id: "gemini-3.6-flash", label: "gemini-3.6-flash" },
+  { id: "gemini-3.5-flash-lite", label: "gemini-3.5-flash-lite" },
+  { id: "gemini-2.5-flash", label: "gemini-2.5-flash" },
+];
+
+interface LiveModelOption {
+  id: string;
+  displayName: string;
+  description?: string;
+}
 
 const KEY_STATUS_LABELS: Record<AiPoolKeyStatus["status"], string> = {
   ready: "זמין",
@@ -56,6 +75,13 @@ export const AiSettingsPanel: React.FC<AiSettingsPanelProps> = ({ settings, setS
   const [reindexMsg, setReindexMsg] = useState<string | null>(null);
   const [cleaning, setCleaning] = useState(false);
   const [cleanupMsg, setCleanupMsg] = useState<string | null>(null);
+
+  const [loadingLiveModels, setLoadingLiveModels] = useState(false);
+  const [liveGenModels, setLiveGenModels] = useState<LiveModelOption[]>([]);
+  const [liveEmbedModels, setLiveEmbedModels] = useState<LiveModelOption[]>([]);
+  const [liveModelsNotice, setLiveModelsNotice] = useState<{ ok: boolean; text: string } | null>(null);
+  const [testingModelField, setTestingModelField] = useState<string | null>(null);
+  const [modelTestBadges, setModelTestBadges] = useState<Record<string, { ok: boolean; message: string; latencyMs?: number }>>({});
 
   const loadPoolKeys = async () => {
     setLoadingKeys(true);
@@ -148,6 +174,55 @@ export const AiSettingsPanel: React.FC<AiSettingsPanelProps> = ({ settings, setS
     }
   };
 
+  const handleLoadLiveModels = async () => {
+    setLoadingLiveModels(true);
+    setLiveModelsNotice(null);
+    try {
+      const res = await fetch("/api/ai/models/list", { method: "POST" });
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        throw new Error(data.error || "שגיאה בטעינת רשימת המודלים");
+      }
+      const gens = Array.isArray(data.generateModels) ? data.generateModels : [];
+      const embeds = Array.isArray(data.embeddingModels) ? data.embeddingModels : [];
+      setLiveGenModels(gens);
+      setLiveEmbedModels(embeds);
+      setLiveModelsNotice({
+        ok: true,
+        text: `נטענו ${gens.length} מודלי יצירת תוכן ו-${embeds.length} מודלי הטמעה דרך ${data.usedLabel || "מפתח פעיל"}`,
+      });
+      if (Array.isArray(data.keys)) setPoolKeys(data.keys);
+    } catch (err: any) {
+      setLiveModelsNotice({ ok: false, text: err?.message || "שגיאה בשליפת מודלים" });
+    } finally {
+      setLoadingLiveModels(false);
+    }
+  };
+
+  const handleTestSpecificModel = async (fieldKey: string, modelName: string, mode: "generate" | "embed") => {
+    setTestingModelField(fieldKey);
+    try {
+      const res = await fetch("/api/ai/models/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: modelName.trim(), mode }),
+      });
+      const data = await res.json();
+      setModelTestBadges((prev) => ({
+        ...prev,
+        [fieldKey]: { ok: Boolean(data.ok), message: data.message || "", latencyMs: data.latencyMs },
+      }));
+      if (Array.isArray(data.keys)) setPoolKeys(data.keys);
+    } catch {
+      setModelTestBadges((prev) => ({
+        ...prev,
+        [fieldKey]: { ok: false, message: "שגיאת תקשורת מול השרת המקומי" },
+      }));
+    } finally {
+      setTestingModelField(null);
+    }
+  };
+
   const saveAiSettings = async () => {
     setSavingAi(true);
     setSaveNotice(null);
@@ -156,14 +231,19 @@ export const AiSettingsPanel: React.FC<AiSettingsPanelProps> = ({ settings, setS
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          ai_model: settings.ai_model || "gemini-3.5-flash",
+          ai_cover_model: settings.ai_cover_model || "gemini-3.5-flash-lite",
+          ai_model: settings.ai_model || "gemini-3.8-flash",
+          ai_fallback_model: settings.ai_fallback_model || "gemini-4-hydrogen",
           ai_auto_fallback: settings.ai_auto_fallback === "false" ? "false" : "true",
+          ai_internet_enrichment: settings.ai_internet_enrichment === "false" || settings.ai_internet_enrichment === "0" ? "false" : "true",
           embedding_model: settings.embedding_model || "gemini-embedding-001",
           ai_delay_ms: settings.ai_delay_ms || "4200",
+          ai_request_timeout_sec: settings.ai_request_timeout_sec || "60",
+          ai_key_cooldown_sec: settings.ai_key_cooldown_sec || "45",
         }),
       });
       await onReload();
-      setSaveNotice("הגדרות מודל הפענוח והקצב נשמרו.");
+      setSaveNotice("הגדרות המודלים, הגיבוי והתזמון נשמרו בהצלחה.");
     } finally {
       setSavingAi(false);
     }
@@ -408,40 +488,204 @@ export const AiSettingsPanel: React.FC<AiSettingsPanelProps> = ({ settings, setS
 
       {/* Gemini Vision & Model Settings */}
       <div className="p-5 rounded-xl border border-[var(--otzar-border-muted)] space-y-4">
-        <div className="flex items-center justify-between">
+        <div className="flex flex-wrap items-center justify-between gap-2">
           <h2 className="font-semibold text-base flex items-center gap-2">
             <SlidersHorizontal className="w-4 h-4 text-[var(--otzar-accent)]" />
-            הגדרות מנוע פענוח ואינדוקס
+            הגדרות מודלים, גיבוי 503 ותזמון מפתחות
           </h2>
+          <button
+            type="button"
+            disabled={loadingLiveModels || poolKeys.length === 0}
+            onClick={handleLoadLiveModels}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border border-[var(--otzar-accent)] text-[var(--otzar-accent)] bg-[var(--otzar-surface)] hover:bg-[var(--otzar-surface-alt)] cursor-pointer disabled:opacity-40"
+          >
+            {loadingLiveModels ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+            טען מודלים נתמכים באופן חי
+          </button>
         </div>
 
-        <div className="space-y-3 text-sm">
-          <div>
-            <label className="block text-xs font-medium mb-1.5">מנוע פענוח שערים (ברירת מחדל או עריכה חופשית)</label>
-            <div className="flex flex-wrap gap-2 mb-2">
-              {PRESET_MODELS.map((m) => (
+        {liveModelsNotice && (
+          <div className={`flex items-center gap-2 p-2.5 rounded-lg border text-xs ${
+            liveModelsNotice.ok
+              ? "border-emerald-300 bg-emerald-50 text-emerald-800 dark:bg-emerald-950/30 dark:text-emerald-300"
+              : "border-red-300 bg-red-50 text-red-800 dark:bg-red-950/30 dark:text-red-300"
+          }`}>
+            {liveModelsNotice.ok ? <CheckCircle2 className="w-3.5 h-3.5 shrink-0" /> : <AlertTriangle className="w-3.5 h-3.5 shrink-0" />}
+            <span>{liveModelsNotice.text}</span>
+          </div>
+        )}
+
+        <div className="space-y-4 text-sm">
+          {/* 1. Cover OCR Model */}
+          <div className="p-3.5 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-surface-alt)]/50 space-y-2">
+            <label className="block text-xs font-bold">מודל OCR מהיר לשערים רגילים (עם Thinking MINIMAL)</label>
+            <div className="flex flex-wrap gap-2">
+              {PRESET_COVER_MODELS.map((m) => (
                 <button
                   key={m.id}
                   type="button"
-                  onClick={() => setSettings((p) => ({ ...p, ai_model: m.id }))}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-mono border cursor-pointer whitespace-nowrap ${
-                    (settings.ai_model || "gemini-3.5-flash") === m.id
+                  onClick={() => setSettings((p) => ({ ...p, ai_cover_model: m.id }))}
+                  className={`px-2.5 py-1 rounded-lg text-xs font-mono border cursor-pointer whitespace-nowrap ${
+                    (settings.ai_cover_model || "gemini-3.5-flash-lite") === m.id
                       ? "border-[var(--otzar-accent)] bg-[var(--otzar-surface)] text-[var(--otzar-accent)] font-semibold"
-                      : "border-[var(--otzar-border-muted)]"
+                      : "border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)]"
                   }`}
                 >
                   {m.label}
                 </button>
               ))}
             </div>
-            <input
-              type="text"
-              dir="ltr"
-              value={settings.ai_model || "gemini-3.5-flash"}
-              onChange={(e) => setSettings((p) => ({ ...p, ai_model: e.target.value }))}
-              className="w-full px-3 py-2 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] font-mono text-xs"
-            />
-            <label className="mt-2.5 flex items-start gap-2 text-xs cursor-pointer select-none">
+            <div className="flex flex-wrap items-center gap-2">
+              {liveGenModels.length > 0 && (
+                <select
+                  dir="ltr"
+                  value={liveGenModels.some((m) => m.id === (settings.ai_cover_model || "gemini-3.5-flash-lite")) ? (settings.ai_cover_model || "gemini-3.5-flash-lite") : ""}
+                  onChange={(e) => e.target.value && setSettings((p) => ({ ...p, ai_cover_model: e.target.value }))}
+                  className="px-2.5 py-2 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] font-mono text-xs max-w-[260px]"
+                >
+                  <option value="">-- בחר מהרשימה החיה --</option>
+                  {liveGenModels.map((m) => (
+                    <option key={m.id} value={m.id}>{m.id}</option>
+                  ))}
+                </select>
+              )}
+              <input
+                type="text"
+                dir="ltr"
+                value={settings.ai_cover_model || "gemini-3.5-flash-lite"}
+                onChange={(e) => setSettings((p) => ({ ...p, ai_cover_model: e.target.value }))}
+                className="flex-1 min-w-[200px] px-3 py-2 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] font-mono text-xs"
+              />
+              <button
+                type="button"
+                disabled={testingModelField === "cover" || poolKeys.length === 0}
+                onClick={() => handleTestSpecificModel("cover", settings.ai_cover_model || "gemini-3.5-flash-lite", "generate")}
+                className="inline-flex items-center gap-1 px-3 py-2 rounded-lg text-xs font-semibold border border-[var(--otzar-border)] bg-[var(--otzar-bg)] hover:bg-[var(--otzar-surface)] cursor-pointer disabled:opacity-40"
+              >
+                {testingModelField === "cover" ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <PlugZap className="w-3.5 h-3.5 text-[var(--otzar-accent)]" />}
+                בדוק מודל
+              </button>
+            </div>
+            {modelTestBadges.cover && (
+              <div className={`text-xs font-medium ${modelTestBadges.cover.ok ? "text-emerald-700 dark:text-emerald-400" : "text-red-600"}`}>
+                {modelTestBadges.cover.message}{modelTestBadges.cover.latencyMs ? ` (${modelTestBadges.cover.latencyMs}ms)` : ""}
+              </div>
+            )}
+          </div>
+
+          {/* 2. Shelf Set / Accurate Model */}
+          <div className="p-3.5 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-surface-alt)]/50 space-y-2">
+            <label className="block text-xs font-bold">מודל צילומי מדף מרובי-שדרות ופענוח מדויק</label>
+            <div className="flex flex-wrap gap-2">
+              {PRESET_SHELF_MODELS.map((m) => (
+                <button
+                  key={m.id}
+                  type="button"
+                  onClick={() => setSettings((p) => ({ ...p, ai_model: m.id }))}
+                  className={`px-2.5 py-1 rounded-lg text-xs font-mono border cursor-pointer whitespace-nowrap ${
+                    (settings.ai_model || "gemini-3.8-flash") === m.id
+                      ? "border-[var(--otzar-accent)] bg-[var(--otzar-surface)] text-[var(--otzar-accent)] font-semibold"
+                      : "border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)]"
+                  }`}
+                >
+                  {m.label}
+                </button>
+              ))}
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              {liveGenModels.length > 0 && (
+                <select
+                  dir="ltr"
+                  value={liveGenModels.some((m) => m.id === (settings.ai_model || "gemini-3.8-flash")) ? (settings.ai_model || "gemini-3.8-flash") : ""}
+                  onChange={(e) => e.target.value && setSettings((p) => ({ ...p, ai_model: e.target.value }))}
+                  className="px-2.5 py-2 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] font-mono text-xs max-w-[260px]"
+                >
+                  <option value="">-- בחר מהרשימה החיה --</option>
+                  {liveGenModels.map((m) => (
+                    <option key={m.id} value={m.id}>{m.id}</option>
+                  ))}
+                </select>
+              )}
+              <input
+                type="text"
+                dir="ltr"
+                value={settings.ai_model || "gemini-3.8-flash"}
+                onChange={(e) => setSettings((p) => ({ ...p, ai_model: e.target.value }))}
+                className="flex-1 min-w-[200px] px-3 py-2 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] font-mono text-xs"
+              />
+              <button
+                type="button"
+                disabled={testingModelField === "shelf" || poolKeys.length === 0}
+                onClick={() => handleTestSpecificModel("shelf", settings.ai_model || "gemini-3.8-flash", "generate")}
+                className="inline-flex items-center gap-1 px-3 py-2 rounded-lg text-xs font-semibold border border-[var(--otzar-border)] bg-[var(--otzar-bg)] hover:bg-[var(--otzar-surface)] cursor-pointer disabled:opacity-40"
+              >
+                {testingModelField === "shelf" ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <PlugZap className="w-3.5 h-3.5 text-[var(--otzar-accent)]" />}
+                בדוק מודל
+              </button>
+            </div>
+            {modelTestBadges.shelf && (
+              <div className={`text-xs font-medium ${modelTestBadges.shelf.ok ? "text-emerald-700 dark:text-emerald-400" : "text-red-600"}`}>
+                {modelTestBadges.shelf.message}{modelTestBadges.shelf.latencyMs ? ` (${modelTestBadges.shelf.latencyMs}ms)` : ""}
+              </div>
+            )}
+          </div>
+
+          {/* 3. Fallback Model on 503 */}
+          <div className="p-3.5 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-surface-alt)]/50 space-y-2">
+            <label className="block text-xs font-bold">מודל גיבוי אוטומטי בעומס 503</label>
+            <div className="flex flex-wrap gap-2">
+              {PRESET_FALLBACK_MODELS.map((m) => (
+                <button
+                  key={m.id}
+                  type="button"
+                  onClick={() => setSettings((p) => ({ ...p, ai_fallback_model: m.id }))}
+                  className={`px-2.5 py-1 rounded-lg text-xs font-mono border cursor-pointer whitespace-nowrap ${
+                    (settings.ai_fallback_model || "gemini-4-hydrogen") === m.id
+                      ? "border-[var(--otzar-accent)] bg-[var(--otzar-surface)] text-[var(--otzar-accent)] font-semibold"
+                      : "border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)]"
+                  }`}
+                >
+                  {m.label}
+                </button>
+              ))}
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              {liveGenModels.length > 0 && (
+                <select
+                  dir="ltr"
+                  value={liveGenModels.some((m) => m.id === (settings.ai_fallback_model || "gemini-4-hydrogen")) ? (settings.ai_fallback_model || "gemini-4-hydrogen") : ""}
+                  onChange={(e) => e.target.value && setSettings((p) => ({ ...p, ai_fallback_model: e.target.value }))}
+                  className="px-2.5 py-2 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] font-mono text-xs max-w-[260px]"
+                >
+                  <option value="">-- בחר מהרשימה החיה --</option>
+                  {liveGenModels.map((m) => (
+                    <option key={m.id} value={m.id}>{m.id}</option>
+                  ))}
+                </select>
+              )}
+              <input
+                type="text"
+                dir="ltr"
+                value={settings.ai_fallback_model || "gemini-4-hydrogen"}
+                onChange={(e) => setSettings((p) => ({ ...p, ai_fallback_model: e.target.value }))}
+                className="flex-1 min-w-[200px] px-3 py-2 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] font-mono text-xs"
+              />
+              <button
+                type="button"
+                disabled={testingModelField === "fallback" || poolKeys.length === 0}
+                onClick={() => handleTestSpecificModel("fallback", settings.ai_fallback_model || "gemini-4-hydrogen", "generate")}
+                className="inline-flex items-center gap-1 px-3 py-2 rounded-lg text-xs font-semibold border border-[var(--otzar-border)] bg-[var(--otzar-bg)] hover:bg-[var(--otzar-surface)] cursor-pointer disabled:opacity-40"
+              >
+                {testingModelField === "fallback" ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <PlugZap className="w-3.5 h-3.5 text-[var(--otzar-accent)]" />}
+                בדוק מודל
+              </button>
+            </div>
+            {modelTestBadges.fallback && (
+              <div className={`text-xs font-medium ${modelTestBadges.fallback.ok ? "text-emerald-700 dark:text-emerald-400" : "text-red-600"}`}>
+                {modelTestBadges.fallback.message}{modelTestBadges.fallback.latencyMs ? ` (${modelTestBadges.fallback.latencyMs}ms)` : ""}
+              </div>
+            )}
+            <label className="mt-2 flex items-start gap-2 text-xs cursor-pointer select-none">
               <input
                 type="checkbox"
                 checked={settings.ai_auto_fallback !== "false"}
@@ -451,13 +695,13 @@ export const AiSettingsPanel: React.FC<AiSettingsPanelProps> = ({ settings, setS
                 className="mt-0.5 rounded accent-[var(--otzar-accent)]"
               />
               <span>
-                <strong>מעבר אוטומטי למודל גיבוי בזמן עומס שרת (שגיאת 503):</strong>{" "}
+                <strong>הפעל מעבר אוטומטי למודל גיבוי בזמן עומס 503:</strong>{" "}
                 <span className="text-[var(--otzar-text-muted)]">
-                  חלוקת המפתחות פותרת מגבלת מכסה (429), ואילו בעומס 503 על מודל מסוים המערכת עוברת אוטומטית למודל גיבוי יציב (gemini-3.5-flash / gemini-2.5-flash) בלי לעצור את התור.
+                  אם כל המפתחות מקבלים 503 על המודל הראשי, המערכת עוברת אוטומטית למודל הגיבוי הנבחר ולשרשרת הגיבוי (3.8-flash / 4-hydrogen / 3.5-flash-lite).
                 </span>
               </span>
-
-            <label className="mt-2.5 flex items-start gap-2 text-xs cursor-pointer select-none">
+            </label>
+            <label className="mt-2 flex items-start gap-2 text-xs cursor-pointer select-none">
               <input
                 type="checkbox"
                 checked={settings.ai_internet_enrichment !== "false" && settings.ai_internet_enrichment !== "0"}
@@ -473,20 +717,51 @@ export const AiSettingsPanel: React.FC<AiSettingsPanelProps> = ({ settings, setS
                 </span>
               </span>
             </label>
-            </label>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            <div>
-              <label className="block text-xs font-medium mb-1">מנוע אינדוקס חיפוש (768 ממדים)</label>
+          {/* 4. Embedding Model */}
+          <div className="p-3.5 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-surface-alt)]/50 space-y-2">
+            <label className="block text-xs font-bold">מנוע אינדוקס חיפוש (Embeddings - 768 ממדים)</label>
+            <div className="flex flex-wrap items-center gap-2">
+              {liveEmbedModels.length > 0 && (
+                <select
+                  dir="ltr"
+                  value={liveEmbedModels.some((m) => m.id === (settings.embedding_model || "gemini-embedding-001")) ? (settings.embedding_model || "gemini-embedding-001") : ""}
+                  onChange={(e) => e.target.value && setSettings((p) => ({ ...p, embedding_model: e.target.value }))}
+                  className="px-2.5 py-2 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] font-mono text-xs max-w-[260px]"
+                >
+                  <option value="">-- בחר מודל הטמעה חי --</option>
+                  {liveEmbedModels.map((m) => (
+                    <option key={m.id} value={m.id}>{m.id}</option>
+                  ))}
+                </select>
+              )}
               <input
                 type="text"
                 dir="ltr"
                 value={settings.embedding_model || "gemini-embedding-001"}
                 onChange={(e) => setSettings((p) => ({ ...p, embedding_model: e.target.value }))}
-                className="w-full px-3 py-2 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] font-mono text-xs"
+                className="flex-1 min-w-[200px] px-3 py-2 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] font-mono text-xs"
               />
+              <button
+                type="button"
+                disabled={testingModelField === "embed" || poolKeys.length === 0}
+                onClick={() => handleTestSpecificModel("embed", settings.embedding_model || "gemini-embedding-001", "embed")}
+                className="inline-flex items-center gap-1 px-3 py-2 rounded-lg text-xs font-semibold border border-[var(--otzar-border)] bg-[var(--otzar-bg)] hover:bg-[var(--otzar-surface)] cursor-pointer disabled:opacity-40"
+              >
+                {testingModelField === "embed" ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <PlugZap className="w-3.5 h-3.5 text-[var(--otzar-accent)]" />}
+                בדוק מודל
+              </button>
             </div>
+            {modelTestBadges.embed && (
+              <div className={`text-xs font-medium ${modelTestBadges.embed.ok ? "text-emerald-700 dark:text-emerald-400" : "text-red-600"}`}>
+                {modelTestBadges.embed.message}{modelTestBadges.embed.latencyMs ? ` (${modelTestBadges.embed.latencyMs}ms)` : ""}
+              </div>
+            )}
+          </div>
+
+          {/* 5. Key Roulette Timing Controls */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
             <div>
               <label className="block text-xs font-medium mb-1">השהיה בין תמונות בתור (מילישניות)</label>
               <input
@@ -496,6 +771,30 @@ export const AiSettingsPanel: React.FC<AiSettingsPanelProps> = ({ settings, setS
                 step={200}
                 value={settings.ai_delay_ms || "4200"}
                 onChange={(e) => setSettings((p) => ({ ...p, ai_delay_ms: e.target.value }))}
+                className="w-full px-3 py-2 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] tabular-nums text-xs"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium mb-1">זמן המתנה למפתח בודד לפני מעבר (שניות)</label>
+              <input
+                type="number"
+                min={15}
+                max={300}
+                step={5}
+                value={settings.ai_request_timeout_sec || "60"}
+                onChange={(e) => setSettings((p) => ({ ...p, ai_request_timeout_sec: e.target.value }))}
+                className="w-full px-3 py-2 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] tabular-nums text-xs"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium mb-1">זמן קירור מפתח לאחר שגיאת 429/503 (שניות)</label>
+              <input
+                type="number"
+                min={5}
+                max={300}
+                step={5}
+                value={settings.ai_key_cooldown_sec || "45"}
+                onChange={(e) => setSettings((p) => ({ ...p, ai_key_cooldown_sec: e.target.value }))}
                 className="w-full px-3 py-2 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] tabular-nums text-xs"
               />
             </div>

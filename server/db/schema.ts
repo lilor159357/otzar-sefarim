@@ -266,7 +266,13 @@ export function initSchemaAndSeed(db: DbClient): void {
     barcode_prefix: "",
     ai_api_key: "",
     ai_keys_pool: "[]",
-    ai_model: "gemini-4-hydrogen",
+    ai_cover_model: "gemini-3.5-flash-lite",
+    ai_model: "gemini-3.8-flash",
+    ai_fallback_model: "gemini-4-hydrogen",
+    ai_auto_fallback: "true",
+    ai_internet_enrichment: "true",
+    ai_request_timeout_sec: "60",
+    ai_key_cooldown_sec: "45",
     embedding_model: "gemini-embedding-001",
     ai_delay_ms: "4200",
     firebase_enabled: "0",
@@ -299,6 +305,22 @@ export function initSchemaAndSeed(db: DbClient): void {
   for (const [k, v] of Object.entries(defaultSettings)) {
     db.run("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", k, v);
   }
+
+  // Migrate deprecated gemini-3.5-flash model setting to active models
+  try {
+    const curAiModel = db.get<{ value: string }>("SELECT value FROM settings WHERE key = 'ai_model'")?.value?.trim();
+    if (curAiModel === "gemini-3.5-flash") {
+      db.run("UPDATE settings SET value = 'gemini-3.8-flash' WHERE key = 'ai_model'");
+    }
+    const curCoverModel = db.get<{ value: string }>("SELECT value FROM settings WHERE key = 'ai_cover_model'")?.value?.trim();
+    if (curCoverModel === "gemini-3.5-flash") {
+      db.run("UPDATE settings SET value = 'gemini-3.5-flash-lite' WHERE key = 'ai_cover_model'");
+    }
+    const curFallbackModel = db.get<{ value: string }>("SELECT value FROM settings WHERE key = 'ai_fallback_model'")?.value?.trim();
+    if (curFallbackModel === "gemini-3.5-flash") {
+      db.run("UPDATE settings SET value = 'gemini-4-hydrogen' WHERE key = 'ai_fallback_model'");
+    }
+  } catch {}
 
   // Migrate legacy single ai_api_key into ai_keys_pool if pool is empty
   const legacyKey = (db.get<{ value: string }>("SELECT value FROM settings WHERE key = 'ai_api_key'")?.value || "").trim();

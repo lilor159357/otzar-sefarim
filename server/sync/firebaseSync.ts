@@ -93,8 +93,13 @@ const DEMO_BARCODE_SET = new Set<string>(DEMO_BOOK_BARCODES);
 const AI_BACKUP_KEYS = [
   "ai_api_key",
   "ai_keys_pool",
+  "ai_cover_model",
   "ai_model",
+  "ai_fallback_model",
   "ai_auto_fallback",
+  "ai_internet_enrichment",
+  "ai_request_timeout_sec",
+  "ai_key_cooldown_sec",
   "embedding_model",
   "ai_delay_ms",
 ] as const;

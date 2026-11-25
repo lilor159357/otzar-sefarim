@@ -17,7 +17,9 @@ import {
   Image as ImageIcon,
   Check,
   Upload,
+  Wand2,
 } from "lucide-react";
+import { SetPatternBuilderModal } from "./SetPatternBuilderModal.tsx";
 import type {
   BookRow,
   CabinetRow,
@@ -111,6 +113,11 @@ export const LocationModal: React.FC<LocationModalProps> = ({
   const [reanalyzeError, setReanalyzeError] = useState<string | null>(null);
   const extraFileInputRef = useRef<HTMLInputElement>(null);
 
+  // Per-field set sync checkboxes & pattern builder
+  const [syncFields, setSyncFields] = useState<Record<string, boolean>>({});
+  const [setSyncCount, setSetSyncCount] = useState<{ booksCount: number; queueCount: number } | null>(null);
+  const [showPatternBuilder, setShowPatternBuilder] = useState(false);
+
   const loadSavedImages = async (barcode: string) => {
     try {
       setLoadingImages(true);
@@ -159,6 +166,8 @@ export const LocationModal: React.FC<LocationModalProps> = ({
     setReanalyzeError(null);
     setExtraFiles([]);
     setAiPrompt("");
+    setSyncFields({});
+    setShowPatternBuilder(false);
     loadSavedImages(book.barcode);
   }, [book.barcode, initialEditMode]);
 
@@ -211,6 +220,41 @@ export const LocationModal: React.FC<LocationModalProps> = ({
         }
       }
     } catch {}
+  };
+
+  useEffect(() => {
+    if (!editing || !setName.trim()) {
+      setSetSyncCount(null);
+      return;
+    }
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      fetch(`/api/books/set-sync-count?setName=${encodeURIComponent(setName.trim())}&excludeBarcode=${encodeURIComponent(book.barcode)}`)
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d) => {
+          if (!cancelled && d) setSetSyncCount({ booksCount: Number(d.booksCount || 0), queueCount: Number(d.queueCount || 0) });
+        })
+        .catch(() => {});
+    }, 240);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [editing, setName, book.barcode]);
+
+  const renderSetSyncCheckbox = (fieldKey: string) => {
+    if (!setName.trim()) return null;
+    return (
+      <label className="inline-flex items-center gap-1 text-[11px] font-semibold text-[var(--otzar-accent)] cursor-pointer select-none">
+        <input
+          type="checkbox"
+          checked={Boolean(syncFields[fieldKey])}
+          onChange={(e) => setSyncFields((p) => ({ ...p, [fieldKey]: e.target.checked }))}
+          className="rounded accent-[var(--otzar-accent)]"
+        />
+        <span>לכל הסט</span>
+      </label>
+    );
   };
 
   useEffect(() => {
@@ -268,8 +312,43 @@ export const LocationModal: React.FC<LocationModalProps> = ({
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "שגיאה בעדכון הספר");
+
+      let syncSummaryNote = "";
+      const checkedKeys = Object.entries(syncFields).filter(([, v]) => Boolean(v)).map(([k]) => k);
+      if (setName.trim() && checkedKeys.length > 0) {
+        const syncPayloadFields: Record<string, any> = {};
+        if (syncFields.author) syncPayloadFields.author = author.trim();
+        if (syncFields.category) syncPayloadFields.category = category.trim();
+        if (syncFields.publisher) syncPayloadFields.publisher = publisher.trim();
+        if (syncFields.edition) syncPayloadFields.edition = edition.trim();
+        if (syncFields.pub_year) syncPayloadFields.pub_year = pubYear.trim();
+        if (syncFields.format_size) syncPayloadFields.format_size = formatSize.trim();
+        if (syncFields.tags) {
+          syncPayloadFields.tags = tagsText.split(",").map((t) => t.trim()).filter(Boolean);
+        }
+        if (syncFields.location) {
+          syncPayloadFields.cabinet_id = cabinetId ? Number(cabinetId) : null;
+          syncPayloadFields.shelf_number = shelfNumber;
+        }
+        const sRes = await fetch("/api/books/sync-set-fields", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            setName: setName.trim(),
+            excludeBarcode: book.barcode,
+            fields: syncPayloadFields,
+          }),
+        });
+        if (sRes.ok) {
+          const sData = await sRes.json();
+          if (sData.updatedBooks || sData.updatedQueue) {
+            syncSummaryNote = ` · סונכרן ל-${sData.updatedBooks} ספרים במאגר ו-${sData.updatedQueue} פריטים בתור`;
+          }
+        }
+      }
+
       setEditing(false);
-      setSavedNotice("פרטי הספר עודכנו בהצלחה");
+      setSavedNotice(`פרטי הספר עודכנו בהצלחה${syncSummaryNote}`);
       if (onBookUpdated) await onBookUpdated();
     } catch (err: any) {
       setErrMsg(err?.message || "שגיאה בשמירה");
@@ -789,7 +868,19 @@ export const LocationModal: React.FC<LocationModalProps> = ({
             <form onSubmit={handleSave} className="space-y-4 text-sm">
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
                 <div>
-                  <label className="block text-xs font-medium mb-1">שם הספר *</label>
+                  <div className="flex items-center justify-between gap-2 mb-1">
+                    <label className="block text-xs font-medium">שם הספר *</label>
+                    {setName.trim() && (
+                      <button
+                        type="button"
+                        onClick={() => setShowPatternBuilder(true)}
+                        className="inline-flex items-center gap-1 text-[11px] font-bold text-[var(--otzar-accent)] hover:underline cursor-pointer"
+                      >
+                        <Wand2 className="w-3 h-3" />
+                        קבע תבנית לסט
+                      </button>
+                    )}
+                  </div>
                   <input
                     type="text"
                     required
@@ -847,6 +938,7 @@ export const LocationModal: React.FC<LocationModalProps> = ({
                 </div>
                 <AutocompleteInput
                   label="מחבר / מפרש"
+                  labelAction={renderSetSyncCheckbox("author")}
                   field="author"
                   value={author}
                   onChange={setAuthor}
@@ -854,6 +946,7 @@ export const LocationModal: React.FC<LocationModalProps> = ({
                 />
                 <AutocompleteInput
                   label="קטגוריה"
+                  labelAction={renderSetSyncCheckbox("category")}
                   field="category"
                   value={category}
                   onChange={setCategory}
@@ -861,13 +954,17 @@ export const LocationModal: React.FC<LocationModalProps> = ({
                 />
                 <AutocompleteInput
                   label="הוצאה / מכון"
+                  labelAction={renderSetSyncCheckbox("publisher")}
                   field="publisher"
                   value={publisher}
                   onChange={setPublisher}
                   inputClassName="!bg-[var(--otzar-bg)] !border-[var(--otzar-border-muted)]"
                 />
                 <div>
-                  <label className="block text-xs font-medium mb-1">מהדורה (אופציונלי)</label>
+                  <div className="flex items-center justify-between gap-2 mb-1">
+                    <label className="block text-xs font-medium">מהדורה (אופציונלי)</label>
+                    {renderSetSyncCheckbox("edition")}
+                  </div>
                   <input
                     type="text"
                     value={edition}
@@ -877,7 +974,10 @@ export const LocationModal: React.FC<LocationModalProps> = ({
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-medium mb-1">שנת הוצאה (אופציונלי)</label>
+                  <div className="flex items-center justify-between gap-2 mb-1">
+                    <label className="block text-xs font-medium">שנת הוצאה (אופציונלי)</label>
+                    {renderSetSyncCheckbox("pub_year")}
+                  </div>
                   <input
                     type="text"
                     value={pubYear}
@@ -890,7 +990,10 @@ export const LocationModal: React.FC<LocationModalProps> = ({
                 {/* Shelving dimensions */}
                 <div className="md:col-span-2 grid grid-cols-1 sm:grid-cols-3 gap-3">
                   <div>
-                    <label className="block text-xs font-medium mb-1">גודל / פורמט (למידוף)</label>
+                    <div className="flex items-center justify-between gap-2 mb-1">
+                      <label className="block text-xs font-medium">גודל / פורמט (למידוף)</label>
+                      {renderSetSyncCheckbox("format_size")}
+                    </div>
                     <input
                       list="otzar-format-sizes-modal"
                       value={formatSize}
@@ -932,7 +1035,10 @@ export const LocationModal: React.FC<LocationModalProps> = ({
                 </div>
 
                 <div className="md:col-span-2">
-                  <label className="block text-xs font-medium mb-1">תגיות חיפוש וכינויים (מופרדות בפסיקים)</label>
+                  <div className="flex items-center justify-between gap-2 mb-1">
+                    <label className="block text-xs font-medium">תגיות חיפוש וכינויים (מופרדות בפסיקים · מסונכרנות במיזוג בלבד)</label>
+                    {renderSetSyncCheckbox("tags")}
+                  </div>
                   <input
                     type="text"
                     value={tagsText}
@@ -941,7 +1047,10 @@ export const LocationModal: React.FC<LocationModalProps> = ({
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-medium mb-1">ארון במפה</label>
+                  <div className="flex items-center justify-between gap-2 mb-1">
+                    <label className="block text-xs font-medium">ארון במפה ומיקום מדף</label>
+                    {renderSetSyncCheckbox("location")}
+                  </div>
                   <select
                     value={cabinetId}
                     onChange={(e) => {
@@ -994,6 +1103,12 @@ export const LocationModal: React.FC<LocationModalProps> = ({
                   />
                 </div>
               </div>
+
+              {setName.trim() && Object.values(syncFields).some(Boolean) && setSyncCount && (
+                <div className="p-2.5 rounded-lg border border-amber-300 bg-amber-50 dark:bg-amber-950/30 dark:border-amber-800 text-amber-900 dark:text-amber-200 text-xs font-medium">
+                  השדות המסומנים (&quot;לכל הסט&quot;) יעדכנו יחד <strong>{setSyncCount.booksCount} ספרים במאגר</strong> ו-<strong>{setSyncCount.queueCount} פריטים ממתינים בתור ה-AI</strong> (תגיות יתמזגו ללא מחיקת תגיות קיימות; שם הסט אינו משתנה).
+                </div>
+              )}
 
               <div className="pt-3 border-t border-[var(--otzar-border-muted)] flex flex-wrap items-center justify-between gap-3">
                 {confirmDelete ? (
@@ -1273,6 +1388,23 @@ export const LocationModal: React.FC<LocationModalProps> = ({
           )}
         </div>
       </div>
+      {showPatternBuilder && setName.trim() && (
+        <SetPatternBuilderModal
+          setName={setName.trim()}
+          sampleTitle={title}
+          currentKind="book"
+          currentId={book.barcode}
+          currentVolume={volume}
+          currentSubSeries={subSeries}
+          onApplied={async (newTitle, newSub) => {
+            if (newTitle) setTitle(newTitle);
+            if (newSub !== undefined) setSubSeries(newSub);
+            setSavedNotice("תבנית השם הוחלה בהצלחה על כרכי הסט");
+            if (onBookUpdated) await onBookUpdated();
+          }}
+          onClose={() => setShowPatternBuilder(false)}
+        />
+      )}
     </div>
   );
 };

@@ -15,8 +15,10 @@ import {
   generateTextEmbedding,
   getAiConfig,
   getAiKeyPoolPublicStatus,
+  listSupportedGeminiModels,
   markApiKeySlowCooldown,
   reanalyzeApprovedBook,
+  testGeminiModel,
   saveAiKeyPool,
   testGeminiConnection,
   testSinglePoolKey,
@@ -365,6 +367,7 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
               mimeType: detectMimeFromExt(p),
             }));
 
+            const retryCustomPrompt = typeof preMeta._retry_custom_prompt === "string" ? preMeta._retry_custom_prompt.trim() : "";
             const setExtracted: ExtractedShelfSet = await analyzeShelfSetImages(
               db,
               titleParts,
@@ -372,12 +375,18 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
               existingSetCtx,
               {
                 abortSignal: controller.signal,
-                timeoutMs: 60_000,
+                customPrompt: retryCustomPrompt || undefined,
                 onKeyPicked: (entry) => {
                   abortEntry.activeApiKey = entry.apiKey;
                 },
               }
             );
+            if (typeof preMeta._title_images_count === "number") {
+              (setExtracted as any)._title_images_count = preMeta._title_images_count;
+            }
+            if (preMeta._batch_override && typeof preMeta._batch_override === "object") {
+              (setExtracted as any)._batch_override = preMeta._batch_override;
+            }
             if (presetSetName) {
               setExtracted.set_name = presetSetName;
             }
@@ -476,13 +485,19 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
               buffer: fs.readFileSync(p),
               mimeType: detectMimeFromExt(p),
             }));
+            const retryCustomPrompt = typeof preMeta._retry_custom_prompt === "string" ? preMeta._retry_custom_prompt.trim() : "";
+            const retryStrongModel = Boolean(preMeta._retry_use_strong_model);
             const extracted: ExtractedBookMetadata = await analyzeBookCoverImage(db, imageBuffers, "image/jpeg", {
               abortSignal: controller.signal,
-              timeoutMs: 45_000,
+              customPrompt: retryCustomPrompt || undefined,
+              useStrongModel: retryStrongModel,
               onKeyPicked: (entry) => {
                 abortEntry.activeApiKey = entry.apiKey;
               },
             });
+            if (preMeta._batch_override && typeof preMeta._batch_override === "object") {
+              (extracted as any)._batch_override = preMeta._batch_override;
+            }
             if (presetSetName) {
               extracted.set_name = presetSetName;
             }
@@ -658,6 +673,24 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
   // Test AI API connection (via key roulette)
   app.post("/api/ai/test", requireAdmin, async (_req, res) => {
     const result = await testGeminiConnection(db);
+    res.json({ ...result, keys: getAiKeyPoolPublicStatus(db) });
+  });
+
+  // Live model discovery via @google/genai models.list
+  app.post("/api/ai/models/list", requireAdmin, async (_req, res) => {
+    try {
+      const data = await listSupportedGeminiModels(db);
+      res.json({ ok: true, ...data, keys: getAiKeyPoolPublicStatus(db) });
+    } catch (err: any) {
+      res.status(502).json({ ok: false, error: formatGeminiError(err), keys: getAiKeyPoolPublicStatus(db) });
+    }
+  });
+
+  // Single model health check ("OK" ping)
+  app.post("/api/ai/models/test", requireAdmin, async (req, res) => {
+    const model = String(req.body?.model || "").trim();
+    const mode = req.body?.mode === "embed" ? "embed" : "generate";
+    const result = await testGeminiModel(db, model, mode);
     res.json({ ...result, keys: getAiKeyPoolPublicStatus(db) });
   });
 
@@ -1055,15 +1088,54 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
     res.json({ ok: true, requeued: info.changes });
   });
 
-  // Retry failed item
+  // Retry / Re-analyze item (supports both error and done items, customPrompt, useStrongModel, preserving all images)
   app.post("/api/ai-queue/:id/retry", requireAdmin, (req, res) => {
     const id = Number(req.params.id);
+    const customPrompt = typeof req.body?.customPrompt === "string" ? req.body.customPrompt.trim() : "";
+    const useStrongModel = Boolean(req.body?.useStrongModel);
+
+    const row = db.get<{
+      id: number;
+      is_shelf_set: number;
+      extracted_json: string | null;
+      deleted_at: string | null;
+    }>("SELECT id, is_shelf_set, extracted_json, deleted_at FROM ai_catalog_queue WHERE id = ?", id);
+
+    if (!row || row.deleted_at) {
+      return res.status(404).json({ error: t("errors.aiQueueItemNotFound") });
+    }
+
+    const active = activeQueueAborts.get(id);
+    if (active) {
+      active.reason = "manual_refresh";
+      try { active.controller.abort(new Error("MANUAL_REFRESH")); } catch {}
+    }
+
+    let prevMeta: Record<string, any> = {};
+    if (row.extracted_json) {
+      try { prevMeta = JSON.parse(row.extracted_json) || {}; } catch {}
+    }
+    const nextSeedMeta: Record<string, any> = {};
+    if (typeof prevMeta._title_images_count === "number") {
+      nextSeedMeta._title_images_count = prevMeta._title_images_count;
+    }
+    if (prevMeta._batch_override && typeof prevMeta._batch_override === "object") {
+      nextSeedMeta._batch_override = prevMeta._batch_override;
+    }
+    if (prevMeta.set_name && (Number(row.is_shelf_set) === 1 || prevMeta._preset_set_locked)) {
+      nextSeedMeta.set_name = String(prevMeta.set_name);
+    }
+    if (customPrompt) nextSeedMeta._retry_custom_prompt = customPrompt;
+    if (useStrongModel) nextSeedMeta._retry_use_strong_model = true;
+
     db.run(
-      "UPDATE ai_catalog_queue SET processing_status = 'pending', processing_started_at = NULL, error_message = NULL WHERE id = ? AND deleted_at IS NULL",
+      "UPDATE ai_catalog_queue SET processing_status = 'pending', processing_started_at = NULL, error_message = NULL, spine_extracted_json = NULL, extracted_json = ? WHERE id = ? AND deleted_at IS NULL",
+      Object.keys(nextSeedMeta).length > 0 ? JSON.stringify(nextSeedMeta) : null,
       id
     );
+    setTimeout(() => { void processPendingQueue(); }, 100);
     void processPendingQueue();
-    res.json({ ok: true });
+    res.json({ ok: true, id });
   });
 
   // Manual instant refresh + API key rotation for stuck/slow AI decoding item
@@ -1554,6 +1626,246 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
     } catch (err) {
       res.status(502).json({ error: formatGeminiError(err) });
     }
+  });
+
+  // --- Cross-Set Field Sync (Safety-Enforced) & Highlight-to-Parameter Pattern Builder ---
+  app.get("/api/books/set-sync-count", requireAdmin, (req, res) => {
+    const setName = String(req.query.setName || "").trim();
+    const excludeBarcode = String(req.query.excludeBarcode || "").trim();
+    const excludeQueueIdRaw = Number(req.query.excludeQueueId || 0);
+    const excludeQueueId = Number.isFinite(excludeQueueIdRaw) && excludeQueueIdRaw > 0 ? excludeQueueIdRaw : 0;
+    if (!setName) {
+      return res.json({ booksCount: 0, queueCount: 0, items: [] });
+    }
+    const allBooks = db.all<{ barcode: string; title: string; volume: string; sub_series: string }>(
+      "SELECT barcode, title, volume, sub_series FROM books WHERE set_name = ? AND deleted_at IS NULL ORDER BY COALESCE(set_global_number, 999999), volume ASC, title ASC",
+      setName
+    );
+    const matchingBooks = allBooks.filter((b) => !excludeBarcode || b.barcode !== excludeBarcode);
+
+    const pendingRows = db.all<{ id: number; extracted_json: string | null }>(
+      "SELECT id, extracted_json FROM ai_catalog_queue WHERE approval_status = 'pending' AND deleted_at IS NULL ORDER BY id ASC"
+    );
+    const matchingQueue: Array<{ id: number; title: string; volume: string; sub_series: string }> = [];
+    for (const q of pendingRows) {
+      if (excludeQueueId && q.id === excludeQueueId) continue;
+      if (!q.extracted_json) continue;
+      try {
+        const ex = JSON.parse(q.extracted_json);
+        if (String(ex?.set_name || "").trim() === setName) {
+          matchingQueue.push({
+            id: q.id,
+            title: String(ex.title || ""),
+            volume: String(ex.volume || ""),
+            sub_series: String(ex.sub_series || ""),
+          });
+        }
+      } catch {}
+    }
+    const items = [
+      ...allBooks.map((b) => ({ kind: "book" as const, id: b.barcode, title: b.title || "", volume: b.volume || "", sub_series: b.sub_series || "" })),
+      ...matchingQueue.map((q) => ({ kind: "queue" as const, id: q.id, title: q.title, volume: q.volume, sub_series: q.sub_series })),
+    ];
+    res.json({
+      booksCount: matchingBooks.length,
+      queueCount: matchingQueue.length,
+      items,
+    });
+  });
+
+  app.post("/api/books/sync-set-fields", requireAdmin, (req, res) => {
+    const setName = String(req.body?.setName || "").trim();
+    const excludeBarcode = String(req.body?.excludeBarcode || "").trim();
+    const excludeQueueIdRaw = Number(req.body?.excludeQueueId || 0);
+    const excludeQueueId = Number.isFinite(excludeQueueIdRaw) && excludeQueueIdRaw > 0 ? excludeQueueIdRaw : 0;
+    const rawFields = (req.body?.fields && typeof req.body.fields === "object" ? req.body.fields : {}) as Record<string, any>;
+    if (!setName) {
+      return res.status(400).json({ error: "נדרש שם סט לסנכרון שדות" });
+    }
+
+    // STRICT SAFETY: Never synchronize set_name itself across books!
+    const allowed: Record<string, any> = {};
+    if (typeof rawFields.author === "string") allowed.author = rawFields.author.trim();
+    if (typeof rawFields.publisher === "string") allowed.publisher = rawFields.publisher.trim();
+    if (typeof rawFields.pub_year === "string") allowed.pub_year = rawFields.pub_year.trim();
+    if (typeof rawFields.edition === "string") allowed.edition = rawFields.edition.trim();
+    if (typeof rawFields.category === "string") allowed.category = rawFields.category.trim();
+    if (typeof rawFields.format_size === "string") allowed.format_size = rawFields.format_size.trim();
+    if ("cabinet_id" in rawFields) allowed.cabinet_id = rawFields.cabinet_id ? Number(rawFields.cabinet_id) : null;
+    if ("shelf_number" in rawFields) allowed.shelf_number = rawFields.shelf_number ? Math.max(1, Number(rawFields.shelf_number)) : 1;
+    const incomingTags = "tags" in rawFields ? parseTags(rawFields.tags) : null;
+
+    if (Object.keys(allowed).length === 0 && incomingTags === null) {
+      return res.json({ ok: true, updatedBooks: 0, updatedQueue: 0 });
+    }
+
+    const now = new Date().toISOString();
+    let updatedBooks = 0;
+    let updatedQueue = 0;
+
+    db.transaction(() => {
+      const books = db.all<Record<string, any>>(
+        "SELECT * FROM books WHERE set_name = ? AND deleted_at IS NULL",
+        setName
+      );
+      for (const b of books) {
+        if (excludeBarcode && b.barcode === excludeBarcode) continue;
+        const nextAuthor = "author" in allowed ? allowed.author : String(b.author || "");
+        const nextPublisher = "publisher" in allowed ? allowed.publisher : String(b.publisher || "");
+        const nextPubYear = "pub_year" in allowed ? allowed.pub_year : String(b.pub_year || "");
+        const nextEdition = "edition" in allowed ? allowed.edition : String(b.edition || "");
+        const nextCategory = "category" in allowed ? allowed.category : String(b.category || "");
+        const nextFormat = "format_size" in allowed ? allowed.format_size : String(b.format_size || "");
+        const nextCabinetId = "cabinet_id" in allowed ? allowed.cabinet_id : b.cabinet_id;
+        const nextShelf = "shelf_number" in allowed ? allowed.shelf_number : b.shelf_number;
+        // MANDATORY MERGE for tags (preserve unique per-volume tags)
+        const existingTags = parseTags(b.tags);
+        const nextTags = incomingTags !== null
+          ? Array.from(new Set([...existingTags, ...incomingTags])).filter(Boolean)
+          : existingTags;
+        const norm = buildNormalizedBookSearch([
+          String(b.barcode),
+          String(b.title || ""),
+          String(b.set_name || ""),
+          String(b.sub_series || ""),
+          nextAuthor,
+          String(b.volume || ""),
+          String(b.coverage_range || ""),
+          nextPublisher,
+          nextPubYear,
+          nextEdition,
+          nextCategory,
+          nextTags.join(" "),
+          String(b.notes || ""),
+        ]);
+        db.run(
+          `UPDATE books SET author = ?, publisher = ?, pub_year = ?, edition = ?, category = ?, format_size = ?, cabinet_id = ?, shelf_number = ?, tags = ?, normalized_search = ?, updated_at = ? WHERE barcode = ?`,
+          nextAuthor,
+          nextPublisher,
+          nextPubYear,
+          nextEdition,
+          nextCategory,
+          nextFormat,
+          nextCabinetId,
+          nextShelf,
+          JSON.stringify(nextTags),
+          norm,
+          now,
+          b.barcode
+        );
+        if (b.sync_id) {
+          enqueueSyncOutbox(db, "book", String(b.sync_id), "upsert", { barcode: String(b.barcode) });
+        }
+        updatedBooks += 1;
+      }
+
+      const qRows = db.all<{ id: number; extracted_json: string | null; default_cabinet_id: number | null; default_shelf_number: number | null }>(
+        "SELECT id, extracted_json, default_cabinet_id, default_shelf_number FROM ai_catalog_queue WHERE approval_status = 'pending' AND deleted_at IS NULL"
+      );
+      for (const q of qRows) {
+        if (excludeQueueId && q.id === excludeQueueId) continue;
+        if (!q.extracted_json) continue;
+        try {
+          const ex = JSON.parse(q.extracted_json);
+          if (String(ex?.set_name || "").trim() !== setName) continue;
+          if ("author" in allowed) ex.author = allowed.author;
+          if ("publisher" in allowed) ex.publisher = allowed.publisher;
+          if ("pub_year" in allowed) ex.pub_year = allowed.pub_year;
+          if ("edition" in allowed) ex.edition = allowed.edition;
+          if ("category" in allowed) ex.category = allowed.category;
+          if ("format_size" in allowed) ex.format_size = allowed.format_size;
+          if (incomingTags !== null) {
+            const curTags = parseTags(ex.tags);
+            ex.tags = Array.from(new Set([...curTags, ...incomingTags])).filter(Boolean);
+          }
+          const nextCab = "cabinet_id" in allowed ? allowed.cabinet_id : q.default_cabinet_id;
+          const nextShelf = "shelf_number" in allowed ? allowed.shelf_number : q.default_shelf_number;
+          db.run(
+            "UPDATE ai_catalog_queue SET extracted_json = ?, default_cabinet_id = ?, default_shelf_number = ? WHERE id = ?",
+            JSON.stringify(ex),
+            nextCab,
+            nextShelf,
+            q.id
+          );
+          updatedQueue += 1;
+        } catch {}
+      }
+    });
+
+    if (updatedBooks > 0) onSyncTrigger?.();
+    res.json({ ok: true, updatedBooks, updatedQueue });
+  });
+
+  app.post("/api/books/apply-set-pattern", requireAdmin, (req, res) => {
+    const updates = Array.isArray(req.body?.updates) ? req.body.updates : [];
+    if (updates.length === 0) {
+      return res.json({ ok: true, updatedBooks: 0, updatedQueue: 0 });
+    }
+    const now = new Date().toISOString();
+    let updatedBooks = 0;
+    let updatedQueue = 0;
+
+    db.transaction(() => {
+      for (const u of updates) {
+        const kind = u?.kind === "queue" ? "queue" : "book";
+        const newTitle = String(u?.newTitle || "").trim();
+        if (!newTitle) continue;
+        const hasSubSeries = typeof u?.newSubSeries === "string";
+        if (kind === "book") {
+          const barcode = String(u?.id || "").trim();
+          if (!barcode) continue;
+          const b = db.get<Record<string, any>>("SELECT * FROM books WHERE barcode = ? AND deleted_at IS NULL", barcode);
+          if (!b) continue;
+          const nextSubSeries = hasSubSeries ? u.newSubSeries.trim() : String(b.sub_series || "");
+          const tagsArr = parseTags(b.tags);
+          const norm = buildNormalizedBookSearch([
+            barcode,
+            newTitle,
+            String(b.set_name || ""),
+            nextSubSeries,
+            String(b.author || ""),
+            String(b.volume || ""),
+            String(b.coverage_range || ""),
+            String(b.publisher || ""),
+            String(b.pub_year || ""),
+            String(b.edition || ""),
+            String(b.category || ""),
+            tagsArr.join(" "),
+            String(b.notes || ""),
+          ]);
+          db.run(
+            "UPDATE books SET title = ?, sub_series = ?, normalized_search = ?, updated_at = ? WHERE barcode = ?",
+            newTitle,
+            nextSubSeries,
+            norm,
+            now,
+            barcode
+          );
+          if (b.sync_id) {
+            enqueueSyncOutbox(db, "book", String(b.sync_id), "upsert", { barcode });
+          }
+          updatedBooks += 1;
+        } else {
+          const qid = Number(u?.id);
+          if (!Number.isFinite(qid) || qid <= 0) continue;
+          const q = db.get<{ id: number; extracted_json: string | null }>(
+            "SELECT id, extracted_json FROM ai_catalog_queue WHERE id = ? AND deleted_at IS NULL",
+            qid
+          );
+          if (!q || !q.extracted_json) continue;
+          try {
+            const ex = JSON.parse(q.extracted_json);
+            ex.title = newTitle;
+            if (hasSubSeries) ex.sub_series = u.newSubSeries.trim();
+            db.run("UPDATE ai_catalog_queue SET extracted_json = ? WHERE id = ?", JSON.stringify(ex), qid);
+            updatedQueue += 1;
+          } catch {}
+        }
+      }
+    });
+
+    if (updatedBooks > 0) onSyncTrigger?.();
+    res.json({ ok: true, updatedBooks, updatedQueue });
   });
 
   // --- 30-Day Recycle Bin (Deleted Books & Rejected/Deleted AI Scans) ---
