@@ -58,6 +58,92 @@ async function getGoogleAccessToken(sa) {
   const signature = signer.sign(sa.private_key);
   const jwt = `${dataToSign}.${base64url(signature)}`;
 
+  const body = new URLSearchParams({
+    grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+    assertion: jwt,
+  }).toString();
+
+  const res = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body,
+  });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`OAuth2 token exchange failed (${res.status}): ${errText}`);
+  }
+
+  const data = await res.json();
+  return data.access_token;
+}
+
+async function fetchOpenBugReports(projectId, accessToken) {
+  const url = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents/bug_reports?pageSize=100`;
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+
+  if (res.status === 404) return [];
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Firestore list documents failed (${res.status}): ${errText}`);
+  }
+
+  const data = await res.json();
+  const docs = data.documents || [];
+
+  return docs.map((d) => {
+    const f = d.fields || {};
+    const nameParts = d.name.split('/');
+    const docId = nameParts[nameParts.length - 1];
+    return {
+      docId,
+      fullPath: d.name,
+      title: f.title?.stringValue || 'דיווח תקלה ללא כותרת',
+      description: f.description?.stringValue || '',
+      category: f.category?.stringValue || 'כללי',
+      platform: f.platform?.stringValue || 'Desktop',
+      app_version: f.app_version?.stringValue || 'unknown',
+      user_email: f.user_email?.stringValue || 'אנונימי',
+      created_at: f.created_at?.stringValue || new Date().toISOString(),
+      status: f.status?.stringValue || 'open',
+      diagnostics: f.diagnostics?.stringValue || '',
+    };
+  }).filter((r) => r.status === 'open');
+}
+
+async function markBugReportProcessed(projectId, accessToken, docId, issueUrl, issueNum) {
+  const url = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents/bug_reports/${encodeURIComponent(docId)}?updateMask.fieldPaths=status&updateMask.fieldPaths=github_issue_url&updateMask.fieldPaths=github_issue_number&updateMask.fieldPaths=processed_at`;
+  const res = await fetch(url, {
+    method: 'PATCH',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      fields: {
+        status: { stringValue: 'processed' },
+        github_issue_url: { stringValue: issueUrl || '' },
+        github_issue_number: { integerValue: String(issueNum || 0) },
+        processed_at: { stringValue: new Date().toISOString() },
+      },
+    }),
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    console.warn(`[process-bug-reports] Warning: Failed to mark doc ${docId} as processed: ${text}`);
+  }
+}
+
+async function createGitHubIssue(report) {
+  if (!githubToken) {
+    console.warn('[process-bug-reports] GITHUB_TOKEN not set; cannot create GitHub issue.');
+    return null;
+  }
+
+  const issueTitle = `[דיווחי משתמשים][${report.platform}] ${report.title}`;
   const fence = '```';
   const body = [
     '## 🐞 דיווח תקלה חדש מאפליקציית אוצר ספרים',
