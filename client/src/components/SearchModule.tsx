@@ -489,8 +489,8 @@ export const SearchModule: React.FC<SearchModuleProps> = ({
           isAdmin={isAdmin}
           initialEditMode={isAdmin && openInEditMode}
           onBookUpdated={onReload}
-          onSelectBarcode={(bc) => {
-            setOpenInEditMode(false);
+          onSelectBarcode={(bc, editMode) => {
+            setOpenInEditMode(Boolean(editMode));
             setSelectedBarcode(bc);
           }}
           onClose={() => {

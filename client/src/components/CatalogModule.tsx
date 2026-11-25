@@ -27,7 +27,7 @@ import { FORMAT_SIZE_OPTIONS, type AiQueueItem, type CabinetRow, type VolumeNota
 import { RecycleBinModal } from "./RecycleBinModal.tsx";
 import { getAdminToken } from "../lib/adminSession.ts";
 import { AutocompleteInput } from "./AutocompleteInput.tsx";
-import { SetPatternBuilderModal } from "./SetPatternBuilderModal.tsx";
+import { SetPatternBuilderModal, type PatternTargetField } from "./SetPatternBuilderModal.tsx";
 import { suggestNextVolume, compareSetBooks } from "../lib/torahUtils.ts";
 import { useStrings } from "../lib/stringsContext.tsx";
 
@@ -307,6 +307,7 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
   const [revSyncFields, setRevSyncFields] = useState<Record<string, boolean>>({});
   const [revSetSyncCount, setRevSetSyncCount] = useState<{ booksCount: number; queueCount: number } | null>(null);
   const [showRevPatternBuilder, setShowRevPatternBuilder] = useState(false);
+  const [revPatternBuilderField, setRevPatternBuilderField] = useState<PatternTargetField>("title");
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
@@ -2466,7 +2467,7 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
                         {revSetName.trim() && (
                           <button
                             type="button"
-                            onClick={() => setShowRevPatternBuilder(true)}
+                            onClick={() => { setRevPatternBuilderField("title"); setShowRevPatternBuilder(true); }}
                             className="inline-flex items-center gap-1 text-[11px] font-bold text-[var(--otzar-accent)] hover:underline cursor-pointer"
                           >
                             <Wand2 className="w-3 h-3" />
@@ -2535,6 +2536,21 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
                     <div>
                       <AutocompleteInput
                         label="תת-סדרה / מסכת / חלק ראשי בסט"
+                        labelAction={
+                          revSetName.trim() ? (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setRevPatternBuilderField("sub_series");
+                                setShowRevPatternBuilder(true);
+                              }}
+                              className="inline-flex items-center gap-1 text-[11px] font-bold text-[var(--otzar-accent)] hover:underline cursor-pointer"
+                            >
+                              <Wand2 className="w-3 h-3" />
+                              קבע תבנית לסט
+                            </button>
+                          ) : undefined
+                        }
                         field="sub_series"
                         value={revSubSeries}
                         onChange={setRevSubSeries}
@@ -2564,7 +2580,22 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
                     </div>
                     {!activeReviewItem.is_shelf_set && (
                       <div>
-                        <label className="block text-xs font-medium mb-1">כרך / סימון כרך (*, III, חלק א׳)</label>
+                        <div className="flex items-center justify-between gap-2 mb-1">
+                          <label className="block text-xs font-medium">כרך / סימון כרך (*, III, חלק א׳)</label>
+                          {revSetName.trim() && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setRevPatternBuilderField("volume");
+                                setShowRevPatternBuilder(true);
+                              }}
+                              className="inline-flex items-center gap-1 text-[11px] font-bold text-[var(--otzar-accent)] hover:underline cursor-pointer"
+                            >
+                              <Wand2 className="w-3 h-3" />
+                              קבע תבנית לסט
+                            </button>
+                          )}
+                        </div>
                         <input
                           type="text"
                           value={revVolume}
@@ -2941,13 +2972,15 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
         <SetPatternBuilderModal
           setName={revSetName.trim()}
           sampleTitle={revTitle.trim() || revSetName.trim()}
+          initialField={revPatternBuilderField}
           currentKind="queue"
           currentId={activeReviewItem.id}
           currentVolume={revVolume}
           currentSubSeries={revSubSeries}
-          onApplied={async (updatedTitle, updatedSubSeries) => {
-            if (updatedTitle) setRevTitle(updatedTitle);
-            if (typeof updatedSubSeries === "string") setRevSubSeries(updatedSubSeries);
+          onApplied={async (updated) => {
+            if (updated?.title) setRevTitle(updated.title);
+            if (typeof updated?.sub_series === "string") setRevSubSeries(updated.sub_series);
+            if (typeof updated?.volume === "string") setRevVolume(updated.volume);
             await Promise.all([loadQueue(), onReload()]);
           }}
           onClose={() => setShowRevPatternBuilder(false)}

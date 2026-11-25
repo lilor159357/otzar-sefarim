@@ -27,6 +27,7 @@ import {
   type ExtractedShelfSet,
 } from "../ai/geminiService.ts";
 import { findAuthorityMatch } from "../search/torahAuthority.ts";
+import { compareSetBooks } from "../../shared/torah/volumeAndCoverage.ts";
 
 const RETENTION_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
 let isQueueWorkerRunning = false;
@@ -172,6 +173,22 @@ function lookupExistingSetContext(
     resolvedName
   );
   if (!row) return undefined;
+  const sampleRows = db.all<{ title: string; sub_series: string; volume: string }>(
+    "SELECT title, sub_series, volume FROM books WHERE LOWER(set_name) = LOWER(?) AND deleted_at IS NULL ORDER BY updated_at DESC LIMIT 10",
+    resolvedName
+  );
+  const seen = new Set<string>();
+  const samplePatterns: Array<{ title: string; sub_series: string; volume: string }> = [];
+  for (const sr of sampleRows) {
+    const t = String(sr.title || "").trim();
+    const s = String(sr.sub_series || "").trim();
+    const v = String(sr.volume || "").trim();
+    const key = `${t}|${s}|${v}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    samplePatterns.push({ title: t, sub_series: s, volume: v });
+    if (samplePatterns.length >= 5) break;
+  }
   return {
     set_name: String(row.set_name || resolvedName).trim(),
     author: String(row.author || "").trim(),
@@ -182,6 +199,7 @@ function lookupExistingSetContext(
     tags: parseTags(row.tags),
     cabinet_id: (row as any).cabinet_id ? Number((row as any).cabinet_id) : null,
     shelf_number: typeof (row as any).shelf_number === "number" ? Number((row as any).shelf_number) : null,
+    samplePatterns,
   };
 }
 
@@ -491,6 +509,7 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
               abortSignal: controller.signal,
               customPrompt: retryCustomPrompt || undefined,
               useStrongModel: retryStrongModel,
+              existingSetContext: existingSetCtx,
               onKeyPicked: (entry) => {
                 abortEntry.activeApiKey = entry.apiKey;
               },
@@ -1584,6 +1603,9 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
     }
 
     try {
+      const bookSetCtx = book.set_name
+        ? lookupExistingSetContext(db, String(book.set_name), String(book.edition || ""), String(book.publisher || ""))
+        : undefined;
       const proposed = await reanalyzeApprovedBook(
         db,
         {
@@ -1603,7 +1625,7 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
         },
         imageParts,
         customPrompt,
-        { timeoutMs: 45_000 }
+        { timeoutMs: 45_000, existingSetContext: bookSetCtx }
       );
       if (proposed.author) {
         const authMatch = findAuthorityMatch(db, "author", proposed.author);
@@ -1637,10 +1659,11 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
     if (!setName) {
       return res.json({ booksCount: 0, queueCount: 0, items: [] });
     }
-    const allBooks = db.all<{ barcode: string; title: string; volume: string; sub_series: string }>(
-      "SELECT barcode, title, volume, sub_series FROM books WHERE set_name = ? AND deleted_at IS NULL ORDER BY COALESCE(set_global_number, 999999), volume ASC, title ASC",
+    const allBooks = db.all<{ barcode: string; title: string; volume: string; sub_series: string; set_global_number: number | null }>(
+      "SELECT barcode, title, volume, sub_series, set_global_number FROM books WHERE set_name = ? AND deleted_at IS NULL",
       setName
     );
+    allBooks.sort((a, b) => compareSetBooks(a, b));
     const matchingBooks = allBooks.filter((b) => !excludeBarcode || b.barcode !== excludeBarcode);
 
     const pendingRows = db.all<{ id: number; extracted_json: string | null }>(
@@ -1808,23 +1831,27 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
     db.transaction(() => {
       for (const u of updates) {
         const kind = u?.kind === "queue" ? "queue" : "book";
-        const newTitle = String(u?.newTitle || "").trim();
-        if (!newTitle) continue;
+        const hasTitle = typeof u?.newTitle === "string" && u.newTitle.trim().length > 0;
         const hasSubSeries = typeof u?.newSubSeries === "string";
+        const hasVolume = typeof u?.newVolume === "string";
+        if (!hasTitle && !hasSubSeries && !hasVolume) continue;
+
         if (kind === "book") {
           const barcode = String(u?.id || "").trim();
           if (!barcode) continue;
           const b = db.get<Record<string, any>>("SELECT * FROM books WHERE barcode = ? AND deleted_at IS NULL", barcode);
           if (!b) continue;
+          const nextTitle = hasTitle ? u.newTitle.trim() : String(b.title || "");
           const nextSubSeries = hasSubSeries ? u.newSubSeries.trim() : String(b.sub_series || "");
+          const nextVolume = hasVolume ? u.newVolume.trim() : String(b.volume || "");
           const tagsArr = parseTags(b.tags);
           const norm = buildNormalizedBookSearch([
             barcode,
-            newTitle,
+            nextTitle,
             String(b.set_name || ""),
             nextSubSeries,
             String(b.author || ""),
-            String(b.volume || ""),
+            nextVolume,
             String(b.coverage_range || ""),
             String(b.publisher || ""),
             String(b.pub_year || ""),
@@ -1834,9 +1861,10 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
             String(b.notes || ""),
           ]);
           db.run(
-            "UPDATE books SET title = ?, sub_series = ?, normalized_search = ?, updated_at = ? WHERE barcode = ?",
-            newTitle,
+            "UPDATE books SET title = ?, sub_series = ?, volume = ?, normalized_search = ?, updated_at = ? WHERE barcode = ?",
+            nextTitle,
             nextSubSeries,
+            nextVolume,
             norm,
             now,
             barcode
@@ -1855,12 +1883,71 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
           if (!q || !q.extracted_json) continue;
           try {
             const ex = JSON.parse(q.extracted_json);
-            ex.title = newTitle;
+            if (hasTitle) ex.title = u.newTitle.trim();
             if (hasSubSeries) ex.sub_series = u.newSubSeries.trim();
+            if (hasVolume) ex.volume = u.newVolume.trim();
             db.run("UPDATE ai_catalog_queue SET extracted_json = ? WHERE id = ?", JSON.stringify(ex), qid);
             updatedQueue += 1;
           } catch {}
         }
+      }
+    });
+
+    if (updatedBooks > 0) onSyncTrigger?.();
+    res.json({ ok: true, updatedBooks, updatedQueue });
+  });
+
+  app.post("/api/books/assign-set-unassigned-location", requireAdmin, (req, res) => {
+    const setName = String(req.body?.setName || "").trim();
+    const cabinetId = Number(req.body?.cabinet_id || 0);
+    const shelfNumber = Math.max(1, Number(req.body?.shelf_number || 1));
+    if (!setName || !Number.isFinite(cabinetId) || cabinetId <= 0) {
+      return res.status(400).json({ error: "נדרשים שם סט וארון תקין לשיוך" });
+    }
+    const cab = db.get<{ id: number }>("SELECT id FROM cabinets WHERE id = ? AND deleted_at IS NULL", cabinetId);
+    if (!cab) {
+      return res.status(404).json({ error: "הארון שנבחר לא נמצא במאגר" });
+    }
+    const now = new Date().toISOString();
+    let updatedBooks = 0;
+    let updatedQueue = 0;
+
+    db.transaction(() => {
+      const unassigned = db.all<{ barcode: string; sync_id: string | null }>(
+        "SELECT barcode, sync_id FROM books WHERE set_name = ? AND deleted_at IS NULL AND (cabinet_id IS NULL OR cabinet_id = 0)",
+        setName
+      );
+      for (const b of unassigned) {
+        db.run(
+          "UPDATE books SET cabinet_id = ?, shelf_number = ?, updated_at = ? WHERE barcode = ?",
+          cabinetId,
+          shelfNumber,
+          now,
+          b.barcode
+        );
+        if (b.sync_id) {
+          enqueueSyncOutbox(db, "book", String(b.sync_id), "upsert", { barcode: String(b.barcode) });
+        }
+        updatedBooks += 1;
+      }
+
+      const qRows = db.all<{ id: number; extracted_json: string | null; default_cabinet_id: number | null }>(
+        "SELECT id, extracted_json, default_cabinet_id FROM ai_catalog_queue WHERE approval_status = 'pending' AND deleted_at IS NULL"
+      );
+      for (const q of qRows) {
+        if (q.default_cabinet_id) continue;
+        if (!q.extracted_json) continue;
+        try {
+          const ex = JSON.parse(q.extracted_json);
+          if (String(ex?.set_name || "").trim() !== setName) continue;
+          db.run(
+            "UPDATE ai_catalog_queue SET default_cabinet_id = ?, default_shelf_number = ? WHERE id = ?",
+            cabinetId,
+            shelfNumber,
+            q.id
+          );
+          updatedQueue += 1;
+        } catch {}
       }
     });
 

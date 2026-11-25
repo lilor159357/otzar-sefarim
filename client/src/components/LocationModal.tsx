@@ -19,7 +19,7 @@ import {
   Upload,
   Wand2,
 } from "lucide-react";
-import { SetPatternBuilderModal } from "./SetPatternBuilderModal.tsx";
+import { SetPatternBuilderModal, type PatternTargetField } from "./SetPatternBuilderModal.tsx";
 import type {
   BookRow,
   CabinetRow,
@@ -47,7 +47,7 @@ interface LocationModalProps {
   isAdmin?: boolean;
   initialEditMode?: boolean;
   onBookUpdated?: () => Promise<void>;
-  onSelectBarcode?: (barcode: string) => void;
+  onSelectBarcode?: (barcode: string, editMode?: boolean) => void;
   onClose: () => void;
 }
 
@@ -117,6 +117,8 @@ export const LocationModal: React.FC<LocationModalProps> = ({
   const [syncFields, setSyncFields] = useState<Record<string, boolean>>({});
   const [setSyncCount, setSetSyncCount] = useState<{ booksCount: number; queueCount: number } | null>(null);
   const [showPatternBuilder, setShowPatternBuilder] = useState(false);
+  const [patternBuilderField, setPatternBuilderField] = useState<PatternTargetField>("title");
+  const [assigningSetLoc, setAssigningSetLoc] = useState(false);
 
   const loadSavedImages = async (barcode: string) => {
     try {
@@ -266,6 +268,45 @@ export const LocationModal: React.FC<LocationModalProps> = ({
     }, 350);
     return () => clearTimeout(t);
   }, [setName, editing]);
+
+  const reloadSetBooks = async () => {
+    const sName = (book.set_name || "").trim();
+    if (!sName) return;
+    try {
+      const r = await fetch("/api/books/set/" + encodeURIComponent(sName));
+      if (r.ok) {
+        const d = await r.json();
+        setSetBooks(Array.isArray(d?.books) ? d.books : []);
+      }
+    } catch {}
+  };
+
+  const handleAssignUnassignedSetLocation = async (targetCabId: number, targetShelf: number) => {
+    const sName = (book.set_name || "").trim();
+    if (!sName || !targetCabId) return;
+    setAssigningSetLoc(true);
+    setErrMsg(null);
+    try {
+      const res = await fetch("/api/books/assign-set-unassigned-location", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          setName: sName,
+          cabinet_id: targetCabId,
+          shelf_number: targetShelf,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "שגיאה בשיוך המיקום לשאר כרכי הסט");
+      setSavedNotice(`המיקום שויך בהצלחה ל-${data.updatedBooks || 0} כרכים לא משויכים בסט`);
+      await reloadSetBooks();
+      if (onBookUpdated) await onBookUpdated();
+    } catch (err: any) {
+      setErrMsg(err?.message || "שגיאה בשיוך המיקום");
+    } finally {
+      setAssigningSetLoc(false);
+    }
+  };
 
   const activeCabId = editing ? (cabinetId ? Number(cabinetId) : null) : book.cabinet_id;
   const cabinet = cabinets.find((c) => c.id === activeCabId) || null;
@@ -544,8 +585,8 @@ export const LocationModal: React.FC<LocationModalProps> = ({
         onClick={(e) => e.stopPropagation()}
       >
         {/* Modal Header */}
-        <div className="px-6 py-4 border-b border-[var(--otzar-border-muted)] flex items-start justify-between gap-4">
-          <div className="space-y-1">
+        <div className="px-6 py-4 border-b border-[var(--otzar-border-muted)] flex items-start justify-between gap-4 shrink-0">
+          <div className="space-y-1 min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--otzar-text-muted)]">
               <span className="font-mono tabular-nums font-semibold text-[var(--otzar-accent)]">#{book.barcode}</span>
               <span aria-hidden="true">·</span>
@@ -873,7 +914,7 @@ export const LocationModal: React.FC<LocationModalProps> = ({
                     {setName.trim() && (
                       <button
                         type="button"
-                        onClick={() => setShowPatternBuilder(true)}
+                        onClick={() => { setPatternBuilderField("title"); setShowPatternBuilder(true); }}
                         className="inline-flex items-center gap-1 text-[11px] font-bold text-[var(--otzar-accent)] hover:underline cursor-pointer"
                       >
                         <Wand2 className="w-3 h-3" />
@@ -899,6 +940,21 @@ export const LocationModal: React.FC<LocationModalProps> = ({
                 />
                 <AutocompleteInput
                   label="תת-סדרה / מסכת / חלק ראשי בסט (אופציונלי)"
+                  labelAction={
+                    setName.trim() ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setPatternBuilderField("sub_series");
+                          setShowPatternBuilder(true);
+                        }}
+                        className="inline-flex items-center gap-1 text-[11px] font-bold text-[var(--otzar-accent)] hover:underline cursor-pointer"
+                      >
+                        <Wand2 className="w-3 h-3" />
+                        קבע תבנית לסט
+                      </button>
+                    ) : undefined
+                  }
                   field="sub_series"
                   value={subSeries}
                   onChange={setSubSeries}
@@ -906,7 +962,22 @@ export const LocationModal: React.FC<LocationModalProps> = ({
                   inputClassName="!bg-[var(--otzar-bg)] !border-[var(--otzar-border-muted)]"
                 />
                 <div>
-                  <label className="block text-xs font-medium mb-1">כרך / חלק / פורמט סימון</label>
+                  <div className="flex items-center justify-between gap-2 mb-1">
+                    <label className="block text-xs font-medium">כרך / חלק / פורמט סימון</label>
+                    {setName.trim() && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setPatternBuilderField("volume");
+                          setShowPatternBuilder(true);
+                        }}
+                        className="inline-flex items-center gap-1 text-[11px] font-bold text-[var(--otzar-accent)] hover:underline cursor-pointer"
+                      >
+                        <Wand2 className="w-3 h-3" />
+                        קבע תבנית לסט
+                      </button>
+                    )}
+                  </div>
                   <input
                     type="text"
                     value={volume}
@@ -1236,16 +1307,60 @@ export const LocationModal: React.FC<LocationModalProps> = ({
               </div>
 
               {/* Set / Multi-Volume Section with Flexible Nested Sub-Series & Torah Sort */}
-              {book.set_name && (
+              {book.set_name && (() => {
+                const unassignedCount = setBooks.filter((x) => !x.cabinet_id).length;
+                let quickCabId = book.cabinet_id || null;
+                let quickShelf = book.shelf_number ?? 1;
+                let quickCabCode = cabinet?.code || book.cabinet_code || "";
+                if (!quickCabId) {
+                  const assignedCopy = setBooks.find((x) => x.cabinet_id);
+                  if (assignedCopy?.cabinet_id) {
+                    quickCabId = assignedCopy.cabinet_id;
+                    quickShelf = assignedCopy.shelf_number ?? 1;
+                    quickCabCode =
+                      assignedCopy.cabinet_code ||
+                      cabinets.find((c) => c.id === assignedCopy.cabinet_id)?.code ||
+                      "";
+                  }
+                }
+                return (
                 <div className="rounded-xl border border-[var(--otzar-border-muted)] bg-[var(--otzar-surface-alt)] p-4 space-y-2.5">
-                  <div className="flex items-center justify-between">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
                     <span className="flex items-center gap-1.5 text-sm font-semibold">
                       <Library className="w-4 h-4 text-[var(--otzar-accent)]" />
                       כרכים נוספים בסט &quot;{book.set_name}&quot;
                     </span>
-                    <span className="text-xs text-[var(--otzar-text-muted)] tabular-nums">
-                      {loadingSet ? "טוען..." : `${setBooks.length} עותקים בסך הכל`}
-                    </span>
+                    <div className="flex flex-wrap items-center gap-2">
+                      {isAdmin && !loadingSet && unassignedCount > 0 && quickCabId && (
+                        <button
+                          type="button"
+                          disabled={assigningSetLoc}
+                          onClick={() => handleAssignUnassignedSetLocation(quickCabId!, quickShelf)}
+                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-bold bg-emerald-600 text-white hover:bg-emerald-700 cursor-pointer disabled:opacity-50"
+                        >
+                          <MapPin className="w-3 h-3" />
+                          {assigningSetLoc
+                            ? "משייך..."
+                            : `שייך מיקום (ארון ${quickCabCode} מדף ${quickShelf}) ל-${unassignedCount} לא משויכים`}
+                        </button>
+                      )}
+                      {isAdmin && !loadingSet && setBooks.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setPatternBuilderField("sub_series");
+                            setShowPatternBuilder(true);
+                          }}
+                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-bold border border-[var(--otzar-accent)]/40 bg-[var(--otzar-bg)] text-[var(--otzar-accent)] hover:bg-[var(--otzar-surface)] cursor-pointer"
+                        >
+                          <Wand2 className="w-3 h-3" />
+                          אחד שמות/מסכתות בסט
+                        </button>
+                      )}
+                      <span className="text-xs text-[var(--otzar-text-muted)] tabular-nums">
+                        {loadingSet ? "טוען..." : `${setBooks.length} עותקים בסך הכל`}
+                      </span>
+                    </div>
                   </div>
                   {!loadingSet && setBooks.length > 0 && (
                     <div className="rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] overflow-hidden divide-y divide-[var(--otzar-border-muted)]">
@@ -1355,13 +1470,25 @@ export const LocationModal: React.FC<LocationModalProps> = ({
                                             )}
                                           </div>
                                           {!isThis && onSelectBarcode && (
-                                            <button
-                                              type="button"
-                                              onClick={() => onSelectBarcode(copy.barcode)}
-                                              className="px-2 py-0.5 rounded border border-[var(--otzar-border)] bg-[var(--otzar-bg)] text-[var(--otzar-accent)] hover:bg-[var(--otzar-surface)] cursor-pointer"
-                                            >
-                                              הצג עותק
-                                            </button>
+                                            <div className="flex items-center gap-1.5">
+                                              <button
+                                                type="button"
+                                                onClick={() => onSelectBarcode(copy.barcode)}
+                                                className="px-2 py-0.5 rounded border border-[var(--otzar-border)] bg-[var(--otzar-bg)] text-[var(--otzar-accent)] hover:bg-[var(--otzar-surface)] cursor-pointer"
+                                              >
+                                                הצג עותק
+                                              </button>
+                                              {isAdmin && (
+                                                <button
+                                                  type="button"
+                                                  onClick={() => onSelectBarcode(copy.barcode, true)}
+                                                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-[var(--otzar-border)] bg-[var(--otzar-bg)] text-[var(--otzar-text)] hover:text-[var(--otzar-accent)] hover:bg-[var(--otzar-surface)] cursor-pointer"
+                                                >
+                                                  <Pencil className="w-3 h-3" />
+                                                  ערוך
+                                                </button>
+                                              )}
+                                            </div>
                                           )}
                                         </div>
                                       );
@@ -1376,7 +1503,8 @@ export const LocationModal: React.FC<LocationModalProps> = ({
                     </div>
                   )}
                 </div>
-              )}
+                );
+              })()}
 
               {book.tagsList?.length > 0 && (
                 <div className="text-xs text-[var(--otzar-text-muted)] border-t border-[var(--otzar-border-muted)] pt-3">
@@ -1392,14 +1520,17 @@ export const LocationModal: React.FC<LocationModalProps> = ({
         <SetPatternBuilderModal
           setName={setName.trim()}
           sampleTitle={title}
+          initialField={patternBuilderField}
           currentKind="book"
           currentId={book.barcode}
           currentVolume={volume}
           currentSubSeries={subSeries}
-          onApplied={async (newTitle, newSub) => {
-            if (newTitle) setTitle(newTitle);
-            if (newSub !== undefined) setSubSeries(newSub);
-            setSavedNotice("תבנית השם הוחלה בהצלחה על כרכי הסט");
+          onApplied={async (updated) => {
+            if (updated?.title) setTitle(updated.title);
+            if (typeof updated?.sub_series === "string") setSubSeries(updated.sub_series);
+            if (typeof updated?.volume === "string") setVolume(updated.volume);
+            setSavedNotice("התבנית הוחלה בהצלחה על כרכי הסט");
+            await reloadSetBooks();
             if (onBookUpdated) await onBookUpdated();
           }}
           onClose={() => setShowPatternBuilder(false)}

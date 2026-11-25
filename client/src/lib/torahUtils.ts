@@ -4,6 +4,7 @@ import {
   numberToHebrewGematriya,
   torahNaturalVolumeRank,
   torahNaturalVolumeSort,
+  torahSubSeriesRank,
   compareSetBooks,
   parseVolumeNotationRules,
 } from "../../../shared/torah/volumeAndCoverage.ts";
@@ -13,6 +14,7 @@ export {
   numberToHebrewGematriya,
   torahNaturalVolumeRank,
   torahNaturalVolumeSort,
+  torahSubSeriesRank,
   compareSetBooks,
   parseVolumeNotationRules,
 };
@@ -147,12 +149,25 @@ export function groupSetBySubSeries(
     const totalBooks = vols.reduce((acc, g) => acc + g.totalCopies, 0);
     sections.push({ subSeriesLabel, volumes: vols, totalBooks });
   }
+  const refineSederRank = (label: string, firstVol?: string) => {
+    const r = label ? torahSubSeriesRank(label) : 999999;
+    if (r >= 10000 && r <= 20000 && r % 2000 === 0 && firstVol) {
+      const vr = torahSubSeriesRank(firstVol);
+      if (vr < 999999) return vr;
+    }
+    return r;
+  };
   sections.sort((a, b) => {
+    const ra = refineSederRank(a.subSeriesLabel, a.volumes[0]?.volumeLabel);
+    const rb = refineSederRank(b.subSeriesLabel, b.volumes[0]?.volumeLabel);
+    if (ra !== rb) return ra - rb;
     const ga = a.volumes[0]?.minGlobalNumber ?? null;
     const gb = b.volumes[0]?.minGlobalNumber ?? null;
     if (ga != null && gb != null && ga !== gb) return ga - gb;
     if (!a.subSeriesLabel && b.subSeriesLabel) return 1;
     if (a.subSeriesLabel && !b.subSeriesLabel) return -1;
+    const subVolCmp = torahNaturalVolumeRank(a.subSeriesLabel, customRules) - torahNaturalVolumeRank(b.subSeriesLabel, customRules);
+    if (subVolCmp !== 0) return subVolCmp;
     return a.subSeriesLabel.localeCompare(b.subSeriesLabel, "he");
   });
   return sections;
