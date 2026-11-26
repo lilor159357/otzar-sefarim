@@ -109,9 +109,14 @@ export interface MissingVolumeSlotDto {
   setName: string;
   subSeries: string;
   slotType: "volume" | "global";
+  kind?: "missing" | "anomaly";
   index: number;
+  gapSize?: number;
   suggestedVolume: string;
   suggestedGlobalNumber: number | null;
+  sourceBookBarcode?: string;
+  sourceBookTitle?: string;
+  anomalyMessage?: string;
   ignored: boolean;
 }
 

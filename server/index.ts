@@ -9,6 +9,7 @@ import { searchBooksOffline, type SearchableBook } from "./search/torahSearch.ts
 import { compareSetBooks, getAuthoritySuggestions, readCustomVolumeNotationRules } from "./search/torahAuthority.ts";
 import {
   computeMissingSetSlots,
+  extractVolumeNumberIndex,
   inferDominantCoverageUnit,
   makeMissingVolumeIgnoreKey,
   normalizeCoverageRange,
@@ -170,6 +171,98 @@ export async function startOtzarServer(options: OtzarServerOptions = {}): Promis
     }
   } catch (err) {
     console.error("Failed running coverage_normalized_v1025 startup migration:", err);
+  }
+
+  // Automatic one-time migration: move volume index (חלק א'..ה') to set_global_number for consecutive single-book sub-series sets (e.g. Mikraot Gedolot)
+  try {
+    const singleSubMigrated = db.get<{ value: string }>("SELECT value FROM settings WHERE key = 'single_subseries_global_v1026'")?.value;
+    if (!singleSubMigrated) {
+      const allSetRows = db.all<{
+        barcode: string;
+        set_name: string;
+        sub_series: string;
+        author: string;
+        volume: string;
+        coverage_range: string;
+        set_global_number: number | null;
+        publisher: string;
+        pub_year: string;
+        edition: string;
+        category: string;
+        tags: string;
+        notes: string;
+        sync_id: string;
+      }>(
+        "SELECT barcode, set_name, sub_series, author, volume, coverage_range, set_global_number, publisher, pub_year, edition, category, tags, notes, sync_id FROM books WHERE set_name IS NOT NULL AND set_name <> '' AND deleted_at IS NULL"
+      );
+      const bySet = new Map<string, typeof allSetRows>();
+      for (const row of allSetRows) {
+        const key = String(row.set_name || "").trim().toLowerCase();
+        if (!key) continue;
+        const arr = bySet.get(key) || [];
+        arr.push(row);
+        bySet.set(key, arr);
+      }
+      const nowIso = new Date().toISOString();
+      db.transaction(() => {
+        for (const [, setList] of bySet.entries()) {
+          const bySub = new Map<string, typeof allSetRows>();
+          for (const b of setList) {
+            const sub = String(b.sub_series || "").trim();
+            if (!sub) continue;
+            const arr = bySub.get(sub) || [];
+            arr.push(b);
+            bySub.set(sub, arr);
+          }
+          if (bySub.size < 2 || bySub.size !== setList.length) continue;
+          const entries = Array.from(bySub.values()).map((l) => l[0]);
+          const allSingleNoCov = entries.every(
+            (b) => !String(b.coverage_range || "").trim() && (extractVolumeNumberIndex(b.volume, null) ?? 0) > 0
+          );
+          if (!allSingleNoCov) continue;
+          const indices = entries.map((b) => extractVolumeNumberIndex(b.volume, null)!);
+          if (new Set(indices).size !== entries.length) continue;
+          const maxIdx = Math.max(...indices);
+          if (maxIdx > entries.length + 3) continue;
+
+          for (const b of entries) {
+            const idx = extractVolumeNumberIndex(b.volume, null)!;
+            const nextGlobal =
+              b.set_global_number != null && Number(b.set_global_number) > 0
+                ? Number(b.set_global_number)
+                : idx;
+            const tagsArr = parseTags(b.tags);
+            const norm = buildNormalizedBookSearch([
+              String(b.barcode),
+              String(b.set_name || ""),
+              String(b.sub_series || ""),
+              String(b.author || ""),
+              "",
+              String(b.coverage_range || ""),
+              String(b.publisher || ""),
+              String(b.pub_year || ""),
+              String(b.edition || ""),
+              String(b.category || ""),
+              tagsArr.join(" "),
+              String(b.notes || ""),
+            ]);
+            db.run(
+              "UPDATE books SET volume = '', set_global_number = ?, normalized_search = ?, updated_at = ? WHERE barcode = ?",
+              nextGlobal,
+              norm,
+              nowIso,
+              b.barcode
+            );
+            if (b.sync_id) {
+              enqueueSyncOutbox(db, "book", String(b.sync_id), "upsert", { barcode: String(b.barcode) });
+            }
+          }
+        }
+        db.run("INSERT INTO settings (key, value) VALUES ('single_subseries_global_v1026', 'done') ON CONFLICT(key) DO UPDATE SET value = 'done'");
+      });
+    }
+  } catch (err) {
+    console.error("Failed running single_subseries_global_v1026 startup migration:", err);
   }
   if (!dbExistedBeforeOpen) {
     db.run(
@@ -1042,9 +1135,12 @@ function readIgnoredMissingSet(db: DbClient): Set<string> {
     const ignoredKeys = readIgnoredMissingSet(db);
     const missingSlots = computeMissingSetSlots(
       cleanRows.map((r: any) => ({
+        barcode: String(r.barcode || ""),
+        title: String(r.title || ""),
         set_name: String(r.set_name || ""),
         sub_series: String(r.sub_series || ""),
         volume: String(r.volume || ""),
+        coverage_range: String(r.coverage_range || ""),
         set_global_number: r.set_global_number != null ? Number(r.set_global_number) : null,
       })),
       setName,
@@ -1142,8 +1238,16 @@ function readIgnoredMissingSet(db: DbClient): Set<string> {
     }> = [];
 
     for (const sName of setNames) {
-      const setBooks = db.all<{ set_name: string; sub_series: string; volume: string; set_global_number: number | null }>(
-        "SELECT set_name, sub_series, volume, set_global_number FROM books WHERE LOWER(set_name) = LOWER(?) AND deleted_at IS NULL",
+      const setBooks = db.all<{
+        barcode: string;
+        title: string;
+        set_name: string;
+        sub_series: string;
+        volume: string;
+        coverage_range: string;
+        set_global_number: number | null;
+      }>(
+        "SELECT barcode, title, set_name, sub_series, volume, coverage_range, set_global_number FROM books WHERE LOWER(set_name) = LOWER(?) AND deleted_at IS NULL",
         sName
       );
       const slots = computeMissingSetSlots(setBooks, sName, ignoredKeys);

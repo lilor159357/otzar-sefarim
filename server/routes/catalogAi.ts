@@ -230,15 +230,18 @@ function lookupExistingSetContext(
   const ignoredKeys = readIgnoredMissingSet(db);
   const missingSlots = computeMissingSetSlots(
     sampleRows.map((r) => ({
+      barcode: String((r as any).barcode || ""),
+      title: String(r.title || ""),
       set_name: canonicalSetName,
       sub_series: String(r.sub_series || ""),
       volume: String(r.volume || ""),
+      coverage_range: String(r.coverage_range || ""),
       set_global_number: r.set_global_number != null ? Number(r.set_global_number) : null,
     })),
     canonicalSetName,
     ignoredKeys
   )
-    .filter((s) => !s.ignored)
+    .filter((s) => !s.ignored && s.kind !== "anomaly")
     .map((s) => ({
       subSeries: s.subSeries,
       suggestedVolume: s.suggestedVolume,
@@ -1279,14 +1282,18 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
     if (customPrompt) nextSeedMeta._retry_custom_prompt = customPrompt;
     if (useStrongModel) nextSeedMeta._retry_use_strong_model = true;
 
-    db.run(
-      "UPDATE ai_catalog_queue SET processing_status = 'pending', processing_started_at = NULL, error_message = NULL, spine_extracted_json = NULL, extracted_json = ? WHERE id = ? AND deleted_at IS NULL",
-      Object.keys(nextSeedMeta).length > 0 ? JSON.stringify(nextSeedMeta) : null,
-      id
-    );
-    setTimeout(() => { void processPendingQueue(); }, 100);
-    void processPendingQueue();
-    res.json({ ok: true, id });
+    try {
+      db.run(
+        "UPDATE ai_catalog_queue SET processing_status = 'pending', processing_started_at = NULL, error_message = NULL, spine_extracted_json = '[]', extracted_json = ? WHERE id = ? AND deleted_at IS NULL",
+        Object.keys(nextSeedMeta).length > 0 ? JSON.stringify(nextSeedMeta) : null,
+        id
+      );
+      setTimeout(() => { void processPendingQueue(); }, 100);
+      void processPendingQueue();
+      res.json({ ok: true, id });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "שגיאה בהפעלת פענוח מחדש" });
+    }
   });
 
   // Manual instant refresh + API key rotation for stuck/slow AI decoding item

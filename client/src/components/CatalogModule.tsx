@@ -35,6 +35,8 @@ import { suggestNextVolume, compareSetBooks, deriveTitleFromSetTemplate } from "
 import { useStrings } from "../lib/stringsContext.tsx";
 
 interface CatalogModuleProps {
+  isActive?: boolean;
+  refreshTick?: number;
   cabinets: CabinetRow[];
   nextBarcode: string;
   barcodePrefix: string;
@@ -42,6 +44,7 @@ interface CatalogModuleProps {
   hasApiKey: boolean;
   volumeNotationRules?: VolumeNotationRule[];
   recycleBinCount?: number;
+  onOpenBookByBarcode?: (barcode: string, editMode?: boolean) => void;
   onReload: () => Promise<void>;
 }
 
@@ -130,6 +133,8 @@ async function compressImageToJpeg(
 }
 
 export const CatalogModule: React.FC<CatalogModuleProps> = ({
+  isActive = true,
+  refreshTick = 0,
   cabinets,
   nextBarcode,
   barcodePrefix,
@@ -137,6 +142,7 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
   hasApiKey,
   volumeNotationRules,
   recycleBinCount = 0,
+  onOpenBookByBarcode,
   onReload,
 }) => {
   const { t } = useStrings();
@@ -516,6 +522,18 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
     } catch {}
   };
 
+  const handleIgnoreMultipleMissingSlots = async (keys: string[]) => {
+    if (!Array.isArray(keys) || keys.length === 0) return;
+    try {
+      await fetch("/api/books/ignore-missing-volume", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ keys, ignore: true }),
+      });
+      await loadMissingSetsSummary();
+    } catch {}
+  };
+
   const loadQueue = async () => {
     const res = await fetch("/api/ai-queue?approval=pending");
     if (res.ok) {
@@ -529,6 +547,12 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
   useEffect(() => {
     loadQueue();
   }, []);
+
+  useEffect(() => {
+    if (isActive) {
+      void loadMissingSetsSummary();
+    }
+  }, [isActive, refreshTick]);
 
   // Poll while worker or pending items active
   useEffect(() => {
@@ -1236,34 +1260,170 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
           </div>
           {missingSetsExpanded && (
             <div className="p-3 pt-0 border-t border-amber-200 dark:border-amber-900 divide-y divide-amber-200 dark:divide-amber-900">
-              {missingSetsSummary.map((ms) => (
-                <div key={ms.setName} className="py-2.5 flex flex-wrap items-center justify-between gap-2">
-                  <div>
-                    <strong className="text-amber-950 dark:text-amber-100">{ms.setName}</strong>
-                    <span className="text-[var(--otzar-text-muted)] mr-2 tabular-nums">({ms.count} כרכים קיימים)</span>
-                  </div>
-                  <div className="flex flex-wrap items-center gap-2">
-                    {ms.slots.map((slot: any) => (
-                      <span
-                        key={slot.key}
-                        className="inline-flex items-center gap-1.5 px-2 py-1 rounded bg-white dark:bg-black/30 border border-amber-300 dark:border-amber-700 text-amber-900 dark:text-amber-200"
+              {missingSetsSummary.map((ms) => {
+                const allSetKeys = (ms.slots || []).map((sl: any) => sl.key).filter(Boolean);
+                const anomalySlots = (ms.slots || []).filter((sl: any) => sl.kind === "anomaly");
+                const normalSlots = (ms.slots || []).filter((sl: any) => sl.kind !== "anomaly");
+                const bySubMap = new Map<string, any[]>();
+                for (const sl of normalSlots) {
+                  const subKey = String(sl.subSeries || "");
+                  const arr = bySubMap.get(subKey) || [];
+                  arr.push(sl);
+                  bySubMap.set(subKey, arr);
+                }
+                const provenanceBooks = Array.from(
+                  new Map(
+                    (ms.slots || [])
+                      .filter((sl: any) => sl.sourceBookBarcode)
+                      .map((sl: any) => [sl.sourceBookBarcode, { barcode: sl.sourceBookBarcode, title: sl.sourceBookTitle }])
+                  ).values()
+                );
+
+                return (
+                  <div key={ms.setName} className="py-3 space-y-2.5">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <strong className="text-amber-950 dark:text-amber-100">{ms.setName}</strong>
+                        <span className="text-[var(--otzar-text-muted)] tabular-nums">({ms.count} כרכים קיימים)</span>
+                        {provenanceBooks.length > 0 && (
+                          <span className="text-[11px] text-[var(--otzar-text-muted)] inline-flex flex-wrap items-center gap-1.5">
+                            <span>· נגזר מהספר:</span>
+                            {provenanceBooks.slice(0, 3).map((pb: any, idx: number) => (
+                              <button
+                                key={pb.barcode}
+                                type="button"
+                                onClick={() => onOpenBookByBarcode?.(pb.barcode, true)}
+                                className="text-[var(--otzar-accent)] hover:underline cursor-pointer font-semibold tabular-nums"
+                                title="פתח ספר זה לעריכה"
+                              >
+                                {idx > 0 ? ", " : ""}{pb.title || "ספר"} (#{pb.barcode})
+                              </button>
+                            ))}
+                          </span>
+                        )}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handleIgnoreMultipleMissingSlots(allSetKeys)}
+                        className="px-2.5 py-1 rounded border border-amber-400 dark:border-amber-700 bg-white dark:bg-black/30 text-[11px] font-bold text-amber-900 dark:text-amber-200 hover:bg-amber-100/70 cursor-pointer"
                       >
-                        <span>
-                          חסר: {slot.subSeries ? `${slot.subSeries} · ` : ""}{slot.suggestedVolume || `כרך ${slot.index}`}
-                        </span>
-                        <button
-                          type="button"
-                          onClick={() => handleIgnoreMissingSlotInSummary(slot.key)}
-                          className="text-[10px] text-[var(--otzar-accent)] hover:underline cursor-pointer font-bold mr-1"
-                          title="התעלם מחוסר זה בסט"
-                        >
-                          התעלם
-                        </button>
-                      </span>
-                    ))}
+                        התעלם מחוסרים בסדרה זו ({allSetKeys.length})
+                      </button>
+                    </div>
+
+                    {anomalySlots.length > 0 && (
+                      <div className="space-y-1.5">
+                        {anomalySlots.map((slot: any) => (
+                          <div
+                            key={slot.key}
+                            className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 rounded-lg border border-orange-300 dark:border-orange-800 bg-orange-50 dark:bg-orange-950/40 text-orange-950 dark:text-orange-200"
+                          >
+                            <div className="flex items-center gap-2">
+                              <AlertTriangle className="w-4 h-4 text-orange-600 shrink-0" />
+                              <span className="font-semibold">
+                                {slot.anomalyMessage || `טעות מספור אפשרית בספר #${slot.sourceBookBarcode || ""}`}
+                              </span>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              {slot.sourceBookBarcode && (
+                                <button
+                                  type="button"
+                                  onClick={() => onOpenBookByBarcode?.(slot.sourceBookBarcode, true)}
+                                  className="px-2.5 py-1 rounded bg-orange-600 text-white font-bold hover:bg-orange-700 cursor-pointer text-[11px]"
+                                >
+                                  פתח ספר #{slot.sourceBookBarcode} לתיקון
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => handleIgnoreMissingSlotInSummary(slot.key)}
+                                className="px-2 py-1 rounded border border-orange-300 dark:border-orange-700 bg-white dark:bg-black/30 text-[11px] font-semibold cursor-pointer"
+                              >
+                                התעלם
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {normalSlots.length > 0 && (
+                      <div className="space-y-2">
+                        {Array.from(bySubMap.entries()).map(([subKey, subSlots]) => {
+                          const subKeys = subSlots.map((s: any) => s.key).filter(Boolean);
+                          const subProv = Array.from(
+                            new Map(
+                              subSlots
+                                .filter((s: any) => s.sourceBookBarcode)
+                                .map((s: any) => [s.sourceBookBarcode, { barcode: s.sourceBookBarcode, title: s.sourceBookTitle }])
+                            ).values()
+                          );
+                          return (
+                            <div key={subKey || "__root"} className="space-y-1.5">
+                              {(subKey || bySubMap.size > 1) && (
+                                <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                                  <div className="flex flex-wrap items-center gap-1.5 text-amber-950 dark:text-amber-100">
+                                    <span className="font-bold">{subKey || "רצף הסט הכללי"}</span>
+                                    {subProv[0] && (
+                                      <button
+                                        type="button"
+                                        onClick={() => onOpenBookByBarcode?.(subProv[0].barcode, true)}
+                                        className="text-[var(--otzar-accent)] hover:underline cursor-pointer tabular-nums"
+                                      >
+                                        · מתוך #{subProv[0].barcode} ({subProv[0].title || "ערוך ספר"})
+                                      </button>
+                                    )}
+                                  </div>
+                                  {bySubMap.size > 1 && (
+                                    <button
+                                      type="button"
+                                      onClick={() => handleIgnoreMultipleMissingSlots(subKeys)}
+                                      className="text-[11px] font-semibold text-[var(--otzar-accent)] hover:underline cursor-pointer"
+                                    >
+                                      התעלם מתת-סדרה ({subKeys.length})
+                                    </button>
+                                  )}
+                                </div>
+                              )}
+                              <div className="flex flex-wrap items-center gap-2">
+                                {subSlots.map((slot: any) => (
+                                  <span
+                                    key={slot.key}
+                                    className="inline-flex items-center gap-1.5 px-2 py-1 rounded bg-white dark:bg-black/30 border border-amber-300 dark:border-amber-700 text-amber-900 dark:text-amber-200"
+                                    title={slot.sourceBookBarcode ? `נגזר מספר #${slot.sourceBookBarcode} (${slot.sourceBookTitle || ""})` : undefined}
+                                  >
+                                    <span>
+                                      חסר: {slot.subSeries ? `${slot.subSeries} · ` : ""}{slot.suggestedVolume || `כרך ${slot.index}`}
+                                    </span>
+                                    {slot.sourceBookBarcode && (
+                                      <button
+                                        type="button"
+                                        onClick={() => onOpenBookByBarcode?.(slot.sourceBookBarcode, true)}
+                                        className="text-[10px] text-[var(--otzar-text-muted)] hover:text-[var(--otzar-accent)] hover:underline cursor-pointer tabular-nums"
+                                        title={`פתח ספר מקור: ${slot.sourceBookTitle || ""} (#${slot.sourceBookBarcode})`}
+                                      >
+                                        (#{slot.sourceBookBarcode})
+                                      </button>
+                                    )}
+                                    <button
+                                      type="button"
+                                      onClick={() => handleIgnoreMissingSlotInSummary(slot.key)}
+                                      className="text-[10px] text-[var(--otzar-accent)] hover:underline cursor-pointer font-bold mr-1"
+                                      title="התעלם מחוסר זה בסט"
+                                    >
+                                      התעלם
+                                    </button>
+                                  </span>
+                                ))}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>

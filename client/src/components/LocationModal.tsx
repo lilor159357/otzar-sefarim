@@ -1820,16 +1820,27 @@ export const LocationModal: React.FC<LocationModalProps> = ({
                                 <div className="flex flex-wrap items-center gap-2">
                                   <AlertCircle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
                                   <span className="font-semibold text-amber-900 dark:text-amber-200">
-                                    חסר בסדרה: {slot.suggestedVolume || `כרך #${slot.index}`}
+                                    {slot.kind === "anomaly"
+                                      ? (slot.anomalyMessage || `טעות מספור אפשרית בספר #${slot.sourceBookBarcode || ""}`)
+                                      : `חסר בסדרה: ${slot.suggestedVolume || `כרך #${slot.index}`}`}
                                   </span>
-                                  {slot.suggestedGlobalNumber != null && (
+                                  {slot.suggestedGlobalNumber != null && slot.kind !== "anomaly" && (
                                     <span className="text-[11px] text-[var(--otzar-text-muted)] tabular-nums">
                                       (#{slot.suggestedGlobalNumber})
                                     </span>
                                   )}
+                                  {slot.sourceBookBarcode && (
+                                    <button
+                                      type="button"
+                                      onClick={() => onSelectBarcode?.(slot.sourceBookBarcode!, true)}
+                                      className="text-[11px] text-[var(--otzar-accent)] hover:underline cursor-pointer tabular-nums"
+                                    >
+                                      · נגזר מספר #{slot.sourceBookBarcode}
+                                    </button>
+                                  )}
                                   <span aria-hidden="true">·</span>
                                   <span className="text-[11px] text-[var(--otzar-text-muted)]">
-                                    {slot.ignored ? "הושתק (לא יסומן כחסר)" : "וירטואלי · יושלם אוטומטית בסריקה הבאה"}
+                                    {slot.ignored ? "הושתק (לא יסומן כחסר)" : slot.kind === "anomaly" ? "חריגת מספור" : "וירטואלי · יושלם אוטומטית בסריקה הבאה"}
                                   </span>
                                 </div>
                                 {isAdmin && (
@@ -1865,16 +1876,27 @@ export const LocationModal: React.FC<LocationModalProps> = ({
                             <div className="flex flex-wrap items-center gap-2">
                               <AlertCircle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
                               <span className="font-semibold text-amber-900 dark:text-amber-200">
-                                חסר ברצף הסט: {slot.suggestedVolume || `פריט #${slot.index}`}
+                                {slot.kind === "anomaly"
+                                  ? (slot.anomalyMessage || `טעות מספור אפשרית בספר #${slot.sourceBookBarcode || ""}`)
+                                  : `חסר ברצף הסט: ${slot.suggestedVolume || `פריט #${slot.index}`}`}
                               </span>
-                              {slot.suggestedGlobalNumber != null && (
+                              {slot.suggestedGlobalNumber != null && slot.kind !== "anomaly" && (
                                 <span className="text-[11px] text-[var(--otzar-text-muted)] tabular-nums">
                                   (#{slot.suggestedGlobalNumber})
                                 </span>
                               )}
+                              {slot.sourceBookBarcode && (
+                                <button
+                                  type="button"
+                                  onClick={() => onSelectBarcode?.(slot.sourceBookBarcode!, true)}
+                                  className="text-[11px] text-[var(--otzar-accent)] hover:underline cursor-pointer tabular-nums"
+                                >
+                                  · נגזר מספר #{slot.sourceBookBarcode}
+                                </button>
+                              )}
                               <span aria-hidden="true">·</span>
                               <span className="text-[11px] text-[var(--otzar-text-muted)]">
-                                {slot.ignored ? "הושתק (לא יסומן כחסר)" : "וירטואלי · יושלם אוטומטית בסריקה הבאה"}
+                                {slot.ignored ? "הושתק (לא יסומן כחסר)" : slot.kind === "anomaly" ? "חריגת מספור" : "וירטואלי · יושלם אוטומטית בסריקה הבאה"}
                               </span>
                             </div>
                             {isAdmin && (

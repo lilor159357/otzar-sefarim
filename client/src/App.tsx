@@ -41,6 +41,7 @@ import { WhatsNewModal, type RecentUpdateInfo } from "./components/WhatsNewModal
 import { LabelsModule } from "./components/LabelsModule.tsx";
 import { AdminPinModal } from "./components/AdminPinModal.tsx";
 import { BugReportModal } from "./components/BugReportModal.tsx";
+import { LocationModal } from "./components/LocationModal.tsx";
 import { Bug } from "lucide-react";
 import { installFetchAdminInterceptor, setAdminToken } from "./lib/adminSession.ts";
 
@@ -56,6 +57,10 @@ const NAV_ITEMS: Array<{ key: ModuleKey; labelKey: "nav.searchTab" | "nav.circul
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<ModuleKey>("search");
+  const [visitedTabs, setVisitedTabs] = useState<Set<ModuleKey>>(() => new Set(["search"]));
+  const [sessionResetKey, setSessionResetKey] = useState(0);
+  const [catalogRefreshTick, setCatalogRefreshTick] = useState(0);
+  const [quickEditBook, setQuickEditBook] = useState<{ book: BookRow; editMode: boolean } | null>(null);
   const [adminSubTab, setAdminSubTab] = useState<"settings" | "map">("settings");
   const [settingsTab, setSettingsTab] = useState<"general" | "ai" | "cloud" | "updates" | "strings" | "transfer" | "maintenance">("general");
   const { overrides: activeStringOverrides, t } = useStrings();
@@ -152,6 +157,7 @@ export default function App() {
       setSettings(sData);
       setBooks(bData);
       setCabinets(cData);
+      setCatalogRefreshTick((t) => t + 1);
       applyTheme(sData.theme_preset || "otzar-orange", sData.theme_mode || "light");
     } catch (err: any) {
       setErrorMsg(err?.message || "כשל בחיבור למסד הנתונים המקומי");
@@ -254,6 +260,33 @@ export default function App() {
       ? "search"
       : activeTab;
 
+  useEffect(() => {
+    setVisitedTabs((prev) => {
+      if (prev.has(effectiveTab)) return prev;
+      const next = new Set(prev);
+      next.add(effectiveTab);
+      return next;
+    });
+  }, [effectiveTab]);
+
+  const handleOpenBookByBarcode = async (barcode: string, editMode = true) => {
+    const clean = String(barcode || "").trim();
+    if (!clean) return;
+    const localFound = books.find((b) => b.barcode === clean);
+    if (localFound) {
+      setQuickEditBook({ book: localFound, editMode });
+      return;
+    }
+    try {
+      const res = await fetch(`/api/books?q=${encodeURIComponent(clean)}`);
+      if (res.ok) {
+        const list = (await res.json()) as BookRow[];
+        const exact = Array.isArray(list) ? list.find((b) => b.barcode === clean) : undefined;
+        if (exact) setQuickEditBook({ book: exact, editMode });
+      }
+    } catch {}
+  };
+
   const activeNavItem = visibleNavItems.find((n) => n.key === effectiveTab);
   const activeNavLabel = activeNavItem ? t(activeNavItem.labelKey) : "";
 
@@ -263,8 +296,17 @@ export default function App() {
     } catch {}
     setAdminToken("");
     setIsAdmin(false);
+    setQuickEditBook(null);
+    setSearchQuery("");
+    setStatusFilter("all");
+    setCategoryFilter("all");
+    setSemanticMode(false);
+    setSemanticNotice(null);
+    try { localStorage.removeItem("otzar_desktop_search_sort_v1"); } catch {}
+    setVisitedTabs(new Set(["search"]));
+    setSessionResetKey((k) => k + 1);
     setActiveTab("search");
-    await loadAll(searchQuery, statusFilter, categoryFilter, semanticMode);
+    await loadAll("", "all", "all", false);
   };
 
   const downloadWithAuth = async (url: string, fallbackName: string) => {
@@ -1116,10 +1158,26 @@ export default function App() {
           }}
         />
       )}
+      {quickEditBook && (
+        <LocationModal
+          book={books.find((b) => b.barcode === quickEditBook.book.barcode) || quickEditBook.book}
+          cabinets={cabinets}
+          entrance={settings.map_entrance}
+          roomDimensions={roomDimensions}
+          volumeNotationRules={volumeNotationRules}
+          isAdmin={isAdmin}
+          initialEditMode={quickEditBook.editMode}
+          onSelectBarcode={(bc, edit) => void handleOpenBookByBarcode(bc, Boolean(edit))}
+          onBookUpdated={async () => {
+            await loadAll(searchQuery, statusFilter, categoryFilter, semanticMode);
+          }}
+          onClose={() => setQuickEditBook(null)}
+        />
+      )}
       <BugReportModal
         isOpen={showBugReportModal}
         onClose={() => setShowBugReportModal(false)}
-        appVersion="v1.0.17"
+        appVersion="v1.0.26"
         totalBooks={books.length}
         totalCabinets={cabinets.length}
       />
