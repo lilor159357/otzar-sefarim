@@ -1714,6 +1714,12 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
     if (typeof rawFields.edition === "string") allowed.edition = rawFields.edition.trim();
     if (typeof rawFields.category === "string") allowed.category = rawFields.category.trim();
     if (typeof rawFields.format_size === "string") allowed.format_size = rawFields.format_size.trim();
+    if (typeof rawFields.status === "string") {
+      const st = rawFields.status.trim();
+      if (["available", "borrowed", "reference_only", "lost"].includes(st)) {
+        allowed.status = st;
+      }
+    }
     if ("cabinet_id" in rawFields) allowed.cabinet_id = rawFields.cabinet_id ? Number(rawFields.cabinet_id) : null;
     if ("shelf_number" in rawFields) allowed.shelf_number = rawFields.shelf_number ? Math.max(1, Number(rawFields.shelf_number)) : 1;
     const incomingTags = "tags" in rawFields ? parseTags(rawFields.tags) : null;
@@ -1741,6 +1747,10 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
         const nextFormat = "format_size" in allowed ? allowed.format_size : String(b.format_size || "");
         const nextCabinetId = "cabinet_id" in allowed ? allowed.cabinet_id : b.cabinet_id;
         const nextShelf = "shelf_number" in allowed ? allowed.shelf_number : b.shelf_number;
+        const nextStatus =
+          "status" in allowed && String(b.status || "") !== "borrowed"
+            ? allowed.status
+            : String(b.status || "available");
         // MANDATORY MERGE for tags (preserve unique per-volume tags)
         const existingTags = parseTags(b.tags);
         const nextTags = incomingTags !== null
@@ -1762,13 +1772,14 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
           String(b.notes || ""),
         ]);
         db.run(
-          `UPDATE books SET author = ?, publisher = ?, pub_year = ?, edition = ?, category = ?, format_size = ?, cabinet_id = ?, shelf_number = ?, tags = ?, normalized_search = ?, updated_at = ? WHERE barcode = ?`,
+          `UPDATE books SET author = ?, publisher = ?, pub_year = ?, edition = ?, category = ?, format_size = ?, status = ?, cabinet_id = ?, shelf_number = ?, tags = ?, normalized_search = ?, updated_at = ? WHERE barcode = ?`,
           nextAuthor,
           nextPublisher,
           nextPubYear,
           nextEdition,
           nextCategory,
           nextFormat,
+          nextStatus,
           nextCabinetId,
           nextShelf,
           JSON.stringify(nextTags),
@@ -1797,6 +1808,7 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
           if ("edition" in allowed) ex.edition = allowed.edition;
           if ("category" in allowed) ex.category = allowed.category;
           if ("format_size" in allowed) ex.format_size = allowed.format_size;
+          if ("status" in allowed) ex.status = allowed.status;
           if (incomingTags !== null) {
             const curTags = parseTags(ex.tags);
             ex.tags = Array.from(new Set([...curTags, ...incomingTags])).filter(Boolean);

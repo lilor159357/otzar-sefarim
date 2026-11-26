@@ -113,8 +113,18 @@ export const LocationModal: React.FC<LocationModalProps> = ({
   const [reanalyzeError, setReanalyzeError] = useState<string | null>(null);
   const extraFileInputRef = useRef<HTMLInputElement>(null);
 
-  // Per-field set sync checkboxes & pattern builder
-  const [syncFields, setSyncFields] = useState<Record<string, boolean>>({});
+  // Per-field set sync checkboxes & pattern builder (persisted across edits)
+  const SYNC_STORAGE_KEY = "otzar_edit_set_sync_fields_v1";
+  const [syncFields, setSyncFields] = useState<Record<string, boolean>>(() => {
+    try {
+      const raw = localStorage.getItem("otzar_edit_set_sync_fields_v1");
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === "object") return parsed;
+      }
+    } catch {}
+    return {};
+  });
   const [setSyncCount, setSetSyncCount] = useState<{ booksCount: number; queueCount: number } | null>(null);
   const [showPatternBuilder, setShowPatternBuilder] = useState(false);
   const [patternBuilderField, setPatternBuilderField] = useState<PatternTargetField>("title");
@@ -168,7 +178,6 @@ export const LocationModal: React.FC<LocationModalProps> = ({
     setReanalyzeError(null);
     setExtraFiles([]);
     setAiPrompt("");
-    setSyncFields({});
     setShowPatternBuilder(false);
     loadSavedImages(book.barcode);
   }, [book.barcode, initialEditMode]);
@@ -251,7 +260,16 @@ export const LocationModal: React.FC<LocationModalProps> = ({
         <input
           type="checkbox"
           checked={Boolean(syncFields[fieldKey])}
-          onChange={(e) => setSyncFields((p) => ({ ...p, [fieldKey]: e.target.checked }))}
+          onChange={(e) => {
+            const checked = e.target.checked;
+            setSyncFields((p) => {
+              const next = { ...p, [fieldKey]: checked };
+              try {
+                localStorage.setItem(SYNC_STORAGE_KEY, JSON.stringify(next));
+              } catch {}
+              return next;
+            });
+          }}
           className="rounded accent-[var(--otzar-accent)]"
         />
         <span>לכל הסט</span>
@@ -364,6 +382,7 @@ export const LocationModal: React.FC<LocationModalProps> = ({
         if (syncFields.edition) syncPayloadFields.edition = edition.trim();
         if (syncFields.pub_year) syncPayloadFields.pub_year = pubYear.trim();
         if (syncFields.format_size) syncPayloadFields.format_size = formatSize.trim();
+        if (syncFields.status) syncPayloadFields.status = status;
         if (syncFields.tags) {
           syncPayloadFields.tags = tagsText.split(",").map((t) => t.trim()).filter(Boolean);
         }
@@ -1151,7 +1170,10 @@ export const LocationModal: React.FC<LocationModalProps> = ({
                     />
                   </div>
                   <div>
-                    <label className="block text-xs font-medium mb-1">סטטוס</label>
+                    <div className="flex items-center justify-between gap-2 mb-1">
+                      <label className="block text-xs font-medium">סטטוס</label>
+                      {renderSetSyncCheckbox("status")}
+                    </div>
                     <select
                       value={status}
                       onChange={(e) => setStatus(e.target.value as BookRow["status"])}

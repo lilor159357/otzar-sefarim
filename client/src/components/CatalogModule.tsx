@@ -304,7 +304,17 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
   const [reanalyzeHint, setReanalyzeHint] = useState("");
   const [reanalyzeStrongModel, setReanalyzeStrongModel] = useState(false);
   const [reanalyzingQueue, setReanalyzingQueue] = useState(false);
-  const [revSyncFields, setRevSyncFields] = useState<Record<string, boolean>>({});
+  const REV_SYNC_STORAGE_KEY = "otzar_review_set_sync_fields_v1";
+  const [revSyncFields, setRevSyncFields] = useState<Record<string, boolean>>(() => {
+    try {
+      const raw = localStorage.getItem("otzar_review_set_sync_fields_v1");
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === "object") return parsed;
+      }
+    } catch {}
+    return {};
+  });
   const [revSetSyncCount, setRevSetSyncCount] = useState<{ booksCount: number; queueCount: number } | null>(null);
   const [showRevPatternBuilder, setShowRevPatternBuilder] = useState(false);
   const [revPatternBuilderField, setRevPatternBuilderField] = useState<PatternTargetField>("title");
@@ -538,8 +548,7 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
     setRevPagesCount("");
     setRevNotes(ex?.notes || "");
     setRevCopies(1);
-    setRevStatus("available");
-    setRevSyncFields({});
+    setRevStatus((ex as any)?.status === "reference_only" ? "reference_only" : "available");
     setShowRevPatternBuilder(false);
     setReanalyzeItemId(null);
     setReanalyzeHint("");
@@ -590,7 +599,16 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
         <input
           type="checkbox"
           checked={Boolean(revSyncFields[fieldKey])}
-          onChange={(e) => setRevSyncFields((p) => ({ ...p, [fieldKey]: e.target.checked }))}
+          onChange={(e) => {
+            const checked = e.target.checked;
+            setRevSyncFields((p) => {
+              const next = { ...p, [fieldKey]: checked };
+              try {
+                localStorage.setItem(REV_SYNC_STORAGE_KEY, JSON.stringify(next));
+              } catch {}
+              return next;
+            });
+          }}
           className="rounded accent-[var(--otzar-accent)]"
         />
         <span>לכל הסט</span>
@@ -1060,6 +1078,7 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
         if (revSyncFields.edition) syncPayloadFields.edition = revEdition.trim();
         if (revSyncFields.pub_year) syncPayloadFields.pub_year = revPubYear.trim();
         if (revSyncFields.format_size) syncPayloadFields.format_size = revFormatSize.trim();
+        if (revSyncFields.status) syncPayloadFields.status = revStatus;
         if (revSyncFields.tags) {
           syncPayloadFields.tags = revTags
             .split(",")
@@ -2904,7 +2923,10 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
                       </div>
                     </div>
                     <div>
-                      <label className="block text-xs font-medium mb-1">סטטוס</label>
+                      <div className="flex items-center justify-between gap-2 mb-1">
+                        <label className="block text-xs font-medium">סטטוס</label>
+                        {renderRevSyncCheckbox("status")}
+                      </div>
                       <select
                         value={revStatus}
                         onChange={(e) => setRevStatus(e.target.value as "available" | "reference_only")}
