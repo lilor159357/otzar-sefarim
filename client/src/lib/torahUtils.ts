@@ -16,6 +16,8 @@ import {
   shouldSuppressSingleVolumeLabel,
   formatHebrewNumeralWithPunctuation,
   type MissingVolumeSlot,
+  deriveTitleFromSetTemplate,
+  type TitleTemplateDerivationParams,
   type CoverageUnit,
 } from "../../../shared/torah/volumeAndCoverage.ts";
 
@@ -35,6 +37,8 @@ export {
   computeMissingSetSlots,
   shouldSuppressSingleVolumeLabel,
   formatHebrewNumeralWithPunctuation,
+  deriveTitleFromSetTemplate,
+  type TitleTemplateDerivationParams,
   type MissingVolumeSlot,
   type CoverageUnit,
 };

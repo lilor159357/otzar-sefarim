@@ -39,6 +39,7 @@ import { AutocompleteInput } from "./AutocompleteInput.tsx";
 import {
   groupSetBySubSeries,
   shouldSuppressSingleVolumeLabel,
+  deriveTitleFromSetTemplate,
   type SetSubSeriesSection,
   type SetVolumeGroup,
 } from "../lib/torahUtils.ts";
@@ -104,6 +105,7 @@ export const LocationModal: React.FC<LocationModalProps> = ({
   const [sendingToQueue, setSendingToQueue] = useState(false);
   const [normalizingCoverage, setNormalizingCoverage] = useState(false);
   const [cleaningSingleVols, setCleaningSingleVols] = useState(false);
+  const [includeLocationInSetPull, setIncludeLocationInSetPull] = useState(false);
 
   // 30-day saved images and AI Re-analysis
   const [savedImages, setSavedImages] = useState<BookImageMeta[]>([]);
@@ -165,6 +167,13 @@ export const LocationModal: React.FC<LocationModalProps> = ({
   };
 
   useEffect(() => {
+    try {
+      const raw = localStorage.getItem("otzar_edit_set_sync_fields_v1");
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === "object") setSyncFields(parsed);
+      }
+    } catch {}
     setTitle(book.title);
     setSetName(book.set_name || "");
     setSubSeries(book.sub_series || "");
@@ -245,14 +254,31 @@ export const LocationModal: React.FC<LocationModalProps> = ({
         if (d.pub_year) setPubYear((p) => (overwrite || !p.trim() ? d.pub_year : p));
         if (d.edition) setEdition((p) => (overwrite || !p.trim() ? d.edition : p));
         if (d.category) setCategory((p) => (overwrite || !p.trim() || p === "ספרים" ? d.category : p));
-        if (d.cabinet_id && (overwrite || !cabinetId)) setCabinetId(String(d.cabinet_id));
-        if (d.shelf_number && overwrite) setShelfNumber(Number(d.shelf_number));
+        if (d.format_size) setFormatSize((p) => (overwrite || !p.trim() ? d.format_size : p));
+        if (d.status && status !== "borrowed") {
+          setStatus(d.status === "reference_only" ? "reference_only" : "available");
+        }
+        if (includeLocationInSetPull) {
+          if (d.cabinet_id) setCabinetId(String(d.cabinet_id));
+          if (d.shelf_number) setShelfNumber(Number(d.shelf_number));
+        }
         if (Array.isArray(d.tags) && d.tags.length > 0) {
           setTagsText((prev) => {
             const cur = prev.split(",").map((x) => x.trim()).filter(Boolean);
             return Array.from(new Set([...d.tags, ...cur])).filter(Boolean).join(", ");
           });
         }
+        const derived = deriveTitleFromSetTemplate({
+          setName: q,
+          subSeries,
+          volume,
+          coverageRange,
+          sampleBooks: d.sampleBooks,
+        });
+        if (derived) setTitle(derived);
+        setSavedNotice(
+          `פרטי הסט "${q}" והכותרת עודכנו בהצלחה${includeLocationInSetPull ? " (כולל מיקום)" : " (מיקום לא שונה)"}`
+        );
       }
     } catch {}
   };
@@ -1097,14 +1123,37 @@ export const LocationModal: React.FC<LocationModalProps> = ({
                     className="w-full px-3 py-2 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] font-semibold"
                   />
                 </div>
-                <AutocompleteInput
-                  label="שם הסט / סדרה (אופציונלי)"
-                  field="set_name"
-                  value={setName}
-                  onChange={setSetName}
-                  placeholder="למשל: משנה ברורה / שולחן ערוך"
-                  inputClassName="!bg-[var(--otzar-bg)] !border-[var(--otzar-border-muted)]"
-                />
+                <div className="space-y-1.5">
+                  <AutocompleteInput
+                    label="שם הסט / סדרה (אופציונלי)"
+                    field="set_name"
+                    value={setName}
+                    onChange={setSetName}
+                    placeholder="למשל: משנה ברורה / שולחן ערוך"
+                    inputClassName="!bg-[var(--otzar-bg)] !border-[var(--otzar-border-muted)]"
+                  />
+                  {setName.trim() && (
+                    <div className="flex flex-wrap items-center justify-between gap-2 p-2 rounded-lg bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-300 dark:border-emerald-800 text-xs text-emerald-900 dark:text-emerald-200">
+                      <label className="inline-flex items-center gap-1.5 cursor-pointer select-none font-medium">
+                        <input
+                          type="checkbox"
+                          checked={includeLocationInSetPull}
+                          onChange={(e) => setIncludeLocationInSetPull(e.target.checked)}
+                          className="rounded accent-emerald-600"
+                        />
+                        <span>כלול גם מיקום (ארון ומדף)</span>
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => void handlePullSetDetailsInEdit(setName.trim(), true)}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold cursor-pointer text-xs transition-colors shadow-sm"
+                      >
+                        <Sparkles className="w-3.5 h-3.5" />
+                        <span>משוך פרטי סט מהמאגר</span>
+                      </button>
+                    </div>
+                  )}
+                </div>
                 <AutocompleteInput
                   label="תת-סדרה / מסכת / חלק ראשי בסט (אופציונלי)"
                   labelAction={

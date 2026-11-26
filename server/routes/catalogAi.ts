@@ -598,7 +598,8 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
             const sourceBookRow = sourceBarcode
               ? db.get<Record<string, any>>("SELECT * FROM books WHERE barcode = ? AND deleted_at IS NULL", sourceBarcode)
               : undefined;
-            const extracted: ExtractedBookMetadata = sourceBookRow
+            const isCleanRequeue = Boolean(preMeta._clean_image_requeue);
+            const extracted: ExtractedBookMetadata = (sourceBookRow && !isCleanRequeue)
               ? await reanalyzeApprovedBook(
                   db,
                   {
@@ -1380,6 +1381,132 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
         ? (prefUnit !== "any" ? prefUnit : inferDominantCoverageUnit(volumes.map((v: any) => String(v?.coverage_range ?? coverage_range ?? ""))))
         : prefUnit;
 
+    const srcBarcode = existingRow.source_book_barcode ? String(existingRow.source_book_barcode).trim() : "";
+    const existingBookForRequeue = srcBarcode
+      ? db.get<Record<string, any>>("SELECT * FROM books WHERE barcode = ? AND deleted_at IS NULL", srcBarcode)
+      : undefined;
+
+    // Single existing book re-queue approval: update existing book in place without creating duplicate shelf-set books
+    if (existingBookForRequeue) {
+      let effTitle = title;
+      let effSub = sub_series;
+      let effVol = volume;
+      let effGlobalNum = parsedTopGlobalNum;
+      let effCov = coverage_range;
+      let effPubYear = pub_year;
+      let effFormatSize = format_size;
+      let effNotes = notes;
+
+      if (Array.isArray(volumes) && volumes.length > 0) {
+        const selIdx = typeof req.body?.selectedVolumeIndex === "number" && req.body.selectedVolumeIndex >= 0 && req.body.selectedVolumeIndex < volumes.length
+          ? req.body.selectedVolumeIndex
+          : 0;
+        const matchedVol = volumes[selIdx] || volumes[0];
+        if (matchedVol) {
+          if (matchedVol.volume) effVol = String(matchedVol.volume).trim();
+          if (matchedVol.sub_series) effSub = String(matchedVol.sub_series).trim();
+          if (matchedVol.coverage_range) effCov = String(matchedVol.coverage_range).trim();
+          if (matchedVol.set_global_number != null) effGlobalNum = Math.round(Number(matchedVol.set_global_number));
+          if (matchedVol.pub_year) effPubYear = String(matchedVol.pub_year).trim();
+          if (matchedVol.format_size) effFormatSize = String(matchedVol.format_size).trim();
+          if (matchedVol.notes) effNotes = matchedVol.notes ? (notes ? notes + " | " + matchedVol.notes : matchedVol.notes) : notes;
+          if (!title) {
+            effTitle = cleanTopSetName
+              ? (effSub ? cleanTopSetName + " - " + effSub + " (" + effVol + ")" : cleanTopSetName + " " + effVol)
+              : (effSub || effVol || cleanTopSetName);
+          }
+        }
+      }
+
+      const cleanSubSeries = String(effSub || "").trim();
+      const normalizedCoverage = normalizeCoverageRange(String(effCov || "").trim(), prefUnit);
+      let finalVolume = String(effVol || "").trim();
+      const existingSetSnapshot = cleanTopSetName
+        ? db.all<{ barcode: string; sub_series: string; volume: string; coverage_range: string; title: string }>(
+            "SELECT barcode, sub_series, volume, coverage_range, title FROM books WHERE LOWER(set_name) = LOWER(?) AND deleted_at IS NULL",
+            cleanTopSetName
+          )
+        : [];
+      const filteredSnapshot = existingSetSnapshot.filter((r) => r.barcode !== srcBarcode);
+      if (finalVolume && shouldSuppressSingleVolumeLabel(
+        { set_name: cleanTopSetName, sub_series: cleanSubSeries, volume: finalVolume, coverage_range: normalizedCoverage, title: String(effTitle || "") },
+        [...filteredSnapshot, { sub_series: cleanSubSeries, volume: finalVolume, coverage_range: normalizedCoverage, title: String(effTitle || "") }]
+      )) {
+        finalVolume = "";
+      }
+
+      db.transaction(() => {
+        const code = String(existingBookForRequeue.barcode);
+        const nextStatus =
+          String(existingBookForRequeue.status || "") === "borrowed"
+            ? "borrowed"
+            : String(status || existingBookForRequeue.status || "available");
+        const preservedLabelPrinted = Boolean(reprintLabel) ? 0 : Number(existingBookForRequeue.label_printed || 0);
+        const norm = buildNormalizedBookSearch([
+          code,
+          String(effTitle || "").trim(),
+          cleanTopSetName,
+          cleanSubSeries,
+          String(author || "").trim(),
+          finalVolume,
+          normalizedCoverage,
+          String(publisher || "").trim(),
+          String(effPubYear || "").trim(),
+          String(edition || "").trim(),
+          String(category || "").trim(),
+          tagsArr.join(" "),
+          String(effNotes || "").trim(),
+        ]);
+
+        db.run(
+          "UPDATE books SET title = ?, set_name = ?, sub_series = ?, set_global_number = ?, author = ?, volume = ?, coverage_range = ?, publisher = ?, pub_year = ?, edition = ?, category = ?, tags = ?, normalized_search = ?, cabinet_id = ?, shelf_number = ?, notes = ?, status = ?, label_printed = ?, format_size = ?, thickness_mm = ?, pages_count = ?, updated_at = ? WHERE barcode = ?",
+          String(effTitle || "").trim(),
+          cleanTopSetName,
+          cleanSubSeries,
+          effGlobalNum,
+          String(author || "").trim(),
+          finalVolume,
+          normalizedCoverage,
+          String(publisher || "").trim(),
+          String(effPubYear || "").trim(),
+          String(edition || "").trim(),
+          String(category || "").trim(),
+          JSON.stringify(tagsArr),
+          norm,
+          cabinet_id ? Number(cabinet_id) : existingBookForRequeue.cabinet_id,
+          shelf_number ? Number(shelf_number) : existingBookForRequeue.shelf_number,
+          String(effNotes || "").trim(),
+          nextStatus,
+          preservedLabelPrinted,
+          String(effFormatSize || "").trim(),
+          parsedThickness,
+          parsedPages,
+          now,
+          code
+        );
+
+        for (const imgPath of queueImagePaths) {
+          db.run(
+            "INSERT INTO book_images (book_barcode, file_path, mime_type, source_type, queue_id, created_at, expires_at) VALUES (?, ?, ?, 'ai_queue', ?, ?, ?)",
+            code,
+            imgPath,
+            detectMimeFromExt(imgPath),
+            id,
+            now,
+            expiresAt
+          );
+        }
+
+        if (existingBookForRequeue.sync_id) {
+          enqueueSyncOutbox(db, "book", String(existingBookForRequeue.sync_id), "upsert", { barcode: code });
+        }
+        db.run("UPDATE ai_catalog_queue SET approval_status = 'approved' WHERE id = ?", id);
+        createdBarcodes.push(code);
+      });
+
+      return res.json({ ok: true, barcodes: createdBarcodes, updatedExisting: true });
+    }
+
     // Batch shelf-set approval
     if (Array.isArray(volumes) && volumes.length > 0) {
       const siblingContext = volumes.map((v: any) => ({
@@ -1915,21 +2042,20 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
 
     const firstPath = imagePaths[0] || "";
     const extraPaths = imagePaths.slice(1);
+    const origQueue = db.get<{ is_shelf_set: number; extracted_json: string }>(
+      "SELECT q.is_shelf_set, q.extracted_json FROM book_images bi JOIN ai_catalog_queue q ON bi.queue_id = q.id WHERE bi.book_barcode = ? AND bi.deleted_at IS NULL ORDER BY bi.id DESC LIMIT 1",
+      barcode
+    );
+    const origIsShelfSet = Number(origQueue?.is_shelf_set) === 1;
+    let origPresetSet = "";
+    try {
+      const pm = JSON.parse(origQueue?.extracted_json || "{}");
+      if (pm?.set_name) origPresetSet = String(pm.set_name).trim();
+    } catch {}
+
     const initialMeta: Record<string, any> = {
-      title: String(book.title || ""),
-      set_name: String(book.set_name || ""),
-      sub_series: String(book.sub_series || ""),
-      set_global_number: book.set_global_number != null ? Number(book.set_global_number) : 0,
-      volume: String(book.volume || ""),
-      coverage_range: String(book.coverage_range || ""),
-      author: String(book.author || ""),
-      publisher: String(book.publisher || ""),
-      pub_year: String(book.pub_year || ""),
-      edition: String(book.edition || ""),
-      format_size: String(book.format_size || ""),
-      category: String(book.category || ""),
-      notes: String(book.notes || ""),
-      tags: parseTags(book.tags),
+      _clean_image_requeue: true,
+      ...(origIsShelfSet || origPresetSet ? { set_name: String(book.set_name || origPresetSet || "").trim() } : {}),
     };
     if (customPrompt) initialMeta._retry_custom_prompt = customPrompt;
     if (useStrongModel) initialMeta._retry_use_strong_model = true;
@@ -1997,21 +2123,20 @@ export function registerCatalogAiRoutes(app: Express, db: DbClient, dataDir: str
         const imagePaths = savedRows.map((r) => r.file_path);
         const firstPath = imagePaths[0] || "";
         const extraPaths = imagePaths.slice(1);
+        const origQueue = db.get<{ is_shelf_set: number; extracted_json: string }>(
+          "SELECT q.is_shelf_set, q.extracted_json FROM book_images bi JOIN ai_catalog_queue q ON bi.queue_id = q.id WHERE bi.book_barcode = ? AND bi.deleted_at IS NULL ORDER BY bi.id DESC LIMIT 1",
+          barcode
+        );
+        const origIsShelfSet = Number(origQueue?.is_shelf_set) === 1;
+        let origPresetSet = "";
+        try {
+          const pm = JSON.parse(origQueue?.extracted_json || "{}");
+          if (pm?.set_name) origPresetSet = String(pm.set_name).trim();
+        } catch {}
+
         const initialMeta: Record<string, any> = {
-          title: String(book.title || ""),
-          set_name: String(book.set_name || ""),
-          sub_series: String(book.sub_series || ""),
-          set_global_number: book.set_global_number != null ? Number(book.set_global_number) : 0,
-          volume: String(book.volume || ""),
-          coverage_range: String(book.coverage_range || ""),
-          author: String(book.author || ""),
-          publisher: String(book.publisher || ""),
-          pub_year: String(book.pub_year || ""),
-          edition: String(book.edition || ""),
-          format_size: String(book.format_size || ""),
-          category: String(book.category || ""),
-          notes: String(book.notes || ""),
-          tags: parseTags(book.tags),
+          _clean_image_requeue: true,
+          ...(origIsShelfSet || origPresetSet ? { set_name: String(book.set_name || origPresetSet || "").trim() } : {}),
         };
         if (customPrompt) initialMeta._retry_custom_prompt = customPrompt;
         if (useStrongModel) initialMeta._retry_use_strong_model = true;

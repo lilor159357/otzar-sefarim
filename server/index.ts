@@ -121,6 +121,56 @@ export async function startOtzarServer(options: OtzarServerOptions = {}): Promis
   const dbExistedBeforeOpen = fs.existsSync(DB_PATH) && fs.statSync(DB_PATH).size > 0;
   const db = await openDatabase(DB_PATH);
   initSchemaAndSeed(db);
+
+  // Automatic one-time and startup migration: normalize all existing coverage_range strings to ASCII hyphen and quotes
+  try {
+    const coverageMigrated = db.get<{ value: string }>("SELECT value FROM settings WHERE key = 'coverage_normalized_v1025'")?.value;
+    if (!coverageMigrated) {
+      const booksWithCoverage = db.all<{ barcode: string; set_name: string; sub_series: string; author: string; volume: string; coverage_range: string; publisher: string; pub_year: string; edition: string; category: string; tags: string; notes: string; sync_id: string }>(
+        "SELECT barcode, set_name, sub_series, author, volume, coverage_range, publisher, pub_year, edition, category, tags, notes, sync_id FROM books WHERE coverage_range IS NOT NULL AND coverage_range <> '' AND deleted_at IS NULL"
+      );
+      const nowIso = new Date().toISOString();
+      db.transaction(() => {
+        for (const b of booksWithCoverage) {
+          const cur = String(b.coverage_range || "").trim();
+          if (!cur) continue;
+          const sName = String(b.set_name || "").trim();
+          const prefUnit = sName ? resolvePreferredCoverageUnitForSet(db, sName) : "any";
+          const normalized = normalizeCoverageRange(cur, prefUnit);
+          if (normalized && normalized !== cur) {
+            const tagsArr = parseTags(b.tags);
+            const norm = buildNormalizedBookSearch([
+              String(b.barcode),
+              String(b.set_name || ""),
+              String(b.sub_series || ""),
+              String(b.author || ""),
+              String(b.volume || ""),
+              normalized,
+              String(b.publisher || ""),
+              String(b.pub_year || ""),
+              String(b.edition || ""),
+              String(b.category || ""),
+              tagsArr.join(" "),
+              String(b.notes || ""),
+            ]);
+            db.run(
+              "UPDATE books SET coverage_range = ?, normalized_search = ?, updated_at = ? WHERE barcode = ?",
+              normalized,
+              norm,
+              nowIso,
+              b.barcode
+            );
+            if (b.sync_id) {
+              enqueueSyncOutbox(db, "book", String(b.sync_id), "upsert", { barcode: String(b.barcode) });
+            }
+          }
+        }
+        db.run("INSERT INTO settings (key, value) VALUES ('coverage_normalized_v1025', 'done') ON CONFLICT(key) DO UPDATE SET value = 'done'");
+      });
+    }
+  } catch (err) {
+    console.error("Failed running coverage_normalized_v1025 startup migration:", err);
+  }
   if (!dbExistedBeforeOpen) {
     db.run(
       "INSERT OR IGNORE INTO settings (key, value) VALUES ('last_seen_app_version', ?)",
@@ -1002,6 +1052,113 @@ function readIgnoredMissingSet(db: DbClient): Set<string> {
     );
     const dominantCoverageUnit = inferDominantCoverageUnit(cleanRows.map((r: any) => String(r.coverage_range || "")));
     res.json({ books: cleanRows, missingSlots, dominantCoverageUnit });
+  });
+
+  // Canonical details of a set for auto-pull in edit/manual forms
+  app.get("/api/books/set-details", (req, res) => {
+    const setName = String(req.query.setName || "").trim();
+    if (!setName) return res.json({ found: false, details: null });
+    const rows = db.all<Record<string, any>>(
+      "SELECT * FROM books WHERE LOWER(set_name) = LOWER(?) AND deleted_at IS NULL",
+      setName
+    );
+    if (rows.length === 0) {
+      return res.json({ found: false, details: null });
+    }
+    const nonBorrowed = rows.filter((r) => r.status !== "borrowed");
+    const refCount = nonBorrowed.filter((r) => r.status === "reference_only").length;
+    const availCount = nonBorrowed.filter((r) => r.status === "available").length;
+    const canonicalStatus = refCount > availCount ? "reference_only" : (nonBorrowed[0]?.status || "available");
+
+    const pickFrequent = (key: string): string => {
+      const counts = new Map<string, number>();
+      for (const r of rows) {
+        const val = String(r[key] || "").trim();
+        if (val) counts.set(val, (counts.get(val) || 0) + 1);
+      }
+      let best = "";
+      let max = 0;
+      for (const [k, c] of counts) {
+        if (c > max) { max = c; best = k; }
+      }
+      return best;
+    };
+
+    const author = pickFrequent("author");
+    const publisher = pickFrequent("publisher");
+    const pub_year = pickFrequent("pub_year");
+    const edition = pickFrequent("edition");
+    const category = pickFrequent("category");
+    const format_size = pickFrequent("format_size");
+
+    const allTags = new Set<string>();
+    for (const r of rows) {
+      for (const t of parseTags(r.tags)) allTags.add(t);
+    }
+
+    const latestBook = rows[rows.length - 1];
+    const dominantCoverageUnit = inferDominantCoverageUnit(rows.map((r) => String(r.coverage_range || "")));
+    const sampleBooks = rows.slice(0, 15).map((r) => ({
+      title: String(r.title || ""),
+      set_name: String(r.set_name || ""),
+      sub_series: String(r.sub_series || ""),
+      volume: String(r.volume || ""),
+      coverage_range: String(r.coverage_range || ""),
+    }));
+
+    res.json({
+      found: true,
+      details: {
+        set_name: setName,
+        count: rows.length,
+        status: canonicalStatus,
+        author,
+        publisher,
+        pub_year,
+        edition,
+        category,
+        format_size,
+        tags: Array.from(allTags),
+        cabinet_id: latestBook.cabinet_id ? Number(latestBook.cabinet_id) : null,
+        shelf_number: latestBook.shelf_number ? Number(latestBook.shelf_number) : null,
+        dominantCoverageUnit,
+        sampleBooks,
+      },
+    });
+  });
+
+  // Summary of sets with active (non-ignored) missing volume slots
+  app.get("/api/books/missing-sets-summary", (req, res) => {
+    const setNames = db.all<{ set_name: string }>(
+      "SELECT DISTINCT set_name FROM books WHERE set_name IS NOT NULL AND set_name <> '' AND deleted_at IS NULL"
+    ).map((r) => r.set_name.trim()).filter(Boolean);
+
+    const ignoredKeys = readIgnoredMissingSet(db);
+    const missingSets: Array<{
+      setName: string;
+      count: number;
+      missingCount: number;
+      slots: any[];
+    }> = [];
+
+    for (const sName of setNames) {
+      const setBooks = db.all<{ set_name: string; sub_series: string; volume: string; set_global_number: number | null }>(
+        "SELECT set_name, sub_series, volume, set_global_number FROM books WHERE LOWER(set_name) = LOWER(?) AND deleted_at IS NULL",
+        sName
+      );
+      const slots = computeMissingSetSlots(setBooks, sName, ignoredKeys);
+      const activeSlots = slots.filter((s) => !s.ignored);
+      if (activeSlots.length > 0) {
+        missingSets.push({
+          setName: sName,
+          count: setBooks.length,
+          missingCount: activeSlots.length,
+          slots: activeSlots,
+        });
+      }
+    }
+
+    res.json({ missingSets });
   });
 
   // Selective multi-book bulk update (only modifies fields explicitly present in req.body.fields)

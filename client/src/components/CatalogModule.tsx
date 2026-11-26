@@ -22,13 +22,16 @@ import {
   BookCopy,
   ArrowLeftRight,
   Wand2,
+  AlertCircle,
+  ChevronUp,
+  ChevronDown,
 } from "lucide-react";
 import { FORMAT_SIZE_OPTIONS, type AiQueueItem, type CabinetRow, type VolumeNotationRule } from "../types.ts";
 import { RecycleBinModal } from "./RecycleBinModal.tsx";
 import { getAdminToken } from "../lib/adminSession.ts";
 import { AutocompleteInput } from "./AutocompleteInput.tsx";
 import { SetPatternBuilderModal, type PatternTargetField } from "./SetPatternBuilderModal.tsx";
-import { suggestNextVolume, compareSetBooks } from "../lib/torahUtils.ts";
+import { suggestNextVolume, compareSetBooks, deriveTitleFromSetTemplate } from "../lib/torahUtils.ts";
 import { useStrings } from "../lib/stringsContext.tsx";
 
 interface CatalogModuleProps {
@@ -247,10 +250,22 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
     edition: string;
     category: string;
     format_size: string;
+    status?: string;
     cabinet_id: number | null;
     cabinet_code: string;
     shelf_number: number | null;
+    sampleBooks?: any[];
   } | null>(null);
+  const [includeLocationInManualPull, setIncludeLocationInManualPull] = useState(false);
+  const [manualExistingSet, setManualExistingSet] = useState<any | null>(null);
+  const [revIncludeLocation, setRevIncludeLocation] = useState(false);
+  const [missingSetsSummary, setMissingSetsSummary] = useState<Array<{
+    setName: string;
+    count: number;
+    missingCount: number;
+    slots: any[];
+  }>>([]);
+  const [missingSetsExpanded, setMissingSetsExpanded] = useState(false);
   const shelfTitleInputRef = useRef<HTMLInputElement>(null);
   const shelfSpineInputRef = useRef<HTMLInputElement>(null);
 
@@ -394,44 +409,25 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
     }
     const t = setTimeout(async () => {
       try {
-        const res = await fetch(`/api/books/set/${encodeURIComponent(q)}`);
+        const res = await fetch(`/api/books/set-details?setName=${encodeURIComponent(q)}`);
         if (!res.ok) return;
         const data = await res.json();
-        const books = Array.isArray(data.books) ? data.books : [];
-        if (books.length > 0) {
-          const sample = books[books.length - 1];
-          const ctxInfo = {
-            set_name: q,
-            count: books.length,
-            author: String(sample.author || ""),
-            publisher: String(sample.publisher || ""),
-            pub_year: String(sample.pub_year || ""),
-            edition: String(sample.edition || ""),
-            category: String(sample.category || ""),
-            format_size: String(sample.format_size || ""),
-            cabinet_id: sample.cabinet_id ? Number(sample.cabinet_id) : null,
-            cabinet_code: String(sample.cabinet_code || ""),
-            shelf_number: sample.shelf_number ? Number(sample.shelf_number) : null,
-          };
-          setRevExistingSet(ctxInfo);
-          // Auto-apply revExistingSet details + merge tags
-          if (ctxInfo.author) setRevAuthor((prev) => prev.trim() || ctxInfo.author);
-          if (ctxInfo.publisher) setRevPublisher((prev) => prev.trim() || ctxInfo.publisher);
-          if (ctxInfo.pub_year) setRevPubYear((prev) => prev.trim() || ctxInfo.pub_year);
-          if (ctxInfo.edition) setRevEdition((prev) => prev.trim() || ctxInfo.edition);
-          if (ctxInfo.category) setRevCategory((prev) => (!prev.trim() || prev === "ספרים") ? ctxInfo.category : prev);
-          if (ctxInfo.format_size) setRevFormatSize((prev) => prev.trim() || ctxInfo.format_size);
-          if (ctxInfo.cabinet_id) setRevCabinetId((prev) => prev || String(ctxInfo.cabinet_id));
-          if (ctxInfo.shelf_number) setRevShelf(ctxInfo.shelf_number);
-          try {
-            const setTagsRaw = Array.isArray(sample.tags) ? sample.tags : (typeof sample.tags === "string" ? JSON.parse(sample.tags) : []);
-            if (Array.isArray(setTagsRaw) && setTagsRaw.length > 0) {
-              setRevTags((prev) => {
-                const cur = prev.split(",").map((x) => x.trim()).filter(Boolean);
-                return Array.from(new Set([...setTagsRaw.map((x: any) => String(x).trim()), ...cur])).filter(Boolean).join(", ");
-              });
-            }
-          } catch {}
+        if (data.found && data.details) {
+          const d = data.details;
+          setRevExistingSet(d);
+          if (d.author) setRevAuthor((prev) => prev.trim() || d.author);
+          if (d.publisher) setRevPublisher((prev) => prev.trim() || d.publisher);
+          if (d.pub_year) setRevPubYear((prev) => prev.trim() || d.pub_year);
+          if (d.edition) setRevEdition((prev) => prev.trim() || d.edition);
+          if (d.category) setRevCategory((prev) => (!prev.trim() || prev === "ספרים") ? d.category : prev);
+          if (d.format_size) setRevFormatSize((prev) => prev.trim() || d.format_size);
+          // Never silently overwrite revCabinetId or revShelf!
+          if (Array.isArray(d.tags) && d.tags.length > 0) {
+            setRevTags((prev) => {
+              const cur = prev.split(",").map((x) => x.trim()).filter(Boolean);
+              return Array.from(new Set([...d.tags, ...cur])).filter(Boolean).join(", ");
+            });
+          }
         } else {
           setRevExistingSet(null);
         }
@@ -442,39 +438,83 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
     return () => clearTimeout(t);
   }, [revSetName]);
 
-  // Auto-apply existing set in manual form
+  // Check if manual setName exists in library
   useEffect(() => {
     const q = setName.trim();
-    if (!q) return;
+    if (!q) {
+      setManualExistingSet(null);
+      return;
+    }
     const timer = setTimeout(async () => {
       try {
         const res = await fetch("/api/books/set-details?setName=" + encodeURIComponent(q));
         if (!res.ok) return;
         const data = await res.json();
         if (data.found && data.details) {
-          const d = data.details;
-          if (d.author) setAuthor((p) => p.trim() || d.author);
-          if (d.publisher) setPublisher((p) => p.trim() || d.publisher);
-          if (d.pub_year) setPubYear((p) => p.trim() || d.pub_year);
-          if (d.edition) setEdition((p) => p.trim() || d.edition);
-          if (d.category) setCategory((p) => (!p.trim() || p === "ספרים") ? d.category : p);
-          if (d.cabinet_id) setCabinetId(String(d.cabinet_id));
-          if (d.shelf_number) setShelfNumber(Number(d.shelf_number));
-          if (Array.isArray(d.tags) && d.tags.length > 0) {
-            setTagsText((prev) => {
-              const cur = prev.split(",").map((x) => x.trim()).filter(Boolean);
-              return Array.from(new Set([...d.tags, ...cur])).filter(Boolean).join(", ");
-            });
-          }
-          setManualNotice('זוהה סט קיים "' + q + '" — פרטי הסט והמיקום הוחלו אוטומטית!');
+          setManualExistingSet(data.details);
+        } else {
+          setManualExistingSet(null);
         }
-      } catch {}
-    }, 320);
+      } catch {
+        setManualExistingSet(null);
+      }
+    }, 300);
     return () => clearTimeout(timer);
   }, [setName]);
 
+  const handlePullSetDetailsInManual = (d: any) => {
+    if (!d) return;
+    if (d.author) setAuthor(d.author);
+    if (d.publisher) setPublisher(d.publisher);
+    if (d.pub_year) setPubYear(d.pub_year);
+    if (d.edition) setEdition(d.edition);
+    if (d.category) setCategory(d.category);
+    if (d.format_size) setFormatSize(d.format_size);
+    if (d.status) setStatus(d.status === "reference_only" ? "reference_only" : "available");
+    if (includeLocationInManualPull) {
+      if (d.cabinet_id) setCabinetId(String(d.cabinet_id));
+      if (d.shelf_number) setShelfNumber(Number(d.shelf_number));
+    }
+    if (Array.isArray(d.tags) && d.tags.length > 0) {
+      setTagsText((prev) => {
+        const cur = prev.split(",").map((x: any) => String(x).trim()).filter(Boolean);
+        return Array.from(new Set([...d.tags, ...cur])).filter(Boolean).join(", ");
+      });
+    }
+    const derived = deriveTitleFromSetTemplate({
+      setName: d.set_name,
+      subSeries,
+      volume,
+      coverageRange,
+      sampleBooks: d.sampleBooks,
+    });
+    if (derived) setTitle(derived);
+    setManualNotice(`פרטי הסט "${d.set_name}" הוחלו בהצלחה${includeLocationInManualPull ? " (כולל מיקום)" : " (מיקום לא שונה)"}`);
+  };
+
   const selectedManualCab = cabinets.find((c) => String(c.id) === cabinetId) || cabinets[0];
   const selectedRevCab = cabinets.find((c) => String(c.id) === revCabinetId) || cabinets[0];
+
+  const loadMissingSetsSummary = async () => {
+    try {
+      const res = await fetch("/api/books/missing-sets-summary");
+      if (res.ok) {
+        const data = await res.json();
+        setMissingSetsSummary(Array.isArray(data.missingSets) ? data.missingSets : []);
+      }
+    } catch {}
+  };
+
+  const handleIgnoreMissingSlotInSummary = async (key: string) => {
+    try {
+      await fetch("/api/books/ignore-missing-volume", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ key, ignore: true }),
+      });
+      await loadMissingSetsSummary();
+    } catch {}
+  };
 
   const loadQueue = async () => {
     const res = await fetch("/api/ai-queue?approval=pending");
@@ -483,6 +523,7 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
       setQueueItems(data.items || []);
       setWorkerRunning(Boolean(data.workerRunning));
     }
+    void loadMissingSetsSummary();
   };
 
   useEffect(() => {
@@ -1174,6 +1215,60 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
         </div>
       </div>
 
+      {/* Collapsible missing volumes banner */}
+      {missingSetsSummary.length > 0 && (
+        <div className="rounded-xl border border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/30 overflow-hidden text-xs">
+          <div
+            onClick={() => setMissingSetsExpanded((p) => !p)}
+            className="flex items-center justify-between p-3 cursor-pointer hover:bg-amber-100/50 dark:hover:bg-amber-900/30 transition-colors select-none"
+          >
+            <div className="flex items-center gap-2 text-amber-900 dark:text-amber-200 font-bold">
+              <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
+              <span>
+                זוהו {missingSetsSummary.length} סטים עם כרכים חסרים בספרייה
+                ({missingSetsSummary.reduce((acc, s) => acc + s.missingCount, 0)} כרכים חסרים סה״כ)
+              </span>
+            </div>
+            <div className="flex items-center gap-1.5 text-amber-800 dark:text-amber-300 font-semibold">
+              <span>{missingSetsExpanded ? "כווץ רשימה" : "הצג פירוט והתעלמות"}</span>
+              {missingSetsExpanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+            </div>
+          </div>
+          {missingSetsExpanded && (
+            <div className="p-3 pt-0 border-t border-amber-200 dark:border-amber-900 divide-y divide-amber-200 dark:divide-amber-900">
+              {missingSetsSummary.map((ms) => (
+                <div key={ms.setName} className="py-2.5 flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <strong className="text-amber-950 dark:text-amber-100">{ms.setName}</strong>
+                    <span className="text-[var(--otzar-text-muted)] mr-2 tabular-nums">({ms.count} כרכים קיימים)</span>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    {ms.slots.map((slot: any) => (
+                      <span
+                        key={slot.key}
+                        className="inline-flex items-center gap-1.5 px-2 py-1 rounded bg-white dark:bg-black/30 border border-amber-300 dark:border-amber-700 text-amber-900 dark:text-amber-200"
+                      >
+                        <span>
+                          חסר: {slot.subSeries ? `${slot.subSeries} · ` : ""}{slot.suggestedVolume || `כרך ${slot.index}`}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => handleIgnoreMissingSlotInSummary(slot.key)}
+                          className="text-[10px] text-[var(--otzar-accent)] hover:underline cursor-pointer font-bold mr-1"
+                          title="התעלם מחוסר זה בסט"
+                        >
+                          התעלם
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Sub-tabs */}
       <div className="flex flex-wrap gap-1 p-1 rounded-xl bg-[var(--otzar-surface-alt)] border border-[var(--otzar-border-muted)] w-fit">
         {[
@@ -1227,7 +1322,7 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
               />
             </div>
 
-            <div className="md:col-span-3">
+            <div className="md:col-span-3 space-y-1.5">
               <AutocompleteInput
                 label="שם הסט / סדרה (אופציונלי)"
                 field="set_name"
@@ -1235,6 +1330,37 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
                 onChange={setSetName}
                 placeholder="למשל: ש״ס וילנא / משנה ברורה"
               />
+              {setName.trim() && manualExistingSet && (
+                <div className="p-2 rounded-lg bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-300 dark:border-emerald-800 text-xs text-emerald-900 dark:text-emerald-200 flex flex-wrap items-center justify-between gap-2">
+                  <span className="font-semibold">
+                    נמצא סט קיים ({manualExistingSet.count} כרכים)
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <label className="inline-flex items-center gap-1 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={includeLocationInManualPull}
+                        onChange={(e) => setIncludeLocationInManualPull(e.target.checked)}
+                        className="rounded accent-emerald-600"
+                      />
+                      <span>כלול מיקום</span>
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => handlePullSetDetailsInManual(manualExistingSet)}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-700 text-white font-bold cursor-pointer text-xs transition-colors shadow-sm"
+                    >
+                      <Sparkles className="w-3.5 h-3.5" />
+                      <span>משוך פרטי סט</span>
+                    </button>
+                  </div>
+                </div>
+              )}
+              {setName.trim() && !manualExistingSet && (
+                <div className="text-[11px] text-[var(--otzar-text-muted)] italic">
+                  סט חדש (טרם נוספו כרכים בשם זה)
+                </div>
+              )}
             </div>
 
             <div className="md:col-span-3">
@@ -2546,26 +2672,49 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
                         placeholder="למשל: משנה ברורה / שו״ת יביע אומר"
                       />
                       {revExistingSet && (
-                        <div className="mt-1 flex flex-wrap items-center justify-between gap-1.5 text-[11px] text-emerald-700 dark:text-emerald-300 bg-emerald-500/10 border border-emerald-400/40 rounded-md px-2 py-1">
-                          <span>נמצא במאגר ({revExistingSet.count} כרכים)</span>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              if (!revTitle.trim()) setRevTitle(revExistingSet.set_name);
-                              if (revExistingSet.author) setRevAuthor(revExistingSet.author);
-                              if (revExistingSet.publisher) setRevPublisher(revExistingSet.publisher);
-                              if (revExistingSet.pub_year) setRevPubYear(revExistingSet.pub_year);
-                              if (revExistingSet.edition) setRevEdition(revExistingSet.edition);
-                              if (revExistingSet.category) setRevCategory(revExistingSet.category);
-                              if (revExistingSet.format_size) setRevFormatSize(revExistingSet.format_size);
-                              if (revExistingSet.cabinet_id) setRevCabinetId(String(revExistingSet.cabinet_id));
-                              if (revExistingSet.shelf_number) setRevShelf(revExistingSet.shelf_number);
-                              setReviewNotice(`הושלמו פרטי הסט ומיקום המדף מתוך "${revExistingSet.set_name}"`);
-                            }}
-                            className="font-bold underline cursor-pointer"
-                          >
-                            משוך פרטי סט ומיקום מהמאגר
-                          </button>
+                        <div className="mt-1 p-2 flex flex-wrap items-center justify-between gap-2 text-xs text-emerald-800 dark:text-emerald-200 bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-300 dark:border-emerald-800 rounded-lg">
+                          <span className="font-semibold">נמצא במאגר ({revExistingSet.count} כרכים)</span>
+                          <div className="flex items-center gap-2">
+                            <label className="inline-flex items-center gap-1 cursor-pointer select-none text-[11px]">
+                              <input
+                                type="checkbox"
+                                checked={revIncludeLocation}
+                                onChange={(e) => setRevIncludeLocation(e.target.checked)}
+                                className="rounded accent-emerald-600"
+                              />
+                              <span>כלול מיקום</span>
+                            </label>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const derived = deriveTitleFromSetTemplate({
+                                  setName: revSetName.trim(),
+                                  subSeries: revSubSeries.trim(),
+                                  volume: revVolume.trim(),
+                                  coverageRange: revCoverageRange.trim(),
+                                  sampleBooks: revExistingSet.sampleBooks,
+                                });
+                                if (derived) setRevTitle(derived);
+                                else if (!revTitle.trim()) setRevTitle(revExistingSet.set_name);
+                                if (revExistingSet.author) setRevAuthor(revExistingSet.author);
+                                if (revExistingSet.publisher) setRevPublisher(revExistingSet.publisher);
+                                if (revExistingSet.pub_year) setRevPubYear(revExistingSet.pub_year);
+                                if (revExistingSet.edition) setRevEdition(revExistingSet.edition);
+                                if (revExistingSet.category) setRevCategory(revExistingSet.category);
+                                if (revExistingSet.format_size) setRevFormatSize(revExistingSet.format_size);
+                                if (revExistingSet.status) setRevStatus(revExistingSet.status === "reference_only" ? "reference_only" : "available");
+                                if (revIncludeLocation) {
+                                  if (revExistingSet.cabinet_id) setRevCabinetId(String(revExistingSet.cabinet_id));
+                                  if (revExistingSet.shelf_number) setRevShelf(revExistingSet.shelf_number);
+                                }
+                                setReviewNotice(`הושלמו פרטי הסט "${revExistingSet.set_name}"${revIncludeLocation ? " ומיקום המדף" : " (מיקום לא שונה)"}`);
+                              }}
+                              className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-700 text-white font-bold cursor-pointer text-xs transition-colors shadow-sm"
+                            >
+                              <Sparkles className="w-3.5 h-3.5" />
+                              <span>משוך פרטי סט</span>
+                            </button>
+                          </div>
                         </div>
                       )}
                     </div>

@@ -569,7 +569,7 @@ function detectUnitFromText(segment: string, fallback: CoverageUnit = "any"): Co
 export function parseCoverageRanges(coverageStr: string | undefined | null): ParsedCoverageSegment[] {
   const raw = String(coverageStr || "").trim();
   if (!raw) return [];
-  const parts = raw.split(/[,;/|]+/).map((p) => p.trim()).filter(Boolean);
+  const parts = raw.split(/[,;/|·\u00B7]+/).map((p) => p.trim()).filter(Boolean);
   const out: ParsedCoverageSegment[] = [];
   let lastUnit: CoverageUnit = "any";
 
@@ -709,8 +709,8 @@ export function matchCoverageRange(
 export function formatHebrewNumeralWithPunctuation(num: number): string {
   const letters = numberToHebrewGematriya(num);
   if (!letters || /^\d+$/.test(letters)) return letters;
-  if (letters.length === 1) return letters + "׳";
-  return letters.slice(0, -1) + "״" + letters.slice(-1);
+  if (letters.length === 1) return letters + "'";
+  return letters.slice(0, -1) + '"' + letters.slice(-1);
 }
 
 function unitPluralLabelHe(unit: CoverageUnit): string {
@@ -763,11 +763,11 @@ export function normalizeCoverageRange(
   if (!str) return "";
   const segs = parseCoverageRanges(str);
   if (segs.length === 0) {
-    // Even if unparsed, still standardize dashes & Hebrew punctuation
+    // Standardize dashes & Hebrew punctuation to ASCII
     return str
-      .replace(/([א-ת])['`]/g, "$1׳")
-      .replace(/([א-ת])"/g, "$1״")
-      .replace(/\s*[-–—]+\s*/g, "–")
+      .replace(/([א-ת])['`׳]/g, "$1'")
+      .replace(/([א-ת])["״]/g, '$1"')
+      .replace(/\s*[-–—]+\s*/g, "-")
       .replace(/\s{2,}/g, " ")
       .trim();
   }
@@ -780,7 +780,7 @@ export function normalizeCoverageRange(
       return prefix ? `${prefix} ${startHeb}` : startHeb;
     }
     const prefix = unitPluralLabelHe(unit);
-    return prefix ? `${prefix} ${startHeb}–${endHeb}` : `${startHeb}–${endHeb}`;
+    return prefix ? `${prefix} ${startHeb}-${endHeb}` : `${startHeb}-${endHeb}`;
   });
   return Array.from(new Set(formattedSegments)).join(" · ");
 }
@@ -979,8 +979,92 @@ export function shouldSuppressSingleVolumeLabel(
     return false;
   }
 
-  if (/^(?:כרך\s+)?(?:מסכת|חומש|ספר)\s+[א-ת]+/.test(vol) && !/(א|ב|ג|ד|ה|ו|ז|ח|ט|י|\d)\s*$/.test(vol)) {
-    return true;
+  // When sub_series is empty, check if volume is just a tractate / Chumash name without distinct numerals
+  if (/^(?:כרך|חלק|ספר)?\s*(?:מסכת|חומש|סדר)?\s*[א-ת]+/i.test(vol)) {
+    const volWithoutPrefix = vol.replace(/^(?:כרך|חלק|ספר|מסכת|חומש)\s+/g, "").trim();
+    if (torahSubSeriesRank(volWithoutPrefix) < 999999 || torahSubSeriesRank(vol) < 999999) {
+      return true;
+    }
   }
+
+  if (setBooks.length > 0) {
+    const allSubs = setBooks.map((b) => String(b.sub_series || "").trim()).filter(Boolean);
+    if (allSubs.length >= 2) {
+      return true;
+    }
+  }
+
   return false;
+}
+
+export interface TitleTemplateDerivationParams {
+  setName: string;
+  subSeries?: string;
+  volume?: string;
+  coverageRange?: string;
+  sampleBooks?: Array<{
+    title?: string;
+    set_name?: string;
+    sub_series?: string;
+    volume?: string;
+    coverage_range?: string;
+  }>;
+}
+
+export function deriveTitleFromSetTemplate(params: TitleTemplateDerivationParams): string {
+  const cleanSet = String(params.setName || "").trim();
+  const cleanSub = String(params.subSeries || "").trim();
+  let cleanVol = String(params.volume || "").trim();
+  const cleanCov = String(params.coverageRange || "").trim();
+  const samples = Array.isArray(params.sampleBooks) ? params.sampleBooks : [];
+
+  if (!cleanSet) {
+    if (cleanSub && cleanVol) return `${cleanSub} · ${cleanVol}`;
+    return cleanSub || cleanVol || "";
+  }
+
+  if (cleanVol && shouldSuppressSingleVolumeLabel(
+    { set_name: cleanSet, sub_series: cleanSub, volume: cleanVol, coverage_range: cleanCov },
+    samples
+  )) {
+    cleanVol = "";
+  }
+
+  const validTitles = samples
+    .map((s) => String(s.title || "").trim())
+    .filter((t) => t.length > 0 && t.startsWith(cleanSet));
+
+  if (validTitles.length > 0) {
+    let sampleSep = " · ";
+    const firstSample = validTitles[0];
+    const afterSet = firstSample.slice(cleanSet.length).trim();
+    if (afterSet.startsWith("·")) sampleSep = " · ";
+    else if (afterSet.startsWith("-") || afterSet.startsWith("–") || afterSet.startsWith("—")) sampleSep = " - ";
+    else if (afterSet.startsWith("/")) sampleSep = " / ";
+
+    if (cleanSub && cleanVol) {
+      if (firstSample.includes("(") && firstSample.includes(")") && firstSample.includes(cleanSub)) {
+        return `${cleanSet}${sampleSep}${cleanSub} (${cleanVol})`;
+      }
+      return `${cleanSet}${sampleSep}${cleanSub}${sampleSep}${cleanVol}`;
+    }
+    if (cleanSub) {
+      return `${cleanSet}${sampleSep}${cleanSub}`;
+    }
+    if (cleanVol) {
+      return `${cleanSet}${sampleSep}${cleanVol}`;
+    }
+    return cleanSet;
+  }
+
+  if (cleanSub && cleanVol) {
+    return `${cleanSet} · ${cleanSub} · ${cleanVol}`;
+  }
+  if (cleanSub) {
+    return `${cleanSet} · ${cleanSub}`;
+  }
+  if (cleanVol) {
+    return `${cleanSet} · ${cleanVol}`;
+  }
+  return cleanSet;
 }
