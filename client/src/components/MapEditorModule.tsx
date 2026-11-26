@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { Plus, Save, RotateCw, Trash2, CheckCircle2, BarChart3, X, RefreshCw, Copy, Sparkles, ArrowLeftRight, Ruler } from "lucide-react";
+import { Plus, Save, RotateCw, Trash2, CheckCircle2, BarChart3, X, RefreshCw, Copy, Sparkles, ArrowLeftRight, Ruler, Magnet, AlertTriangle } from "lucide-react";
 import type { CabinetRow, MapEntrance, RoomDimensions, ShelvingReport } from "../types.ts";
 import { DEFAULT_ENTRANCE, EntranceMarker, MAP_HEIGHT, MAP_WIDTH } from "./LibraryMap2D.tsx";
 import { SmartShelfOrganizerModal } from "./SmartShelfOrganizerModal.tsx";
@@ -15,16 +15,71 @@ interface MapEditorModuleProps {
 type ResizeDir = "n" | "s" | "e" | "w" | "ne" | "nw" | "se" | "sw";
 
 const SNAP = 10;
+const MAGNET_THRESHOLD = 10;
+const OVERLAP_EPS = 0.6;
+const ROOM_MIN_X = 15;
+const ROOM_MAX_X = MAP_WIDTH - 15;
+const ROOM_MIN_Y = 15;
+const ROOM_MAX_Y = MAP_HEIGHT - 20;
+
 const snapVal = (v: number) => Math.round(v / SNAP) * SNAP;
 
-function clampRotatedCabinet(c: CabinetRow, targetX: number, targetY: number) {
+interface CabBounds {
+  left: number;
+  right: number;
+  top: number;
+  bottom: number;
+  cx: number;
+  cy: number;
+  effW: number;
+  effH: number;
+}
+
+function getCabBounds(c: { x: number; y: number; width: number; height: number; rotation?: number }): CabBounds {
+  const rad = ((c.rotation || 0) * Math.PI) / 180;
+  const effW = Math.abs(c.width * Math.cos(rad)) + Math.abs(c.height * Math.sin(rad));
+  const effH = Math.abs(c.width * Math.sin(rad)) + Math.abs(c.height * Math.cos(rad));
+  const cx = c.x + c.width / 2;
+  const cy = c.y + c.height / 2;
+  return {
+    left: cx - effW / 2,
+    right: cx + effW / 2,
+    top: cy - effH / 2,
+    bottom: cy + effH / 2,
+    cx,
+    cy,
+    effW,
+    effH,
+  };
+}
+
+function getOverlapArea(a: CabBounds, b: CabBounds): number {
+  const ox = Math.min(a.right, b.right) - Math.max(a.left, b.left);
+  const oy = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
+  if (ox <= OVERLAP_EPS || oy <= OVERLAP_EPS) return 0;
+  return ox * oy;
+}
+
+function totalOverlapWithOthers(
+  cab: { x: number; y: number; width: number; height: number; rotation?: number },
+  others: CabinetRow[]
+): number {
+  const bA = getCabBounds(cab);
+  let sum = 0;
+  for (const o of others) {
+    sum += getOverlapArea(bA, getCabBounds(o));
+  }
+  return sum;
+}
+
+function clampRotatedCabinet(c: { width: number; height: number; rotation?: number }, targetX: number, targetY: number) {
   const rad = ((c.rotation || 0) * Math.PI) / 180;
   const halfW = (Math.abs(c.width * Math.cos(rad)) + Math.abs(c.height * Math.sin(rad))) / 2;
   const halfH = (Math.abs(c.width * Math.sin(rad)) + Math.abs(c.height * Math.cos(rad))) / 2;
-  const minCx = 15 + halfW;
-  const maxCx = Math.max(minCx, MAP_WIDTH - 15 - halfW);
-  const minCy = 15 + halfH;
-  const maxCy = Math.max(minCy, MAP_HEIGHT - 20 - halfH);
+  const minCx = ROOM_MIN_X + halfW;
+  const maxCx = Math.max(minCx, ROOM_MAX_X - halfW);
+  const minCy = ROOM_MIN_Y + halfH;
+  const maxCy = Math.max(minCy, ROOM_MAX_Y - halfH);
   const targetCx = targetX + c.width / 2;
   const targetCy = targetY + c.height / 2;
   const clampedCx = Math.max(minCx, Math.min(maxCx, targetCx));
@@ -33,6 +88,188 @@ function clampRotatedCabinet(c: CabinetRow, targetX: number, targetY: number) {
     x: Math.round(clampedCx - c.width / 2),
     y: Math.round(clampedCy - c.height / 2),
   };
+}
+
+function applyMagneticSnap(
+  cab: { x: number; y: number; width: number; height: number; rotation?: number },
+  others: CabinetRow[]
+): { x: number; y: number } {
+  const bA = getCabBounds(cab);
+  let bestDx: { delta: number; abs: number } | null = null;
+  let bestDy: { delta: number; abs: number } | null = null;
+
+  const tryX = (delta: number) => {
+    const abs = Math.abs(delta);
+    if (abs <= MAGNET_THRESHOLD && (!bestDx || abs < bestDx.abs)) {
+      bestDx = { delta, abs };
+    }
+  };
+  const tryY = (delta: number) => {
+    const abs = Math.abs(delta);
+    if (abs <= MAGNET_THRESHOLD && (!bestDy || abs < bestDy.abs)) {
+      bestDy = { delta, abs };
+    }
+  };
+
+  // Snap to room walls
+  tryX(ROOM_MIN_X - bA.left);
+  tryX(ROOM_MAX_X - bA.right);
+  tryY(ROOM_MIN_Y - bA.top);
+  tryY(ROOM_MAX_Y - bA.bottom);
+
+  // Snap to other cabinets (flush edge-to-edge & aligned edges/centers)
+  for (const o of others) {
+    const bO = getCabBounds(o);
+    tryX(bO.right - bA.left);
+    tryX(bO.left - bA.right);
+    tryX(bO.left - bA.left);
+    tryX(bO.right - bA.right);
+    tryX(bO.cx - bA.cx);
+
+    tryY(bO.bottom - bA.top);
+    tryY(bO.top - bA.bottom);
+    tryY(bO.top - bA.top);
+    tryY(bO.bottom - bA.bottom);
+    tryY(bO.cy - bA.cy);
+  }
+
+  return {
+    x: bestDx ? Math.round(cab.x + (bestDx as { delta: number }).delta) : snapVal(cab.x),
+    y: bestDy ? Math.round(cab.y + (bestDy as { delta: number }).delta) : snapVal(cab.y),
+  };
+}
+
+function pushOutOfOverlaps(
+  cab: CabinetRow,
+  others: CabinetRow[]
+): { x: number; y: number; hasOverlap: boolean } {
+  let cur = { ...cab };
+  const c0 = clampRotatedCabinet(cur, cur.x, cur.y);
+  cur.x = c0.x;
+  cur.y = c0.y;
+
+  for (let iter = 0; iter < 8; iter++) {
+    const bA = getCabBounds(cur);
+    let worstOther: CabBounds | null = null;
+    let worstArea = 0;
+    for (const o of others) {
+      const bO = getCabBounds(o);
+      const area = getOverlapArea(bA, bO);
+      if (area > worstArea) {
+        worstArea = area;
+        worstOther = bO;
+      }
+    }
+    if (!worstOther) {
+      return { x: cur.x, y: cur.y, hasOverlap: false };
+    }
+
+    const pushes = [
+      { dx: worstOther.left - bA.right, dy: 0 },
+      { dx: worstOther.right - bA.left, dy: 0 },
+      { dx: 0, dy: worstOther.top - bA.bottom },
+      { dx: 0, dy: worstOther.bottom - bA.top },
+    ].map((m) => {
+      const nextX = Math.round(cur.x + m.dx);
+      const nextY = Math.round(cur.y + m.dy);
+      const cl = clampRotatedCabinet(cur, nextX, nextY);
+      const wallBlocked = Math.abs(cl.x - nextX) > 1 || Math.abs(cl.y - nextY) > 1;
+      const dist = Math.hypot(m.dx, m.dy);
+      const overlapAfter = totalOverlapWithOthers({ ...cur, x: cl.x, y: cl.y }, others);
+      return { x: cl.x, y: cl.y, score: dist + (wallBlocked ? 10000 : 0) + overlapAfter * 0.1 };
+    });
+    pushes.sort((a, b) => a.score - b.score);
+    if (pushes[0].x === cur.x && pushes[0].y === cur.y) break;
+    cur = { ...cur, x: pushes[0].x, y: pushes[0].y };
+  }
+
+  return {
+    x: cur.x,
+    y: cur.y,
+    hasOverlap: totalOverlapWithOthers(cur, others) > 0,
+  };
+}
+
+function findFreeSpotInRoom(
+  cab: { width: number; height: number; rotation?: number },
+  others: CabinetRow[],
+  startX = 40,
+  startY = 40
+): { x: number; y: number } {
+  const b = getCabBounds({ ...cab, x: 0, y: 0 });
+  const step = 20;
+  for (let y = ROOM_MIN_Y + 5; y + b.effH <= ROOM_MAX_Y; y += step) {
+    for (let x = ROOM_MIN_X + 5; x + b.effW <= ROOM_MAX_X; x += step) {
+      const candX = Math.round(x + b.effW / 2 - cab.width / 2);
+      const candY = Math.round(y + b.effH / 2 - cab.height / 2);
+      const cl = clampRotatedCabinet(cab, candX, candY);
+      if (totalOverlapWithOthers({ ...cab, x: cl.x, y: cl.y }, others) <= 0.5) {
+        return cl;
+      }
+    }
+  }
+  return clampRotatedCabinet(cab, startX, startY);
+}
+
+function resolveNonOverlappingMove(
+  candidate: CabinetRow,
+  prevCab: CabinetRow,
+  others: CabinetRow[]
+): { x: number; y: number } {
+  const clamped = clampRotatedCabinet(candidate, candidate.x, candidate.y);
+  const candClamped = { ...candidate, x: clamped.x, y: clamped.y };
+  if (totalOverlapWithOthers(candClamped, others) <= 0) {
+    return clamped;
+  }
+
+  const prevOverlap = totalOverlapWithOthers(prevCab, others);
+  const pushed = pushOutOfOverlaps(candClamped, others);
+  if (!pushed.hasOverlap) {
+    return { x: pushed.x, y: pushed.y };
+  }
+
+  if (prevOverlap <= 0) {
+    const slideX = pushOutOfOverlaps({ ...candClamped, y: prevCab.y }, others);
+    if (!slideX.hasOverlap) return { x: slideX.x, y: slideX.y };
+    const slideY = pushOutOfOverlaps({ ...candClamped, x: prevCab.x }, others);
+    if (!slideY.hasOverlap) return { x: slideY.x, y: slideY.y };
+    return { x: prevCab.x, y: prevCab.y };
+  }
+
+  // If prevCab already overlapped from an older layout, allow freeing or reducing overlap
+  const rawArea = totalOverlapWithOthers(candClamped, others);
+  const pushedArea = totalOverlapWithOthers({ ...candClamped, x: pushed.x, y: pushed.y }, others);
+  if (pushedArea < rawArea && pushedArea <= prevOverlap) {
+    return { x: pushed.x, y: pushed.y };
+  }
+  return clamped;
+}
+
+function collectSnapGuides(
+  cab: { x: number; y: number; width: number; height: number; rotation?: number },
+  others: CabinetRow[]
+): { x: number[]; y: number[] } {
+  const bA = getCabBounds(cab);
+  const xSet = new Set<number>();
+  const ySet = new Set<number>();
+  const TOL = 0.8;
+
+  if (Math.abs(bA.left - ROOM_MIN_X) <= TOL) xSet.add(ROOM_MIN_X);
+  if (Math.abs(bA.right - ROOM_MAX_X) <= TOL) xSet.add(ROOM_MAX_X);
+  if (Math.abs(bA.top - ROOM_MIN_Y) <= TOL) ySet.add(ROOM_MIN_Y);
+  if (Math.abs(bA.bottom - ROOM_MAX_Y) <= TOL) ySet.add(ROOM_MAX_Y);
+
+  for (const o of others) {
+    const bO = getCabBounds(o);
+    if (Math.abs(bA.left - bO.right) <= TOL || Math.abs(bA.right - bO.right) <= TOL) xSet.add(bO.right);
+    if (Math.abs(bA.right - bO.left) <= TOL || Math.abs(bA.left - bO.left) <= TOL) xSet.add(bO.left);
+    if (Math.abs(bA.cx - bO.cx) <= TOL) xSet.add(bO.cx);
+
+    if (Math.abs(bA.top - bO.bottom) <= TOL || Math.abs(bA.bottom - bO.bottom) <= TOL) ySet.add(bO.bottom);
+    if (Math.abs(bA.bottom - bO.top) <= TOL || Math.abs(bA.top - bO.top) <= TOL) ySet.add(bO.top);
+    if (Math.abs(bA.cy - bO.cy) <= TOL) ySet.add(bO.cy);
+  }
+  return { x: Array.from(xSet), y: Array.from(ySet) };
 }
 
 function getHandleCursor(dir: ResizeDir, rotation: number): string {
@@ -86,6 +323,8 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
   const [reportError, setReportError] = useState<string | null>(null);
   const [shelvingReport, setShelvingReport] = useState<ShelvingReport | null>(null);
   const [smartOpen, setSmartOpen] = useState(false);
+  const [snapEnabled, setSnapEnabled] = useState(true);
+  const [snapGuides, setSnapGuides] = useState<{ x: number[]; y: number[] }>({ x: [], y: [] });
 
   const loadShelvingReport = async () => {
     setReportLoading(true);
@@ -104,9 +343,9 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
 
   const svgRef = useRef<SVGSVGElement>(null);
   const dragRef = useRef<
-    | { type: "cabinet"; id: number; offsetX: number; offsetY: number }
+    | { type: "cabinet"; id: number; offsetX: number; offsetY: number; lastValidCab: CabinetRow }
     | { type: "entrance" }
-    | { type: "resize"; id: number; dir: ResizeDir; startPt: { x: number; y: number }; startCab: CabinetRow }
+    | { type: "resize"; id: number; dir: ResizeDir; startPt: { x: number; y: number }; startCab: CabinetRow; lastValidCab: CabinetRow }
     | null
   >(null);
 
@@ -162,6 +401,7 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
       id: cab.id,
       offsetX: pt.x - cab.x,
       offsetY: pt.y - cab.y,
+      lastValidCab: { ...cab },
     };
     setSelectedId(cab.id);
   };
@@ -176,6 +416,7 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
       dir,
       startPt: pt,
       startCab: { ...cab },
+      lastValidCab: { ...cab },
     };
     setSelectedId(cab.id);
   };
@@ -267,36 +508,104 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
         y: newCy - newHeight / 2,
       };
       const clamped = clampRotatedCabinet(candidate, candidate.x, candidate.y);
+      const nextCand: CabinetRow = { ...candidate, x: clamped.x, y: clamped.y };
+      const others = draftCabinets.filter((c) => c.id !== id);
+      const startOverlap = totalOverlapWithOthers(startCab, others);
+      const nextOverlap = totalOverlapWithOthers(nextCand, others);
+
+      if (snapEnabled && startOverlap <= 0 && nextOverlap > 0) {
+        setSnapGuides(collectSnapGuides(dragRef.current.lastValidCab, others));
+        return;
+      }
+
+      dragRef.current.lastValidCab = nextCand;
+      setSnapGuides(snapEnabled ? collectSnapGuides(nextCand, others) : { x: [], y: [] });
       setDraftCabinets((prev) =>
-        prev.map((c) => (c.id === id ? { ...candidate, x: clamped.x, y: clamped.y } : c))
+        prev.map((c) => (c.id === id ? nextCand : c))
       );
       return;
     }
 
-    const { id, offsetX, offsetY } = dragRef.current;
+    const dragInfo = dragRef.current;
+    const { id, offsetX, offsetY, lastValidCab } = dragInfo;
+    const others = draftCabinets.filter((c) => c.id !== id);
+    const currentCab = draftCabinets.find((c) => c.id === id);
+    if (!currentCab) return;
+
+    const rawCandidate: CabinetRow = {
+      ...currentCab,
+      x: pt.x - offsetX,
+      y: pt.y - offsetY,
+    };
+
+    let finalPos: { x: number; y: number };
+    if (snapEnabled) {
+      const snapped = applyMagneticSnap(rawCandidate, others);
+      finalPos = resolveNonOverlappingMove(
+        { ...currentCab, x: snapped.x, y: snapped.y },
+        lastValidCab,
+        others
+      );
+      const finalCab = { ...currentCab, x: finalPos.x, y: finalPos.y };
+      setSnapGuides(collectSnapGuides(finalCab, others));
+      dragInfo.lastValidCab = finalCab;
+    } else {
+      finalPos = clampRotatedCabinet(currentCab, snapVal(rawCandidate.x), snapVal(rawCandidate.y));
+      setSnapGuides({ x: [], y: [] });
+      dragInfo.lastValidCab = { ...currentCab, x: finalPos.x, y: finalPos.y };
+    }
+
     setDraftCabinets((prev) =>
-      prev.map((c) => {
-        if (c.id !== id) return c;
-        const clamped = clampRotatedCabinet(c, snapVal(pt.x - offsetX), snapVal(pt.y - offsetY));
-        return { ...c, x: clamped.x, y: clamped.y };
-      })
+      prev.map((c) => (c.id === id ? { ...c, x: finalPos.x, y: finalPos.y } : c))
     );
   };
 
   const handlePointerUp = () => {
     dragRef.current = null;
+    setSnapGuides({ x: [], y: [] });
   };
 
   const updateSelectedField = (patch: Partial<CabinetRow>) => {
     if (!selectedCab) return;
-    setDraftCabinets((prev) =>
-      prev.map((c) => {
+    setDraftCabinets((prev) => {
+      const others = prev.filter((c) => c.id !== selectedCab.id);
+      return prev.map((c) => {
         if (c.id !== selectedCab.id) return c;
         const merged = { ...c, ...patch };
         const clamped = clampRotatedCabinet(merged, merged.x, merged.y);
+        if (
+          snapEnabled &&
+          ("rotation" in patch || "width" in patch || "height" in patch || "width_cm" in patch || "depth_cm" in patch)
+        ) {
+          const resolved = resolveNonOverlappingMove({ ...merged, x: clamped.x, y: clamped.y }, c, others);
+          return { ...merged, x: resolved.x, y: resolved.y };
+        }
         return { ...merged, x: clamped.x, y: clamped.y };
-      })
-    );
+      });
+    });
+  };
+
+  const handleResolveAllOverlaps = () => {
+    setDraftCabinets((prev) => {
+      const placed: CabinetRow[] = [];
+      for (const c of prev) {
+        const cl = clampRotatedCabinet(c, c.x, c.y);
+        const cand = { ...c, x: cl.x, y: cl.y };
+        if (totalOverlapWithOthers(cand, placed) <= 0.5) {
+          placed.push(cand);
+          continue;
+        }
+        const pushed = pushOutOfOverlaps(cand, placed);
+        if (!pushed.hasOverlap) {
+          placed.push({ ...cand, x: pushed.x, y: pushed.y });
+        } else {
+          const free = findFreeSpotInRoom(cand, placed, cand.x, cand.y);
+          placed.push({ ...cand, x: free.x, y: free.y });
+        }
+      }
+      return placed;
+    });
+    setNotice("הארונות סודרו מחדש ללא חפיפה — לחץ 'שמור סידור מפה' לשמירה.");
   };
 
   const handleSaveLayout = async () => {
@@ -344,8 +653,13 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
           ...(() => {
             const rawW = Math.max(40, Math.min(420, Math.round((Number(newWidthCm) || 120) * pxPerCmX)));
             const rawH = Math.max(30, Math.min(300, Math.round((Number(newDepthCm) || 40) * pxPerCmY)));
-            const clampedNew = clampRotatedCabinet({ width: rawW, height: rawH, rotation: 0 } as any, 60 + ((draftCabinets.length * 30) % 400), 240);
-            return { x: clampedNew.x, y: clampedNew.y };
+            const freeSpot = findFreeSpotInRoom(
+              { width: rawW, height: rawH, rotation: 0 },
+              draftCabinets,
+              60 + ((draftCabinets.length * 30) % 400),
+              240
+            );
+            return { x: freeSpot.x, y: freeSpot.y };
           })(),
           width: Math.max(40, Math.min(420, Math.round((Number(newWidthCm) || 120) * pxPerCmX))),
           height: Math.max(30, Math.min(300, Math.round((Number(newDepthCm) || 40) * pxPerCmY))),
@@ -377,17 +691,30 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
   };
 
   const handleScaleMapFromCm = () => {
-    setDraftCabinets((prev) =>
-      prev.map((c) => {
+    setDraftCabinets((prev) => {
+      const placed: CabinetRow[] = [];
+      for (const c of prev) {
         const wCm = Number(c.width_cm) > 0 ? Number(c.width_cm) : Math.round(c.width / pxPerCmX);
         const dCm = Number(c.depth_cm) > 0 ? Number(c.depth_cm) : Math.round(c.height / pxPerCmY);
         const wPx = Math.max(40, Math.min(420, Math.round(wCm * pxPerCmX)));
         const hPx = Math.max(30, Math.min(300, Math.round(dCm * pxPerCmY)));
         const merged = { ...c, width_cm: wCm, depth_cm: dCm, width: wPx, height: hPx };
         const clamped = clampRotatedCabinet(merged, merged.x, merged.y);
-        return { ...merged, x: clamped.x, y: clamped.y };
-      })
-    );
+        const cand = { ...merged, x: clamped.x, y: clamped.y };
+        if (snapEnabled && totalOverlapWithOthers(cand, placed) > 0.5) {
+          const pushed = pushOutOfOverlaps(cand, placed);
+          if (!pushed.hasOverlap) {
+            placed.push({ ...cand, x: pushed.x, y: pushed.y });
+          } else {
+            const free = findFreeSpotInRoom(cand, placed, cand.x, cand.y);
+            placed.push({ ...cand, x: free.x, y: free.y });
+          }
+        } else {
+          placed.push(cand);
+        }
+      }
+      return placed;
+    });
     setNotice("מידות הארונות במפה הותאמו לקנה המידה של החדר.");
   };
 
@@ -484,6 +811,15 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
     }, 0) * 100
   ) / 100;
   const aisleFreePct = roomAreaSqm > 0 ? Math.max(0, Math.round(((roomAreaSqm - cabFootprintSqm) / roomAreaSqm) * 100)) : 0;
+  const overlappingIds = new Set<number>();
+  for (let i = 0; i < draftCabinets.length; i++) {
+    for (let j = i + 1; j < draftCabinets.length; j++) {
+      if (getOverlapArea(getCabBounds(draftCabinets[i]), getCabBounds(draftCabinets[j])) > 0) {
+        overlappingIds.add(draftCabinets[i].id);
+        overlappingIds.add(draftCabinets[j].id);
+      }
+    }
+  }
 
   return (
     <div className="space-y-5">
@@ -572,14 +908,32 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
             <span>מעברים פנויים: <strong className="text-[var(--otzar-accent)]">{aisleFreePct}%</strong></span>
           </div>
         </div>
-        <button
-          type="button"
-          onClick={handleScaleMapFromCm}
-          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] hover:bg-[var(--otzar-surface)] cursor-pointer"
-        >
-          <Ruler className="w-3.5 h-3.5 text-[var(--otzar-accent)]" />
-          סנכרן מידות ארונות (ס״מ) לקנה מידה
-        </button>
+        <div className="flex flex-wrap items-center gap-2.5">
+          <label
+            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border cursor-pointer select-none ${
+              snapEnabled
+                ? "border-[var(--otzar-accent)] bg-[var(--otzar-accent)]/10 text-[var(--otzar-accent)]"
+                : "border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] text-[var(--otzar-text-muted)]"
+            }`}
+          >
+            <input
+              type="checkbox"
+              checked={snapEnabled}
+              onChange={(e) => setSnapEnabled(e.target.checked)}
+              className="rounded accent-[var(--otzar-accent)]"
+            />
+            <Magnet className="w-3.5 h-3.5" />
+            <span>מגנט והפרדת ארונות (SNAP)</span>
+          </label>
+          <button
+            type="button"
+            onClick={handleScaleMapFromCm}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] hover:bg-[var(--otzar-surface)] cursor-pointer"
+          >
+            <Ruler className="w-3.5 h-3.5 text-[var(--otzar-accent)]" />
+            סנכרן מידות ארונות (ס״מ) לקנה מידה
+          </button>
+        </div>
       </div>
 
       {/* Add new cabinet bar */}
@@ -652,6 +1006,22 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
         </div>
       </form>
 
+      {overlappingIds.size > 0 && (
+        <div className="p-3 rounded-xl border border-amber-300 bg-amber-50 dark:bg-amber-950/30 dark:border-amber-800 text-amber-900 dark:text-amber-200 text-xs flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2 font-medium">
+            <AlertTriangle className="w-4 h-4 shrink-0 text-amber-600" />
+            <span>זוהתה חפיפה בין {overlappingIds.size} ארונות במפה הקיימת. גרור ארון להפרדה או לחץ לסידור אוטומטי:</span>
+          </div>
+          <button
+            type="button"
+            onClick={handleResolveAllOverlaps}
+            className="px-3 py-1 rounded-md text-xs font-bold bg-amber-600 text-white hover:bg-amber-700 cursor-pointer"
+          >
+            הפרד חפיפות אוטומטית
+          </button>
+        </div>
+      )}
+
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-5 items-start">
         {/* Interactive Drag & Resize Canvas */}
         <div className="lg:col-span-2 rounded-xl border border-[var(--otzar-border-muted)] bg-[var(--otzar-surface-alt)] overflow-hidden select-none">
@@ -675,6 +1045,7 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
 
             {draftCabinets.map((cab) => {
               const isSel = cab.id === selectedId;
+              const isOverlapping = overlappingIds.has(cab.id);
               const cx = cab.x + cab.width / 2;
               const cy = cab.y + cab.height / 2;
               const transform = cab.rotation ? `rotate(${cab.rotation} ${cx} ${cy})` : undefined;
@@ -690,9 +1061,9 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
                       width={cab.width}
                       height={cab.height}
                       rx="6"
-                      fill={isSel ? "var(--otzar-accent)" : "var(--otzar-bg)"}
-                      stroke={isSel ? "var(--otzar-accent-hover)" : "var(--otzar-text-muted)"}
-                      strokeWidth={isSel ? "2.5" : "1.5"}
+                      fill={isSel ? "var(--otzar-accent)" : isOverlapping ? "#fef2f2" : "var(--otzar-bg)"}
+                      stroke={isOverlapping ? "#dc2626" : isSel ? "var(--otzar-accent-hover)" : "var(--otzar-text-muted)"}
+                      strokeWidth={isOverlapping || isSel ? "2.5" : "1.5"}
                     />
                     <text
                       x={cx}
@@ -792,6 +1163,36 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
                 </g>
               );
             })}
+
+            {/* Magnetic SNAP alignment guide lines */}
+            {snapGuides.x.map((gx) => (
+              <line
+                key={`gx-${gx}`}
+                x1={gx}
+                y1={ROOM_MIN_Y}
+                x2={gx}
+                y2={ROOM_MAX_Y}
+                stroke="var(--otzar-accent)"
+                strokeWidth="1.2"
+                strokeDasharray="4 3"
+                strokeOpacity="0.85"
+                className="pointer-events-none"
+              />
+            ))}
+            {snapGuides.y.map((gy) => (
+              <line
+                key={`gy-${gy}`}
+                x1={ROOM_MIN_X}
+                y1={gy}
+                x2={ROOM_MAX_X}
+                y2={gy}
+                stroke="var(--otzar-accent)"
+                strokeWidth="1.2"
+                strokeDasharray="4 3"
+                strokeOpacity="0.85"
+                className="pointer-events-none"
+              />
+            ))}
           </svg>
         </div>
 
