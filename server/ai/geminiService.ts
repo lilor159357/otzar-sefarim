@@ -1,6 +1,11 @@
 import crypto from "crypto";
 import { GoogleGenAI, ThinkingLevel, Type } from "@google/genai";
 import type { DbClient } from "../db/adapter.ts";
+import {
+  normalizeCoverageRange,
+  shouldSuppressSingleVolumeLabel,
+  type CoverageUnit,
+} from "../../shared/torah/volumeAndCoverage.ts";
 
 export interface ExtractedBookMetadata {
   title: string;
@@ -868,7 +873,7 @@ export async function analyzeBookCoverImage(
   }
 
   const systemPrompt =
-    "אתה ספרן תורני מומחה בישיבה. תפקידך לפענח צילומי שערי ספרים תורניים (כולל אותיות מרובעות, כתב רש״י וראשי תיבות תורניים כמו שו״ע, רמב״ם, משנ״ב, ש״ס, שו״ת). אם מצורפות מספר תמונות, כולן דפים שונים של אותו ספר (למשל שער ראשי, גב שער עם שנת הוצאה ומהדורה, כריכה, שדרה או תוכן עניינים) — מזג את הפרטים מכל התמונות לרשומה אחת מלאה ומדויקת. הפרד בין שם הסט הגדול (set_name), תת-הסדרה/חלק ראשי/מסכת בתוך הסט אם יש היררכיה (sub_series, כגון 'מסכת שבת' או 'אורח חיים'), סימון הכרך המדויק כפי שמופיע על הספר גם אם בכוכביות/ספרות רומיות/אותיות (volume, למשל 'חלק א׳', '**', 'II'), המספר הכללי של הכרך בסדרה הגדולה אם צוין (set_global_number, מספר שלם או 0 אם לא ידוע), וטווח הסימנים/דפים/פרקים שהכרך מכסה אם מופיע על השער או בתוכן (coverage_range, כגון 'סימנים א׳–קנ״ב' או 'דפים ב׳–ל״ו'). כללי דיוק מחייבים לסטים ולמקראות גדולות: (1) אם לכרך יש שם תוכן מפורש (כגון בראשית, שמות, ויקרא, במדבר, דברים, יהושע, ישעיהו, תהלים, סדר מועד, מסכת ברכות, או שם פירוש/חטיבה) — אסור לקצר אותו לאות סתמית (א׳, ב׳) בלבד; חובה לשבץ את השם המפורש בשדה volume או sub_series (למשל sub_series: 'בראשית' או volume: 'בראשית / חלק א׳'). (2) חלץ תמיד גם גודל/פורמט ספר (format_size: כיס / רגיל / גדול / מוגדל), שנת הוצאה (pub_year) וטווח סימנים/דפים/פרשות (coverage_range) כשניתן לזהותם. (3) בידול מהדורות בסטים: כאשר זהו סט/ספר קלאסי ממהדורות מרובות (כגון מקראות גדולות, משנה ברורה, שולחן ערוך, תלמוד בבלי, רמב״ם, זוהר, טור) ומופיע על השער או השדרה שם מהדורה או הוצאה/מכון מובהק (כגון 'המאור', 'וזאת התורה', 'דרשו', 'וגשל', 'עוז והדר', 'פרידמן'), שלב את שם המהדורה/ההוצאה בסוגריים בתוך set_name (למשל 'מקראות גדולות (המאור)', 'משנה ברורה (דרשו)'). (4) עקביות מבנית בש״ס ובסטים מרובי תתי-סדרות: בש״ס/משנה כתוב תמיד את שם המסכת באופן אחיד ב-sub_series (כגון 'מסכת שבת', 'מסכת עירובין', ולא לערבב 'סדר מועד' או 'סדר מועד - מסכת מגילה'). אל תחזור על שם המסכת בתוך volume כאשר הוא כבר ב-sub_series (למשל כתוב volume: 'כרך ב׳' ולא 'מסכת יומא - כרך ב׳'). השתמש בגרש עברי אחיד (כרך א׳, חלק ב׳). החזר JSON מדויק בלבד בעברית." + buildExistingSetConsistencyPrompt(options?.existingSetContext);
+    "אתה ספרן תורני מומחה בישיבה. תפקידך לפענח צילומי שערי ספרים תורניים (כולל אותיות מרובעות, כתב רש״י וראשי תיבות תורניים כמו שו״ע, רמב״ם, משנ״ב, ש״ס, שו״ת). אם מצורפות מספר תמונות, כולן דפים שונים של אותו ספר (למשל שער ראשי, גב שער עם שנת הוצאה ומהדורה, כריכה, שדרה או תוכן עניינים) — מזג את הפרטים מכל התמונות לרשומה אחת מלאה ומדויקת. הפרד בין שם הסט הגדול (set_name), תת-הסדרה/חלק ראשי/מסכת בתוך הסט אם יש היררכיה (sub_series, כגון 'מסכת שבת' או 'אורח חיים'), סימון הכרך המדויק כפי שמופיע על הספר גם אם בכוכביות/ספרות רומיות/אותיות (volume, למשל 'חלק א׳', '**', 'II'), המספר הכללי של הכרך בסדרה הגדולה אם צוין (set_global_number, מספר שלם או 0 אם לא ידוע), וטווח הסימנים/דפים/פרקים שהכרך מכסה אם מופיע על השער או בתוכן (coverage_range, כגון 'סימנים א׳–קנ״ב' או 'דפים ב׳–ל״ו'). כללי דיוק מחייבים לסטים ולמקראות גדולות: (1) אם לכרך יש שם תוכן מפורש (כגון בראשית, שמות, ויקרא, במדבר, דברים, יהושע, ישעיהו, תהלים, סדר מועד, מסכת ברכות, או שם פירוש/חטיבה) — אסור לקצר אותו לאות סתמית (א׳, ב׳) בלבד; חובה לשבץ את השם המפורש בשדה volume או sub_series (למשל sub_series: 'בראשית' או volume: 'בראשית / חלק א׳'). (2) חלץ תמיד גם גודל/פורמט ספר (format_size: כיס / רגיל / גדול / מוגדל), שנת הוצאה (pub_year) וטווח סימנים/דפים/פרשות (coverage_range) כשניתן לזהותם. (3) בידול מהדורות בסטים: כאשר זהו סט/ספר קלאסי ממהדורות מרובות (כגון מקראות גדולות, משנה ברורה, שולחן ערוך, תלמוד בבלי, רמב״ם, זוהר, טור) ומופיע על השער או השדרה שם מהדורה או הוצאה/מכון מובהק (כגון 'המאור', 'וזאת התורה', 'דרשו', 'וגשל', 'עוז והדר', 'פרידמן'), שלב את שם המהדורה/ההוצאה בסוגריים בתוך set_name (למשל 'מקראות גדולות (המאור)', 'משנה ברורה (דרשו)'). (4) עקביות מבנית בש״ס ובסטים מרובי תתי-סדרות: בש״ס/משנה כתוב תמיד את שם המסכת באופן אחיד ב-sub_series (כגון 'מסכת שבת', 'מסכת עירובין', ולא לערבב 'סדר מועד' או 'סדר מועד - מסכת מגילה'). אל תחזור על שם המסכת בתוך volume כאשר הוא כבר ב-sub_series (למשל כתוב volume: 'כרך ב׳' ולא 'מסכת יומא - כרך ב׳'). השתמש בגרש עברי אחיד (כרך א׳, חלק ב׳). (5) כלל כרך יחיד ללא דפים/סימנים: אם מסכת, חומש או יחידה בתוך סט (כגון מסכת תענית/ביצה בש״ס או חומש בודד במקראות גדולות) עומדת בכרך אחד בלבד ללא חלוקת דפים/סימנים (coverage_range ריק), השאר את volume ריק ('') ואל תכתוב 'כרך א׳', 'חלק א׳', 'חלק ב׳' או 'כרך מסכת...'; ציין sub_series ואת set_global_number למיקום בסדרה (כגון 1 לבראשית). (6) נרמל coverage_range לפורמט אחיד כגון 'סימנים א׳–ל״ד' או 'דפים ב׳–ל״ו'. החזר JSON מדויק בלבד בעברית." + buildExistingSetConsistencyPrompt(options?.existingSetContext);
 
   const baseUserPrompt =
     "פענח את דפי הספר המצולמים וחלץ: title, set_name, sub_series, set_global_number, volume, coverage_range, author, publisher, pub_year, edition, category, notes, ו-5 עד 10 tags. אם שדה לא מופיע באף תמונה השאר מחרוזת ריקה (או 0 עבור set_global_number).";
@@ -942,7 +947,7 @@ export async function analyzeBookCoverImage(
     set_name: String(parsed.set_name || "").trim(),
     sub_series: String(parsed.sub_series || "").trim(),
     set_global_number: Number.isFinite(rawGlobalNum) && rawGlobalNum > 0 ? Math.round(rawGlobalNum) : null,
-    coverage_range: String(parsed.coverage_range || "").trim(),
+    coverage_range: normalizeCoverageRange(String(parsed.coverage_range || "").trim(), options?.existingSetContext?.dominantCoverageUnit || "any"),
     author: String(parsed.author || "").trim(),
     volume: String(parsed.volume || "").trim(),
     publisher: String(parsed.publisher || "").trim(),
@@ -965,7 +970,7 @@ export interface ExistingSetSample {
 }
 
 export interface ExistingSetContext {
-  set_name?: string;
+  set_name: string;
   author?: string;
   publisher?: string;
   pub_year?: string;
@@ -974,7 +979,10 @@ export interface ExistingSetContext {
   tags?: string[];
   cabinet_id?: number | null;
   shelf_number?: number | null;
-  samplePatterns?: ExistingSetSample[];
+  dominantCoverageUnit?: CoverageUnit;
+  existingBooksSnapshot?: Array<{ sub_series?: string; volume?: string; coverage_range?: string; set_global_number?: number | null }>;
+  missingSlots?: Array<{ subSeries: string; suggestedVolume: string; suggestedGlobalNumber: number | null; index: number }>;
+  samplePatterns?: Array<{ title?: string; sub_series?: string; volume?: string; coverage_range?: string }>;
 }
 
 function buildExistingSetConsistencyPrompt(ctx?: ExistingSetContext): string {
@@ -984,10 +992,20 @@ function buildExistingSetConsistencyPrompt(ctx?: ExistingSetContext): string {
   if (ctx.author) lines.push(`- מחבר קיים: ${ctx.author}`);
   if (ctx.publisher) lines.push(`- הוצאה קיימת: ${ctx.publisher}`);
   if (ctx.edition) lines.push(`- מהדורה קיימת: ${ctx.edition}`);
+  if (ctx.dominantCoverageUnit && ctx.dominantCoverageUnit !== "any") {
+    const uName = ctx.dominantCoverageUnit === "siman" ? "סימנים א׳–ל״ד" : ctx.dominantCoverageUnit === "daf" ? "דפים ב׳–ל״ו" : ctx.dominantCoverageUnit === "perek" ? "פרקים א׳–י׳" : "עמודים א׳–כ׳";
+    lines.push(`- פורמט טווח קיים בסט (חובה לשמור עליו בכל הספרים): ${uName} (אותיות עבריות עם גרש/גרשיים ומקף –).`);
+  }
+  if (Array.isArray(ctx.missingSlots) && ctx.missingSlots.length > 0) {
+    lines.push("- כרכים חסרים שזוהו בסדרה (חורים ריקים להשלמה בסריקה זו — אם הספר הנסרק תואם לאחד מהם, התאם במדויק את sub_series, volume ו-set_global_number):");
+    for (const ms of ctx.missingSlots.slice(0, 14)) {
+      lines.push(`  • חסר: sub_series="${ms.subSeries}" | volume="${ms.suggestedVolume}"${ms.suggestedGlobalNumber ? ` | set_global_number=${ms.suggestedGlobalNumber}` : ""}`);
+    }
+  }
   if (Array.isArray(ctx.samplePatterns) && ctx.samplePatterns.length > 0) {
     lines.push("- דוגמאות קיימות מתוך הסט במאגר (חובה לשמור על מוסכמת שמות זהה לחלוטין ב-title, sub_series ו-volume):");
     for (const s of ctx.samplePatterns.slice(0, 5)) {
-      lines.push(`  • title: "${s.title || ""}" | sub_series: "${s.sub_series || ""}" | volume: "${s.volume || ""}"`);
+      lines.push(`  • title: "${s.title || ""}" | sub_series: "${s.sub_series || ""}" | volume: "${s.volume || ""}"${s.coverage_range ? ` | coverage_range: "${s.coverage_range}"` : ""}`);
     }
     lines.push("- אל תחליף פורמט קיים (למשל אם הקיים הוא sub_series: 'מסכת שבת' ו-volume: 'כרך א׳', שמור בדיוק על אותה תבנית ואל תכניס שם סדר או כפילות שם מסכת ב-volume).");
   }
@@ -1030,8 +1048,8 @@ export async function analyzeShelfSetImages(
   }
   const systemPrompt =
     titleParts.length === 0 && existingSetContext?.set_name
-      ? `אתה ספרן תורני מומחה בישיבה. לפניך ${spineImageParts.length} תמונות של שדרות כרכים נוספים מהסט הקיים "${existingSetContext.set_name}" (מחבר: ${existingSetContext.author || "לא צוין"}, הוצאה: ${existingSetContext.publisher || "לא צוינה"}). פרטי הסט הכלליים כבר שמורים במאגר ואין תמונת שער מצורפת.\nתפקידך:\n1. השאר את פרטי הסט הכלליים כפי שסופקו (או השלם קטגוריה ותגיות אם חסר).\n2. זהה בעיון מתוך שדרות הספרים שעל המדף לפי הסדר מהמדף את רשימת כל הכרכים והחלקים המופיעים בתמונות אלו (volumes). לכל כרך ציין: volume (הסימון על השדרה גם אם *, **, II, א׳-1, ברכות), sub_series (אם יש תת-סדרה/מסכת, כגון 'מסכת שבת' או 'אורח חיים'), set_global_number (מספר סידורי כללי בסדרה אם מופיע על השדרה, אחרת 0), ו-coverage_range (טווח סימנים/דפים/פרקים אם נראה על השדרה). אם כרך מופיע פעמיים, ציין copiesCount: 2.\n3. איסור קיצור שמות תוכן מפורשים (מקראות גדולות/ש״ס): אם לכרכים יש שמות תוכן מפורשים (בראשית, שמות, ויקרא, במדבר, דברים, מסכת ברכות, שבת וכו׳), אסור לקצרם לאותיות סתמיות (א׳, ב׳) בלבד — חובה לשבץ את השם המפורש בשדה volume או sub_series (למשל sub_series: 'בראשית', volume: 'בראשית / חלק א׳'). לכל כרך השלם גם format_size (גדול/רגיל/כיס/מוגדל) ו-pub_year אם נראה.\n4. בידול מהדורות בסטים: בסטים קלאסיים מרובי מהדורות (משנה ברורה, מקראות גדולות, שו״ע, רמב״ם, ש״ס וכו׳) שלב את שם המהדורה/ההוצאה בסוגריים בתוך set_name (למשל 'משנה ברורה (דרשו)') כשניתן לזהותו.\n5. עקביות מבנית: שמור על מוסכמה אחידה ל-sub_series (כגון 'מסכת שבת' ולא ערבוב עם 'סדר מועד - מסכת ...') ואל תכפיל את שם תת-הסדרה בתוך volume.` + buildExistingSetConsistencyPrompt(existingSetContext)
-      : `אתה ספרן תורני מומחה בישיבה. לפניך ${allParts.length} צילומים של סט ספרים: ${titleParts.length === 1 ? "התמונה הראשונה היא עמוד שער מייצג של הסט" : `${titleParts.length} התמונות הראשונות הן צילומי השער ופרטי המהדורה/ההוצאה של הסט (כגון עמוד שער ראשי, גב השער, דף הסכמות)`}, ושאר ${spineImageParts.length} התמונות הן צילום שדרות כרכי הסט העומדים על המדף בספרייה.\nתפקידך:\n1. מזג את המידע מכל תמונות השער והפרטים וחלץ את פרטי הסט הכלליים: שם הסט (set_name), שם המחבר/מפרש (author), הוצאה/מכון (publisher), שנת הוצאה (pub_year), מהדורה (edition), קטגוריה ראשית (category), הערות (notes) ותגיות (tags).\n2. זהה בעיון מתוך שדרות הספרים שעל המדף את רשימת כל הכרכים המופיעים לפי סדר עמידתם על המדף (volumes). לכל כרך חלץ גם sub_series (תת-סדרה/מסכת אם קיימת), set_global_number (מספר כרך כללי אם מצוין על השדרה, אחרת 0), ו-coverage_range (טווח סימנים/דפים אם כתוב על השדרה). אם כרך מסוים מופיע פעמיים על המדף, ציין copiesCount: 2.\n3. איסור קיצור שמות תוכן מפורשים (מקראות גדולות/ש״ס): אם לכרכים יש שמות תוכן מפורשים (בראשית, שמות, ויקרא, במדבר, דברים, מסכת ברכות, שבת וכו׳), אסור לקצרם לאותיות סתמיות (א׳, ב׳) בלבד — חובה לשבץ את השם המפורש בשדה volume או sub_series (למשל sub_series: 'בראשית', volume: 'בראשית / חלק א׳'). לכל כרך השלם גם format_size (גדול/רגיל/כיס/מוגדל) ו-pub_year אם נראה.\n4. בידול מהדורות בסטים: בסטים קלאסיים מרובי מהדורות (משנה ברורה, מקראות גדולות, שו״ע, רמב״ם, ש״ס וכו׳) שלב את שם המהדורה/ההוצאה בסוגריים בתוך set_name (למשל 'משנה ברורה (דרשו)') כשניתן לזהותו.\n5. עקביות מבנית: שמור על מוסכמה אחידה ל-sub_series (כגון 'מסכת שבת' ולא ערבוב עם 'סדר מועד - מסכת ...') ואל תכפיל את שם תת-הסדרה בתוך volume.` + buildExistingSetConsistencyPrompt(existingSetContext);
+      ? `אתה ספרן תורני מומחה בישיבה. לפניך ${spineImageParts.length} תמונות של שדרות כרכים נוספים מהסט הקיים "${existingSetContext.set_name}" (מחבר: ${existingSetContext.author || "לא צוין"}, הוצאה: ${existingSetContext.publisher || "לא צוינה"}). פרטי הסט הכלליים כבר שמורים במאגר ואין תמונת שער מצורפת.\nתפקידך:\n1. השאר את פרטי הסט הכלליים כפי שסופקו (או השלם קטגוריה ותגיות אם חסר).\n2. זהה בעיון מתוך שדרות הספרים שעל המדף לפי הסדר מהמדף את רשימת כל הכרכים והחלקים המופיעים בתמונות אלו (volumes). לכל כרך ציין: volume (הסימון על השדרה גם אם *, **, II, א׳-1, ברכות), sub_series (אם יש תת-סדרה/מסכת, כגון 'מסכת שבת' או 'אורח חיים'), set_global_number (מספר סידורי כללי בסדרה אם מופיע על השדרה, אחרת 0), ו-coverage_range (טווח סימנים/דפים/פרקים אם נראה על השדרה). אם כרך מופיע פעמיים, ציין copiesCount: 2.\n3. איסור קיצור שמות תוכן מפורשים (מקראות גדולות/ש״ס): אם לכרכים יש שמות תוכן מפורשים (בראשית, שמות, ויקרא, במדבר, דברים, מסכת ברכות, שבת וכו׳), אסור לקצרם לאותיות סתמיות (א׳, ב׳) בלבד — חובה לשבץ את השם המפורש בשדה volume או sub_series (למשל sub_series: 'בראשית', volume: 'בראשית / חלק א׳'). לכל כרך השלם גם format_size (גדול/רגיל/כיס/מוגדל) ו-pub_year אם נראה.\n4. בידול מהדורות בסטים: בסטים קלאסיים מרובי מהדורות (משנה ברורה, מקראות גדולות, שו״ע, רמב״ם, ש״ס וכו׳) שלב את שם המהדורה/ההוצאה בסוגריים בתוך set_name (למשל 'משנה ברורה (דרשו)') כשניתן לזהותו.\n5. עקביות מבנית: שמור על מוסכמה אחידה ל-sub_series (כגון 'מסכת שבת' ולא ערבוב עם 'סדר מועד - מסכת ...') ואל תכפיל את שם תת-הסדרה בתוך volume. (6) השמטה גורפת לספר יחיד ללא חלוקת דפים/סימנים: אם מסכת או חומש (כגון מסכת תענית/מגילה/ביצה או חומש בראשית/שמות במקראות גדולות) מגיעה בכרך אחד בלבד ללא טווח דפים/סימנים (coverage_range ריק), השאר את volume ריק ("") — אל תכתוב "כרך א׳", "חלק א׳", "חלק ב׳" או "כרך מסכת...", והשתמש ב-sub_series + set_global_number למיון. (7) נרמל coverage_range לפורמט אחיד (כגון "סימנים א׳–ל״ד" או "דפים ב׳–ל״ו").` + buildExistingSetConsistencyPrompt(existingSetContext)
+      : `אתה ספרן תורני מומחה בישיבה. לפניך ${allParts.length} צילומים של סט ספרים: ${titleParts.length === 1 ? "התמונה הראשונה היא עמוד שער מייצג של הסט" : `${titleParts.length} התמונות הראשונות הן צילומי השער ופרטי המהדורה/ההוצאה של הסט (כגון עמוד שער ראשי, גב השער, דף הסכמות)`}, ושאר ${spineImageParts.length} התמונות הן צילום שדרות כרכי הסט העומדים על המדף בספרייה.\nתפקידך:\n1. מזג את המידע מכל תמונות השער והפרטים וחלץ את פרטי הסט הכלליים: שם הסט (set_name), שם המחבר/מפרש (author), הוצאה/מכון (publisher), שנת הוצאה (pub_year), מהדורה (edition), קטגוריה ראשית (category), הערות (notes) ותגיות (tags).\n2. זהה בעיון מתוך שדרות הספרים שעל המדף את רשימת כל הכרכים המופיעים לפי סדר עמידתם על המדף (volumes). לכל כרך חלץ גם sub_series (תת-סדרה/מסכת אם קיימת), set_global_number (מספר כרך כללי אם מצוין על השדרה, אחרת 0), ו-coverage_range (טווח סימנים/דפים אם כתוב על השדרה). אם כרך מסוים מופיע פעמיים על המדף, ציין copiesCount: 2.\n3. איסור קיצור שמות תוכן מפורשים (מקראות גדולות/ש״ס): אם לכרכים יש שמות תוכן מפורשים (בראשית, שמות, ויקרא, במדבר, דברים, מסכת ברכות, שבת וכו׳), אסור לקצרם לאותיות סתמיות (א׳, ב׳) בלבד — חובה לשבץ את השם המפורש בשדה volume או sub_series (למשל sub_series: 'בראשית', volume: 'בראשית / חלק א׳'). לכל כרך השלם גם format_size (גדול/רגיל/כיס/מוגדל) ו-pub_year אם נראה.\n4. בידול מהדורות בסטים: בסטים קלאסיים מרובי מהדורות (משנה ברורה, מקראות גדולות, שו״ע, רמב״ם, ש״ס וכו׳) שלב את שם המהדורה/ההוצאה בסוגריים בתוך set_name (למשל 'משנה ברורה (דרשו)') כשניתן לזהותו.\n5. עקביות מבנית: שמור על מוסכמה אחידה ל-sub_series (כגון 'מסכת שבת' ולא ערבוב עם 'סדר מועד - מסכת ...') ואל תכפיל את שם תת-הסדרה בתוך volume. (6) השמטה גורפת לספר יחיד ללא חלוקת דפים/סימנים: אם מסכת או חומש (כגון מסכת תענית/מגילה/ביצה או חומש בראשית/שמות במקראות גדולות) מגיעה בכרך אחד בלבד ללא טווח דפים/סימנים (coverage_range ריק), השאר את volume ריק ("") — אל תכתוב "כרך א׳", "חלק א׳", "חלק ב׳" או "כרך מסכת...", והשתמש ב-sub_series + set_global_number למיון. (7) נרמל coverage_range לפורמט אחיד (כגון "סימנים א׳–ל״ד" או "דפים ב׳–ל״ו").` + buildExistingSetConsistencyPrompt(existingSetContext);
   const baseShelfPrompt =
     titleParts.length === 0 && existingSetContext?.set_name
       ? `פענח את תמונות השדרות של הסט הקיים "${existingSetContext.set_name}" וחלץ את רשימת כל הכרכים והעותקים שעל המדף בפורמט JSON מדויק.`
@@ -1099,6 +1117,24 @@ export async function analyzeShelfSetImages(
   const rawText = (response.text || "{}").trim();
   const parsed = JSON.parse(rawText) as Partial<ExtractedShelfSet>;
   const rawVolumes = Array.isArray(parsed.volumes) ? parsed.volumes : [];
+  const prefUnit: CoverageUnit = existingSetContext?.dominantCoverageUnit || "any";
+  const mappedVolumes = rawVolumes.map((v) => {
+    const gn = Number(v.set_global_number);
+    return {
+      volume: String(v.volume || "").trim(),
+      sub_series: v.sub_series ? String(v.sub_series).trim() : "",
+      set_global_number: Number.isFinite(gn) && gn > 0 ? Math.round(gn) : null,
+      coverage_range: normalizeCoverageRange(v.coverage_range ? String(v.coverage_range).trim() : "", prefUnit),
+      format_size: v.format_size ? String(v.format_size).trim() : undefined,
+      pub_year: v.pub_year ? String(v.pub_year).trim() : undefined,
+      copiesCount: Math.max(1, Number(v.copiesCount) || 1),
+      notes: v.notes ? String(v.notes).trim() : undefined,
+    };
+  });
+  const combinedSiblings = [
+    ...mappedVolumes,
+    ...(existingSetContext?.existingBooksSnapshot || []),
+  ];
   return {
     set_name: String(parsed.set_name || existingSetContext?.set_name || "").trim(),
     author: String(parsed.author || existingSetContext?.author || "").trim(),
@@ -1108,19 +1144,10 @@ export async function analyzeShelfSetImages(
     category: String(parsed.category || "").trim() || "כללי",
     notes: String(parsed.notes || "").trim(),
     tags: Array.isArray(parsed.tags) ? parsed.tags.map((t) => String(t).trim()).filter(Boolean) : [],
-    volumes: rawVolumes.map((v) => {
-      const gn = Number(v.set_global_number);
-      return {
-        volume: String(v.volume || "").trim(),
-        sub_series: v.sub_series ? String(v.sub_series).trim() : "",
-        set_global_number: Number.isFinite(gn) && gn > 0 ? Math.round(gn) : null,
-        coverage_range: v.coverage_range ? String(v.coverage_range).trim() : "",
-        format_size: v.format_size ? String(v.format_size).trim() : undefined,
-        pub_year: v.pub_year ? String(v.pub_year).trim() : undefined,
-        copiesCount: Math.max(1, Number(v.copiesCount) || 1),
-        notes: v.notes ? String(v.notes).trim() : undefined,
-      };
-    }),
+    volumes: mappedVolumes.map((v) => ({
+      ...v,
+      volume: shouldSuppressSingleVolumeLabel(v, combinedSiblings) ? "" : v.volume,
+    })),
   };
 }
 
@@ -1239,7 +1266,7 @@ export async function reanalyzeApprovedBook(
   });
 
   const systemPrompt =
-    "אתה ספרן תורני מומחה בישיבה שמבצע טיוב ותיקון נתונים של ספר שכבר מאושר בקטלוג. לפניך הנתונים הקיימים של הספר, ובמידה וצורפו תמונות שמורות או חדשות של השער/שדרה — העזר בהן. הקפד במיוחד על חילוץ והפרדה של סט (set_name), תת-סדרה/מסכת (sub_series), מספר כרך כללי (set_global_number), סימון כרך מדויק (volume), טווח סימנים/דפים (coverage_range), ותיקון שגיאות כתיב/מהדורה/מחבר. כללי דיוק מחייבים לסטים ולמקראות גדולות: (1) אם לכרך יש שם תוכן מפורש (כגון בראשית, שמות, ויקרא, במדבר, דברים, יהושע, ישעיהו, תהלים, סדר מועד, מסכת ברכות, או שם פירוש/חטיבה) — אסור לקצר אותו לאות סתמית (א׳, ב׳) בלבד; חובה לשבץ את השם המפורש בשדה volume או sub_series (למשל sub_series: 'בראשית' או volume: 'בראשית / חלק א׳'). (2) חלץ תמיד גם גודל/פורמט ספר (format_size: כיס / רגיל / גדול / מוגדל), שנת הוצאה (pub_year) וטווח סימנים/דפים/פרשות (coverage_range) כשניתן לזהותם. (3) בידול מהדורות בסטים: כאשר זהו סט/ספר קלאסי ממהדורות מרובות (כגון מקראות גדולות, משנה ברורה, שולחן ערוך, תלמוד בבלי, רמב״ם, זוהר, טור) ומופיע על השער או השדרה שם מהדורה או הוצאה/מכון מובהק (כגון 'המאור', 'וזאת התורה', 'דרשו', 'וגשל', 'עוז והדר', 'פרידמן'), שלב את שם המהדורה/ההוצאה בסוגריים בתוך set_name (למשל 'מקראות גדולות (המאור)', 'משנה ברורה (דרשו)'). הקפד על עקביות sub_series ו-volume ללא כפילות שם המסכת ב-volume וללא ערבוב שמות סדרים. החזר JSON מדויק בלבד בעברית." + buildExistingSetConsistencyPrompt(options?.existingSetContext);
+    "אתה ספרן תורני מומחה בישיבה שמבצע טיוב ותיקון נתונים של ספר שכבר מאושר בקטלוג. לפניך הנתונים הקיימים של הספר, ובמידה וצורפו תמונות שמורות או חדשות של השער/שדרה — העזר בהן. הקפד במיוחד על חילוץ והפרדה של סט (set_name), תת-סדרה/מסכת (sub_series), מספר כרך כללי (set_global_number), סימון כרך מדויק (volume), טווח סימנים/דפים (coverage_range), ותיקון שגיאות כתיב/מהדורה/מחבר. כללי דיוק מחייבים לסטים ולמקראות גדולות: (1) אם לכרך יש שם תוכן מפורש (כגון בראשית, שמות, ויקרא, במדבר, דברים, יהושע, ישעיהו, תהלים, סדר מועד, מסכת ברכות, או שם פירוש/חטיבה) — אסור לקצר אותו לאות סתמית (א׳, ב׳) בלבד; חובה לשבץ את השם המפורש בשדה volume או sub_series (למשל sub_series: 'בראשית' או volume: 'בראשית / חלק א׳'). (2) חלץ תמיד גם גודל/פורמט ספר (format_size: כיס / רגיל / גדול / מוגדל), שנת הוצאה (pub_year) וטווח סימנים/דפים/פרשות (coverage_range) כשניתן לזהותם. (3) בידול מהדורות בסטים: כאשר זהו סט/ספר קלאסי ממהדורות מרובות (כגון מקראות גדולות, משנה ברורה, שולחן ערוך, תלמוד בבלי, רמב״ם, זוהר, טור) ומופיע על השער או השדרה שם מהדורה או הוצאה/מכון מובהק (כגון 'המאור', 'וזאת התורה', 'דרשו', 'וגשל', 'עוז והדר', 'פרידמן'), שלב את שם המהדורה/ההוצאה בסוגריים בתוך set_name (למשל 'מקראות גדולות (המאור)', 'משנה ברורה (דרשו)'). הקפד על עקביות sub_series ו-volume ללא כפילות שם המסכת ב-volume וללא ערבוב שמות סדרים; אם ליחידה בסט אין חלוקת דפים/סימנים (כרך בודד למסכת/חומש ללא טווח), השאר volume ריק (''), ודאג שפורמט coverage_range יהיה אחיד (סימנים/דפים X׳–Y׳). החזר JSON מדויק בלבד בעברית." + buildExistingSetConsistencyPrompt(options?.existingSetContext);
   const userPrompt = `נתוני הספר הנוכחיים בקטלוג:
 ${existingSnapshot}
 ${customPrompt?.trim() ? `\nבקשת העריכה של הספרן: ${customPrompt.trim()}` : "\nבצע בדיקה, דיוק והשלמה של כל שדות הספר (במיוחד כותר, סט, תת-סדרה, טווח סימנים/דפים, שנת הוצאה, מהדורה ותגיות)."}
@@ -1302,7 +1329,7 @@ ${customPrompt?.trim() ? `\nבקשת העריכה של הספרן: ${customPromp
     set_name: String(parsed.set_name || "").trim(),
     sub_series: String(parsed.sub_series || "").trim(),
     set_global_number: Number.isFinite(rawGlobalNum) && rawGlobalNum > 0 ? Math.round(rawGlobalNum) : null,
-    coverage_range: String(parsed.coverage_range || "").trim(),
+    coverage_range: normalizeCoverageRange(String(parsed.coverage_range || "").trim(), options?.existingSetContext?.dominantCoverageUnit || "any"),
     author: String(parsed.author || "").trim(),
     volume: String(parsed.volume || "").trim(),
     publisher: String(parsed.publisher || "").trim(),

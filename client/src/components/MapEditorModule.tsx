@@ -344,7 +344,7 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
   const svgRef = useRef<SVGSVGElement>(null);
   const dragRef = useRef<
     | { type: "cabinet"; id: number; offsetX: number; offsetY: number; lastValidCab: CabinetRow }
-    | { type: "entrance" }
+    | { type: "entrance"; startClientX: number; startClientY: number; moved: boolean }
     | { type: "resize"; id: number; dir: ResizeDir; startPt: { x: number; y: number }; startCab: CabinetRow; lastValidCab: CabinetRow }
     | null
   >(null);
@@ -385,6 +385,14 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
   const getSvgCoords = (clientX: number, clientY: number) => {
     const svg = svgRef.current;
     if (!svg) return { x: 0, y: 0 };
+    const ctm = svg.getScreenCTM();
+    if (ctm) {
+      const pt = svg.createSVGPoint();
+      pt.x = clientX;
+      pt.y = clientY;
+      const transformed = pt.matrixTransform(ctm.inverse());
+      return { x: transformed.x, y: transformed.y };
+    }
     const rect = svg.getBoundingClientRect();
     return {
       x: ((clientX - rect.left) / rect.width) * MAP_WIDTH,
@@ -424,7 +432,12 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
   const handleEntrancePointerDown = (e: React.PointerEvent) => {
     e.stopPropagation();
     (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
-    dragRef.current = { type: "entrance" };
+    dragRef.current = {
+      type: "entrance",
+      startClientX: e.clientX,
+      startClientY: e.clientY,
+      moved: false,
+    };
   };
 
   const handlePointerMove = (e: React.PointerEvent) => {
@@ -432,6 +445,11 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
     const pt = getSvgCoords(e.clientX, e.clientY);
 
     if (dragRef.current.type === "entrance") {
+      if (!dragRef.current.moved) {
+        const distPx = Math.hypot(e.clientX - dragRef.current.startClientX, e.clientY - dragRef.current.startClientY);
+        if (distPx < 4) return;
+        dragRef.current.moved = true;
+      }
       const distTop = Math.abs(pt.y - 10);
       const distBottom = Math.abs(MAP_HEIGHT - 10 - pt.y);
       const distLeft = Math.abs(pt.x - 10);
@@ -1028,7 +1046,7 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
           <svg
             ref={svgRef}
             viewBox={`0 0 ${MAP_WIDTH} ${MAP_HEIGHT}`}
-            className="w-full h-[420px] block touch-none"
+            className="w-full aspect-[760/440] block touch-none"
             onPointerMove={handlePointerMove}
             onPointerUp={handlePointerUp}
             onPointerLeave={handlePointerUp}

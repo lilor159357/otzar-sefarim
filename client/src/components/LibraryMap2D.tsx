@@ -95,7 +95,7 @@ export const LibraryMap2D: React.FC<LibraryMap2DProps> = ({
       )}
       <svg
         viewBox={`0 0 ${MAP_WIDTH} ${MAP_HEIGHT}`}
-        className={compact ? "w-full h-56 block" : "w-full h-80 block"}
+        className={compact ? "w-full max-h-56 aspect-[760/440] mx-auto block" : "w-full aspect-[760/440] block"}
         role="img"
         aria-label="מפה דו-ממדית של ארונות אוצר הספרים"
       >

@@ -104,6 +104,17 @@ export interface BorrowerRow {
   updated_at?: string;
 }
 
+export interface MissingVolumeSlotDto {
+  key: string;
+  setName: string;
+  subSeries: string;
+  slotType: "volume" | "global";
+  index: number;
+  suggestedVolume: string;
+  suggestedGlobalNumber: number | null;
+  ignored: boolean;
+}
+
 export interface LoanRow {
   id: number;
   book_barcode: string;
@@ -132,6 +143,7 @@ export interface AiQueueItem {
   default_cabinet_id?: number | null;
   default_shelf_number?: number | null;
   source_relay_id?: string | null;
+  source_book_barcode?: string | null;
 
   set_batch_id?: string | null;
 

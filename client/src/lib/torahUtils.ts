@@ -7,6 +7,16 @@ import {
   torahSubSeriesRank,
   compareSetBooks,
   parseVolumeNotationRules,
+  normalizeCoverageRange,
+  inferDominantCoverageUnit,
+  extractVolumeNumberIndex,
+  buildMissingVolumeLabel,
+  makeMissingVolumeIgnoreKey,
+  computeMissingSetSlots,
+  shouldSuppressSingleVolumeLabel,
+  formatHebrewNumeralWithPunctuation,
+  type MissingVolumeSlot,
+  type CoverageUnit,
 } from "../../../shared/torah/volumeAndCoverage.ts";
 
 export {
@@ -17,7 +27,31 @@ export {
   torahSubSeriesRank,
   compareSetBooks,
   parseVolumeNotationRules,
+  normalizeCoverageRange,
+  inferDominantCoverageUnit,
+  extractVolumeNumberIndex,
+  buildMissingVolumeLabel,
+  makeMissingVolumeIgnoreKey,
+  computeMissingSetSlots,
+  shouldSuppressSingleVolumeLabel,
+  formatHebrewNumeralWithPunctuation,
+  type MissingVolumeSlot,
+  type CoverageUnit,
 };
+
+export function compareCatalogBooks(
+  a: BookRow,
+  b: BookRow,
+  customRules?: VolumeNotationRule[]
+): number {
+  const sa = String(a.set_name || "").trim();
+  const sb = String(b.set_name || "").trim();
+  const groupA = sa || String(a.title || "").trim();
+  const groupB = sb || String(b.title || "").trim();
+  const grpCmp = groupA.localeCompare(groupB, "he");
+  if (grpCmp !== 0) return grpCmp;
+  return compareSetBooks(a, b, customRules);
+}
 
 export function suggestNextVolume(currentVolume: string): string {
   const s = currentVolume.trim();
@@ -68,7 +102,8 @@ export function groupSetVolumes(
   const map = new Map<string, BookRow[]>();
   for (const b of books) {
     const sub = String(b.sub_series || "").trim();
-    const vol = String(b.volume || "").trim() || "ללא ציון כרך";
+    const suppress = shouldSuppressSingleVolumeLabel(b, books);
+    const vol = suppress ? (sub || String(b.title || "").trim() || "ספר יחיד") : (String(b.volume || "").trim() || "ללא ציון כרך");
     const key = `${sub}\u0001${vol}`;
     const arr = map.get(key) || [];
     arr.push(b);
@@ -79,7 +114,10 @@ export function groupSetVolumes(
   for (const [, list] of map.entries()) {
     const sortedList = [...list].sort((a, b) => compareSetBooks(a, b, customRules));
     const rep = sortedList[0];
-    const volumeLabel = String(rep.volume || "").trim() || "ללא ציון כרך";
+    const suppress = shouldSuppressSingleVolumeLabel(rep, books);
+    const volumeLabel = suppress
+      ? (String(rep.sub_series || "").trim() || String(rep.title || "").trim() || "ספר יחיד")
+      : (String(rep.volume || "").trim() || "ללא ציון כרך");
     const subSeriesLabel = String(rep.sub_series || "").trim();
     const globalNums = sortedList
       .map((x) => (x.set_global_number != null && Number.isFinite(Number(x.set_global_number)) ? Number(x.set_global_number) : null))

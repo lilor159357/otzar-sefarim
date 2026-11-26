@@ -18,6 +18,10 @@ import {
   Check,
   Upload,
   Wand2,
+  Send,
+  EyeOff,
+  Eye,
+  AlertCircle,
 } from "lucide-react";
 import { SetPatternBuilderModal, type PatternTargetField } from "./SetPatternBuilderModal.tsx";
 import type {
@@ -27,12 +31,14 @@ import type {
   BookImageMeta,
   RoomDimensions,
   VolumeNotationRule,
+  MissingVolumeSlotDto,
 } from "../types.ts";
 import { FORMAT_SIZE_OPTIONS, STATUS_LABELS } from "../types.ts";
 import { LibraryMap2D } from "./LibraryMap2D.tsx";
 import { AutocompleteInput } from "./AutocompleteInput.tsx";
 import {
   groupSetBySubSeries,
+  shouldSuppressSingleVolumeLabel,
   type SetSubSeriesSection,
   type SetVolumeGroup,
 } from "../lib/torahUtils.ts";
@@ -91,8 +97,13 @@ export const LocationModal: React.FC<LocationModalProps> = ({
   const [status, setStatus] = useState<BookRow["status"]>(book.status);
   const [notes, setNotes] = useState(book.notes || "");
   const [setBooks, setSetBooks] = useState<BookRow[]>([]);
+  const [missingSlots, setMissingSlots] = useState<MissingVolumeSlotDto[]>([]);
+  const [showIgnoredMissing, setShowIgnoredMissing] = useState(false);
   const [loadingSet, setLoadingSet] = useState(false);
   const [expandedVol, setExpandedVol] = useState<string | null>(null);
+  const [sendingToQueue, setSendingToQueue] = useState(false);
+  const [normalizingCoverage, setNormalizingCoverage] = useState(false);
+  const [cleaningSingleVols, setCleaningSingleVols] = useState(false);
 
   // 30-day saved images and AI Re-analysis
   const [savedImages, setSavedImages] = useState<BookImageMeta[]>([]);
@@ -129,6 +140,12 @@ export const LocationModal: React.FC<LocationModalProps> = ({
   const [showPatternBuilder, setShowPatternBuilder] = useState(false);
   const [patternBuilderField, setPatternBuilderField] = useState<PatternTargetField>("title");
   const [assigningSetLoc, setAssigningSetLoc] = useState(false);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(SYNC_STORAGE_KEY, JSON.stringify(syncFields));
+    } catch {}
+  }, [syncFields]);
 
   const loadSavedImages = async (barcode: string) => {
     try {
@@ -186,17 +203,24 @@ export const LocationModal: React.FC<LocationModalProps> = ({
     const sName = (book.set_name || "").trim();
     if (!sName) {
       setSetBooks([]);
+      setMissingSlots([]);
       return;
     }
     let cancelled = false;
     setLoadingSet(true);
     fetch("/api/books/set/" + encodeURIComponent(sName))
-      .then((r) => (r.ok ? r.json() : { books: [] }))
+      .then((r) => (r.ok ? r.json() : { books: [], missingSlots: [] }))
       .then((d) => {
-        if (!cancelled) setSetBooks(Array.isArray(d?.books) ? d.books : []);
+        if (!cancelled) {
+          setSetBooks(Array.isArray(d?.books) ? d.books : []);
+          setMissingSlots(Array.isArray(d?.missingSlots) ? d.missingSlots : []);
+        }
       })
       .catch(() => {
-        if (!cancelled) setSetBooks([]);
+        if (!cancelled) {
+          setSetBooks([]);
+          setMissingSlots([]);
+        }
       })
       .finally(() => {
         if (!cancelled) setLoadingSet(false);
@@ -295,8 +319,76 @@ export const LocationModal: React.FC<LocationModalProps> = ({
       if (r.ok) {
         const d = await r.json();
         setSetBooks(Array.isArray(d?.books) ? d.books : []);
+        setMissingSlots(Array.isArray(d?.missingSlots) ? d.missingSlots : []);
       }
     } catch {}
+  };
+
+  const handleToggleIgnoreMissing = async (slot: MissingVolumeSlotDto, ignore: boolean) => {
+    try {
+      const res = await fetch("/api/books/ignore-missing-volume", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ key: slot.key, ignore }),
+      });
+      if (res.ok) {
+        await reloadSetBooks();
+      }
+    } catch {}
+  };
+
+  const handleNormalizeSetCoverage = async () => {
+    const sName = (book.set_name || "").trim();
+    if (!sName) return;
+    setNormalizingCoverage(true);
+    setErrMsg(null);
+    try {
+      const res = await fetch("/api/books/normalize-set-coverage", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ setName: sName }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "שגיאה באחדות טווחי הסימנים/דפים");
+      setSavedNotice(
+        data.updatedCount > 0
+          ? `פורמט הסימנים/דפים אוחד בהצלחה ב-${data.updatedCount} ספרים בסט`
+          : "כל הטווחים בסט כבר בפורמט אחיד"
+      );
+      await reloadSetBooks();
+      if (onBookUpdated) await onBookUpdated();
+    } catch (err: any) {
+      setErrMsg(err?.message || "שגיאה באחדות פורמט");
+    } finally {
+      setNormalizingCoverage(false);
+    }
+  };
+
+  const handleCleanSingleVolumes = async () => {
+    const sName = (book.set_name || "").trim();
+    if (!sName) return;
+    setCleaningSingleVols(true);
+    setErrMsg(null);
+    try {
+      const res = await fetch("/api/books/clean-set-single-volumes", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ setName: sName }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "שגיאה בניקוי תוויות כרך");
+      setSavedNotice(
+        data.updatedCount > 0
+          ? `נוקו ${data.updatedCount} תוויות כרך מיותרות מיחידות בודדות ללא טווח דפים`
+          : "אין תוויות כרך מיותרות לניקוי בסט זה"
+      );
+      await reloadSetBooks();
+      if (onBookUpdated) await onBookUpdated();
+    } catch (err: any) {
+      setErrMsg(err?.message || "שגיאה בניקוי תוויות כרך");
+    } finally {
+      setCleaningSingleVols(false);
+    }
   };
 
   const handleAssignUnassignedSetLocation = async (targetCabId: number, targetShelf: number) => {
@@ -376,12 +468,17 @@ export const LocationModal: React.FC<LocationModalProps> = ({
       const checkedKeys = Object.entries(syncFields).filter(([, v]) => Boolean(v)).map(([k]) => k);
       if (setName.trim() && checkedKeys.length > 0) {
         const syncPayloadFields: Record<string, any> = {};
+        if (syncFields.sub_series) syncPayloadFields.sub_series = subSeries.trim();
+        if (syncFields.coverage_range) syncPayloadFields.coverage_range = coverageRange.trim();
         if (syncFields.author) syncPayloadFields.author = author.trim();
         if (syncFields.category) syncPayloadFields.category = category.trim();
         if (syncFields.publisher) syncPayloadFields.publisher = publisher.trim();
         if (syncFields.edition) syncPayloadFields.edition = edition.trim();
         if (syncFields.pub_year) syncPayloadFields.pub_year = pubYear.trim();
         if (syncFields.format_size) syncPayloadFields.format_size = formatSize.trim();
+        if (syncFields.thickness_mm) syncPayloadFields.thickness_mm = thicknessMm.trim() ? Number(thicknessMm) : null;
+        if (syncFields.pages_count) syncPayloadFields.pages_count = pagesCount.trim() ? Number(pagesCount) : null;
+        if (syncFields.notes) syncPayloadFields.notes = notes.trim();
         if (syncFields.status) syncPayloadFields.status = status;
         if (syncFields.tags) {
           syncPayloadFields.tags = tagsText.split(",").map((t) => t.trim()).filter(Boolean);
@@ -450,6 +547,34 @@ export const LocationModal: React.FC<LocationModalProps> = ({
         ]);
       };
       reader.readAsDataURL(f);
+    }
+  };
+
+  const handleSendToQueue = async () => {
+    try {
+      setSendingToQueue(true);
+      setReanalyzeError(null);
+      setReanalyzeNotice(null);
+      const res = await fetch(`/api/books/${encodeURIComponent(book.barcode)}/send-to-queue`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          customPrompt: aiPrompt.trim(),
+          extraImages: extraFiles.map((f) => ({
+            imageBase64: f.base64,
+            mimeType: f.mimeType,
+          })),
+          autoProcess: true,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "שגיאה בשליחה לתור ה-AI");
+      setReanalyzeNotice("הספר נשלח לתור קטלוג ה-AI לעיבוד ואישור מחדש (הברקוד, היסטוריית ההשאלות ומצב המדבקה נשמרים).");
+      if (onBookUpdated) await onBookUpdated();
+    } catch (err: any) {
+      setReanalyzeError(err?.message || "שגיאה בשליחה לתור ה-AI");
+    } finally {
+      setSendingToQueue(false);
     }
   };
 
@@ -643,7 +768,9 @@ export const LocationModal: React.FC<LocationModalProps> = ({
             </div>
             <h2 className="text-xl font-bold">
               {book.title}
-              {book.volume ? <span className="text-[var(--otzar-text-muted)] font-normal"> — {book.volume}</span> : null}
+              {book.volume && !shouldSuppressSingleVolumeLabel(book, setBooks) ? (
+                <span className="text-[var(--otzar-text-muted)] font-normal"> — {book.volume}</span>
+              ) : null}
             </h2>
             <p className="text-sm text-[var(--otzar-text-muted)]">
               {book.set_name ? `סט: ${book.set_name} · ` : ""}
@@ -835,24 +962,45 @@ export const LocationModal: React.FC<LocationModalProps> = ({
                     />
                     <span>שמור תמונות חדשות אלו מקומית ל-30 יום לצורך עריכות עתידיות</span>
                   </label>
-                  <button
-                    type="button"
-                    disabled={aiReanalyzing || (savedImages.length === 0 && extraFiles.length === 0)}
-                    onClick={handleAiReanalyze}
-                    className="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-bold text-white bg-[var(--otzar-accent)] hover:bg-[var(--otzar-accent-hover)] cursor-pointer disabled:opacity-50"
-                  >
-                    {aiReanalyzing ? (
-                      <>
-                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                        <span>מפענח מחדש ע״י Gemini...</span>
-                      </>
-                    ) : (
-                      <>
-                        <Sparkles className="w-3.5 h-3.5" />
-                        <span>בצע פענוח חוזר עכשיו</span>
-                      </>
-                    )}
-                  </button>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      disabled={sendingToQueue || aiReanalyzing}
+                      onClick={handleSendToQueue}
+                      className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-bold border border-[var(--otzar-accent)] bg-[var(--otzar-bg)] text-[var(--otzar-accent)] hover:bg-[var(--otzar-surface-alt)] cursor-pointer disabled:opacity-50"
+                      title="שולח את הספר לעיבוד ואישור חוזר בלשונית קטלוג AI תוך שמירת הברקוד ומצב המדבקה"
+                    >
+                      {sendingToQueue ? (
+                        <>
+                          <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                          <span>שולח לתור...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Send className="w-3.5 h-3.5" />
+                          <span>שלח לתור ה-AI מחדש</span>
+                        </>
+                      )}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={aiReanalyzing || sendingToQueue || (savedImages.length === 0 && extraFiles.length === 0 && !aiPrompt.trim())}
+                      onClick={handleAiReanalyze}
+                      className="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-bold text-white bg-[var(--otzar-accent)] hover:bg-[var(--otzar-accent-hover)] cursor-pointer disabled:opacity-50"
+                    >
+                      {aiReanalyzing ? (
+                        <>
+                          <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                          <span>מפענח מחדש ע״י Gemini...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Sparkles className="w-3.5 h-3.5" />
+                          <span>בצע פענוח חוזר עכשיו</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
                 </div>
               </div>
 
@@ -961,17 +1109,20 @@ export const LocationModal: React.FC<LocationModalProps> = ({
                   label="תת-סדרה / מסכת / חלק ראשי בסט (אופציונלי)"
                   labelAction={
                     setName.trim() ? (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setPatternBuilderField("sub_series");
-                          setShowPatternBuilder(true);
-                        }}
-                        className="inline-flex items-center gap-1 text-[11px] font-bold text-[var(--otzar-accent)] hover:underline cursor-pointer"
-                      >
-                        <Wand2 className="w-3 h-3" />
-                        קבע תבנית לסט
-                      </button>
+                      <div className="flex items-center gap-2">
+                        {renderSetSyncCheckbox("sub_series")}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setPatternBuilderField("sub_series");
+                            setShowPatternBuilder(true);
+                          }}
+                          className="inline-flex items-center gap-1 text-[11px] font-bold text-[var(--otzar-accent)] hover:underline cursor-pointer"
+                        >
+                          <Wand2 className="w-3 h-3" />
+                          קבע תבנית לסט
+                        </button>
+                      </div>
                     ) : undefined
                   }
                   field="sub_series"
@@ -1017,7 +1168,10 @@ export const LocationModal: React.FC<LocationModalProps> = ({
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-medium mb-1">טווח סימנים / דפים / פרקים (אופציונלי)</label>
+                  <div className="flex items-center justify-between gap-2 mb-1">
+                    <label className="block text-xs font-medium">טווח סימנים / דפים / פרקים (אופציונלי)</label>
+                    {renderSetSyncCheckbox("coverage_range")}
+                  </div>
                   <input
                     type="text"
                     value={coverageRange}
@@ -1098,7 +1252,10 @@ export const LocationModal: React.FC<LocationModalProps> = ({
                     </datalist>
                   </div>
                   <div>
-                    <label className="block text-xs font-medium mb-1">עובי שדרה (מ״מ)</label>
+                    <div className="flex items-center justify-between gap-2 mb-1">
+                      <label className="block text-xs font-medium">עובי שדרה (מ״מ)</label>
+                      {renderSetSyncCheckbox("thickness_mm")}
+                    </div>
                     <input
                       type="number"
                       min={1}
@@ -1111,7 +1268,10 @@ export const LocationModal: React.FC<LocationModalProps> = ({
                     />
                   </div>
                   <div>
-                    <label className="block text-xs font-medium mb-1">מספר עמודים (אופציונלי)</label>
+                    <div className="flex items-center justify-between gap-2 mb-1">
+                      <label className="block text-xs font-medium">מספר עמודים (אופציונלי)</label>
+                      {renderSetSyncCheckbox("pages_count")}
+                    </div>
                     <input
                       type="number"
                       min={1}
@@ -1187,7 +1347,10 @@ export const LocationModal: React.FC<LocationModalProps> = ({
                   </div>
                 </div>
                 <div className="md:col-span-2">
-                  <label className="block text-xs font-medium mb-1">הערות</label>
+                  <div className="flex items-center justify-between gap-2 mb-1">
+                    <label className="block text-xs font-medium">הערות</label>
+                    {renderSetSyncCheckbox("notes")}
+                  </div>
                   <input
                     type="text"
                     value={notes}
@@ -1197,9 +1360,44 @@ export const LocationModal: React.FC<LocationModalProps> = ({
                 </div>
               </div>
 
-              {setName.trim() && Object.values(syncFields).some(Boolean) && setSyncCount && (
-                <div className="p-2.5 rounded-lg border border-amber-300 bg-amber-50 dark:bg-amber-950/30 dark:border-amber-800 text-amber-900 dark:text-amber-200 text-xs font-medium">
-                  השדות המסומנים (&quot;לכל הסט&quot;) יעדכנו יחד <strong>{setSyncCount.booksCount} ספרים במאגר</strong> ו-<strong>{setSyncCount.queueCount} פריטים ממתינים בתור ה-AI</strong> (תגיות יתמזגו ללא מחיקת תגיות קיימות; שם הסט אינו משתנה).
+              {setName.trim() && (
+                <div className="p-2.5 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-surface-alt)] text-xs flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-[var(--otzar-text-muted)]">
+                    סימוני &quot;לכל הסט&quot; נשמרים אוטומטית בין עריכות.
+                    {Object.values(syncFields).some(Boolean) && setSyncCount ? (
+                      <span className="text-amber-800 dark:text-amber-300 font-semibold mr-1.5">
+                        פעיל לעדכון {setSyncCount.booksCount} ספרים + {setSyncCount.queueCount} בתור
+                      </span>
+                    ) : null}
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setSyncFields({
+                          author: true,
+                          category: true,
+                          publisher: true,
+                          edition: true,
+                          pub_year: true,
+                          format_size: true,
+                          location: true,
+                        })
+                      }
+                      className="text-[11px] font-semibold text-[var(--otzar-accent)] hover:underline cursor-pointer"
+                    >
+                      סמן פרטי מהדורה ומיקום
+                    </button>
+                    {Object.values(syncFields).some(Boolean) && (
+                      <button
+                        type="button"
+                        onClick={() => setSyncFields({})}
+                        className="text-[11px] text-[var(--otzar-text-muted)] hover:underline cursor-pointer"
+                      >
+                        נקה סימונים
+                      </button>
+                    )}
+                  </div>
                 </div>
               )}
 
@@ -1367,16 +1565,51 @@ export const LocationModal: React.FC<LocationModalProps> = ({
                         </button>
                       )}
                       {isAdmin && !loadingSet && setBooks.length > 0 && (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setPatternBuilderField("sub_series");
+                              setShowPatternBuilder(true);
+                            }}
+                            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-bold border border-[var(--otzar-accent)]/40 bg-[var(--otzar-bg)] text-[var(--otzar-accent)] hover:bg-[var(--otzar-surface)] cursor-pointer"
+                          >
+                            <Wand2 className="w-3 h-3" />
+                            אחד שמות/מסכתות בסט
+                          </button>
+                          {setBooks.some((sb) => Boolean((sb.coverage_range || "").trim())) && (
+                            <button
+                              type="button"
+                              disabled={normalizingCoverage}
+                              onClick={handleNormalizeSetCoverage}
+                              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-bold border border-[var(--otzar-border)] bg-[var(--otzar-bg)] text-[var(--otzar-text)] hover:bg-[var(--otzar-surface)] cursor-pointer disabled:opacity-50"
+                            >
+                              <RefreshCw className={normalizingCoverage ? "w-3 h-3 animate-spin" : "w-3 h-3 text-[var(--otzar-accent)]"} />
+                              אחד פורמט סימנים/דפים
+                            </button>
+                          )}
+                          {setBooks.some((sb) => shouldSuppressSingleVolumeLabel(sb, setBooks)) && (
+                            <button
+                              type="button"
+                              disabled={cleaningSingleVols}
+                              onClick={handleCleanSingleVolumes}
+                              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-bold border border-[var(--otzar-border)] bg-[var(--otzar-bg)] text-[var(--otzar-text)] hover:bg-[var(--otzar-surface)] cursor-pointer disabled:opacity-50"
+                            >
+                              נקה תווית כרך מיחידות בודדות
+                            </button>
+                          )}
+                        </>
+                      )}
+                      {missingSlots.some((m) => m.ignored) && (
                         <button
                           type="button"
-                          onClick={() => {
-                            setPatternBuilderField("sub_series");
-                            setShowPatternBuilder(true);
-                          }}
-                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-bold border border-[var(--otzar-accent)]/40 bg-[var(--otzar-bg)] text-[var(--otzar-accent)] hover:bg-[var(--otzar-surface)] cursor-pointer"
+                          onClick={() => setShowIgnoredMissing((v) => !v)}
+                          className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] text-[var(--otzar-text-muted)] hover:text-[var(--otzar-text)] cursor-pointer"
                         >
-                          <Wand2 className="w-3 h-3" />
-                          אחד שמות/מסכתות בסט
+                          {showIgnoredMissing ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3" />}
+                          {showIgnoredMissing
+                            ? "הסתר חוסרים שהושתקו"
+                            : `הושתקו (${missingSlots.filter((m) => m.ignored).length})`}
                         </button>
                       )}
                       <span className="text-xs text-[var(--otzar-text-muted)] tabular-nums">
@@ -1520,8 +1753,92 @@ export const LocationModal: React.FC<LocationModalProps> = ({
                               </div>
                             );
                           })}
+                          {missingSlots
+                            .filter(
+                              (slot) =>
+                                slot.subSeries.trim().toLowerCase() === section.subSeriesLabel.trim().toLowerCase() &&
+                                (!slot.ignored || showIgnoredMissing)
+                            )
+                            .map((slot) => (
+                              <div
+                                key={slot.key}
+                                className={`px-3.5 py-2 flex flex-wrap items-center justify-between gap-2 text-xs border-t border-dashed border-amber-300/70 dark:border-amber-800/70 ${
+                                  slot.ignored
+                                    ? "bg-[var(--otzar-surface-alt)]/40 opacity-65"
+                                    : "bg-amber-50/60 dark:bg-amber-950/20"
+                                }`}
+                              >
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <AlertCircle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                                  <span className="font-semibold text-amber-900 dark:text-amber-200">
+                                    חסר בסדרה: {slot.suggestedVolume || `כרך #${slot.index}`}
+                                  </span>
+                                  {slot.suggestedGlobalNumber != null && (
+                                    <span className="text-[11px] text-[var(--otzar-text-muted)] tabular-nums">
+                                      (#{slot.suggestedGlobalNumber})
+                                    </span>
+                                  )}
+                                  <span aria-hidden="true">·</span>
+                                  <span className="text-[11px] text-[var(--otzar-text-muted)]">
+                                    {slot.ignored ? "הושתק (לא יסומן כחסר)" : "וירטואלי · יושלם אוטומטית בסריקה הבאה"}
+                                  </span>
+                                </div>
+                                {isAdmin && (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleToggleIgnoreMissing(slot, !slot.ignored)}
+                                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-[var(--otzar-border)] bg-[var(--otzar-bg)] text-[11px] text-[var(--otzar-text-muted)] hover:text-[var(--otzar-text)] cursor-pointer"
+                                  >
+                                    {slot.ignored ? "בטל התעלמות" : "התעלם מחוסר זה"}
+                                  </button>
+                                )}
+                              </div>
+                            ))}
                         </div>
                       ))}
+                      {missingSlots
+                        .filter((slot) => {
+                          const sections = groupSetBySubSeries(setBooks, volumeNotationRules);
+                          const hasMatchingSection = sections.some(
+                            (sec) => sec.subSeriesLabel.trim().toLowerCase() === slot.subSeries.trim().toLowerCase()
+                          );
+                          return !hasMatchingSection && (!slot.ignored || showIgnoredMissing);
+                        })
+                        .map((slot) => (
+                          <div
+                            key={slot.key}
+                            className={`px-3.5 py-2 flex flex-wrap items-center justify-between gap-2 text-xs border-t border-dashed border-amber-300/70 dark:border-amber-800/70 ${
+                              slot.ignored
+                                ? "bg-[var(--otzar-surface-alt)]/40 opacity-65"
+                                : "bg-amber-50/60 dark:bg-amber-950/20"
+                            }`}
+                          >
+                            <div className="flex flex-wrap items-center gap-2">
+                              <AlertCircle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                              <span className="font-semibold text-amber-900 dark:text-amber-200">
+                                חסר ברצף הסט: {slot.suggestedVolume || `פריט #${slot.index}`}
+                              </span>
+                              {slot.suggestedGlobalNumber != null && (
+                                <span className="text-[11px] text-[var(--otzar-text-muted)] tabular-nums">
+                                  (#{slot.suggestedGlobalNumber})
+                                </span>
+                              )}
+                              <span aria-hidden="true">·</span>
+                              <span className="text-[11px] text-[var(--otzar-text-muted)]">
+                                {slot.ignored ? "הושתק (לא יסומן כחסר)" : "וירטואלי · יושלם אוטומטית בסריקה הבאה"}
+                              </span>
+                            </div>
+                            {isAdmin && (
+                              <button
+                                type="button"
+                                onClick={() => handleToggleIgnoreMissing(slot, !slot.ignored)}
+                                className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-[var(--otzar-border)] bg-[var(--otzar-bg)] text-[11px] text-[var(--otzar-text-muted)] hover:text-[var(--otzar-text)] cursor-pointer"
+                              >
+                                {slot.ignored ? "בטל התעלמות" : "התעלם מחוסר זה"}
+                              </button>
+                            )}
+                          </div>
+                        ))}
                     </div>
                   )}
                 </div>

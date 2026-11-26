@@ -249,6 +249,7 @@ export function initSchemaAndSeed(db: DbClient): void {
   ensureColumn(db, "ai_catalog_queue", "processing_started_at", "TEXT");
   ensureColumn(db, "ai_catalog_queue", "deleted_at", "TEXT");
   ensureColumn(db, "ai_catalog_queue", "recycle_expires_at", "TEXT");
+  ensureColumn(db, "ai_catalog_queue", "source_book_barcode", "TEXT");
   db.exec("CREATE INDEX IF NOT EXISTS idx_ai_queue_set_batch ON ai_catalog_queue(set_batch_id)");
   db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_queue_relay_id ON ai_catalog_queue(source_relay_id)");
   db.exec("CREATE INDEX IF NOT EXISTS idx_ai_queue_deleted ON ai_catalog_queue(deleted_at)");
@@ -285,6 +286,7 @@ export function initSchemaAndSeed(db: DbClient): void {
     map_entrance: JSON.stringify({ wall: "bottom", offset: 50 }),
     room_dimensions: JSON.stringify({ width_m: 8, length_m: 6, wall_note: "" }),
     volume_notation_rules: JSON.stringify([]),
+    ignored_missing_volumes: JSON.stringify([]),
     label_config: JSON.stringify({
       showLibraryName: false,
       showBookTitle: true,

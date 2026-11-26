@@ -3,10 +3,18 @@ import fs from "fs";
 import net from "net";
 import path from "path";
 import { fileURLToPath } from "url";
-import { openDatabase } from "./db/adapter.ts";
+import { openDatabase, type DbClient } from "./db/adapter.ts";
 import { buildNormalizedBookSearch, enqueueSyncOutbox, initSchemaAndSeed, newSyncId } from "./db/schema.ts";
 import { searchBooksOffline, type SearchableBook } from "./search/torahSearch.ts";
 import { compareSetBooks, getAuthoritySuggestions, readCustomVolumeNotationRules } from "./search/torahAuthority.ts";
+import {
+  computeMissingSetSlots,
+  inferDominantCoverageUnit,
+  makeMissingVolumeIgnoreKey,
+  normalizeCoverageRange,
+  shouldSuppressSingleVolumeLabel,
+  type CoverageUnit,
+} from "../shared/torah/volumeAndCoverage.ts";
 import { registerCirculationRoutes } from "./routes/circulation.ts";
 import { registerCatalogAiRoutes } from "./routes/catalogAi.ts";
 import { registerLabelsAndAdminRoutes } from "./routes/labelsAndAdmin.ts";
@@ -169,7 +177,7 @@ export async function startOtzarServer(options: OtzarServerOptions = {}): Promis
   app.get("/api/settings", (req, res) => {
     const admin = isAdminRequest(req);
     const rows = db.all<{ key: string; value: string }>("SELECT key, value FROM settings");
-    const publicKeys = new Set(["library_name", "default_loan_days", "theme_preset", "theme_mode", "map_entrance", "room_dimensions", "volume_notation_rules"]);
+    const publicKeys = new Set(["library_name", "default_loan_days", "theme_preset", "theme_mode", "map_entrance", "room_dimensions", "volume_notation_rules", "ignored_missing_volumes"]);
     const out: Record<string, unknown> = {};
     const hasApiKey = hasConfiguredAiKeys(db);
     for (const r of rows) {
@@ -208,7 +216,7 @@ export async function startOtzarServer(options: OtzarServerOptions = {}): Promis
     if ("theme_preset" in body || "theme_mode" in body) {
       saveUiPrefs(DATA_DIR, getThemeSnapshot());
     }
-    if (["library_name", "default_loan_days", "map_entrance", "room_dimensions", "volume_notation_rules"].some((k) => k in body)) {
+    if (["library_name", "default_loan_days", "map_entrance", "room_dimensions", "volume_notation_rules", "ignored_missing_volumes"].some((k) => k in body)) {
       void syncService?.pushLibraryMeta().catch(() => {});
     }
     res.json({ ok: true });
@@ -658,6 +666,35 @@ export async function startOtzarServer(options: OtzarServerOptions = {}): Promis
     res.json(out);
   });
 
+function readIgnoredMissingSet(db: DbClient): Set<string> {
+    const raw = db.get<{ value: string }>("SELECT value FROM settings WHERE key = 'ignored_missing_volumes'")?.value;
+    if (!raw) return new Set<string>();
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        return new Set(parsed.map((x) => String(x || "").trim()).filter(Boolean));
+      }
+    } catch {}
+    return new Set<string>();
+  }
+
+  function writeIgnoredMissingSet(db: DbClient, keys: Set<string>) {
+    db.run(
+      "INSERT INTO settings (key, value) VALUES ('ignored_missing_volumes', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      JSON.stringify(Array.from(keys))
+    );
+  }
+
+  function resolvePreferredCoverageUnitForSet(db: DbClient, setName: string): CoverageUnit {
+    const clean = String(setName || "").trim();
+    if (!clean) return "any";
+    const rows = db.all<{ coverage_range: string }>(
+      "SELECT coverage_range FROM books WHERE LOWER(set_name) = LOWER(?) AND deleted_at IS NULL AND COALESCE(coverage_range, '') <> ''",
+      clean
+    );
+    return inferDominantCoverageUnit(rows.map((r) => r.coverage_range));
+  }
+
   app.post("/api/books", requireAdmin, (req, res) => {
     const {
       title,
@@ -695,6 +732,22 @@ export async function startOtzarServer(options: OtzarServerOptions = {}): Promis
     const count = Math.max(1, Math.min(200, Number(copiesCount) || 1));
     const prefix = db.get<{ value: string }>("SELECT value FROM settings WHERE key = 'barcode_prefix'")?.value ?? "";
     let nextNum = parseInt(db.get<{ value: string }>("SELECT value FROM settings WHERE key = 'next_barcode'")?.value ?? "100001", 10) || 100001;
+    const cleanSetName = String(set_name || "").trim();
+    const cleanSubSeries = String(sub_series || "").trim();
+    const preferredCovUnit = cleanSetName ? resolvePreferredCoverageUnitForSet(db, cleanSetName) : "any";
+    const normalizedCov = normalizeCoverageRange(String(coverage_range || ""), preferredCovUnit);
+    let finalVolume = String(volume || "").trim();
+    if (cleanSetName && finalVolume) {
+      const sameSetRows = db.all<{ sub_series: string; volume: string; coverage_range: string; title: string }>(
+        "SELECT sub_series, volume, coverage_range, title FROM books WHERE LOWER(set_name) = LOWER(?) AND deleted_at IS NULL",
+        cleanSetName
+      );
+      if (shouldSuppressSingleVolumeLabel({ set_name: cleanSetName, sub_series: cleanSubSeries, volume: finalVolume, coverage_range: normalizedCov, title: String(title) }, [...sameSetRows, { sub_series: cleanSubSeries, volume: finalVolume, coverage_range: normalizedCov, title: String(title) }])) {
+        finalVolume = "";
+      }
+    } else if (!cleanSetName && finalVolume && shouldSuppressSingleVolumeLabel({ sub_series: cleanSubSeries, volume: finalVolume, coverage_range: normalizedCov, title: String(title) }, [])) {
+      finalVolume = "";
+    }
     const now = new Date().toISOString();
     const tagsArr = parseTags(tags);
     const createdBarcodes: string[] = [];
@@ -710,11 +763,11 @@ export async function startOtzarServer(options: OtzarServerOptions = {}): Promis
           nextNum++;
         }
         const syncId = newSyncId();
-        const norm = buildNormalizedBookSearch([code, title, set_name, sub_series, author, volume, coverage_range, publisher, pub_year, edition, category, tagsArr.join(" "), notes]);
+        const norm = buildNormalizedBookSearch([code, title, cleanSetName, cleanSubSeries, author, finalVolume, normalizedCov, publisher, pub_year, edition, category, tagsArr.join(" "), notes]);
         db.run(
           `INSERT INTO books (barcode, title, set_name, sub_series, set_global_number, author, volume, coverage_range, publisher, pub_year, edition, category, tags, normalized_search, cabinet_id, shelf_number, notes, status, label_printed, created_at, format_size, thickness_mm, pages_count, barcode_status, sync_id, updated_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)`,
-          code, title.trim(), String(set_name || "").trim(), String(sub_series || "").trim(), parsedGlobalNum, String(author).trim(), String(volume).trim(), String(coverage_range || "").trim(), String(publisher).trim(),
+          code, title.trim(), cleanSetName, cleanSubSeries, parsedGlobalNum, String(author).trim(), finalVolume, normalizedCov, String(publisher).trim(),
           String(pub_year).trim(), String(edition).trim(),
           String(category).trim(), JSON.stringify(tagsArr), norm, cabinet_id ? Number(cabinet_id) : null,
           shelf_number ? Number(shelf_number) : null, String(notes).trim(), status, now,
@@ -780,17 +833,34 @@ export async function startOtzarServer(options: OtzarServerOptions = {}): Promis
     const parsedThickness = thickness_mm !== null && thickness_mm !== "" && Number(thickness_mm) > 0 ? Number(thickness_mm) : null;
     const parsedPages = pages_count !== null && pages_count !== "" && Number(pages_count) > 0 ? Math.round(Number(pages_count)) : null;
     const parsedGlobalNum = set_global_number !== null && set_global_number !== "" && Number(set_global_number) > 0 ? Math.round(Number(set_global_number)) : null;
+    const cleanSetName = String(set_name || "").trim();
+    const cleanSubSeries = String(sub_series || "").trim();
+    const preferredCovUnit = cleanSetName ? resolvePreferredCoverageUnitForSet(db, cleanSetName) : "any";
+    const normalizedCov = normalizeCoverageRange(String(coverage_range || ""), preferredCovUnit);
+    let finalVolume = String(volume || "").trim();
+    if (cleanSetName && finalVolume) {
+      const sameSetRows = db.all<{ barcode: string; sub_series: string; volume: string; coverage_range: string; title: string }>(
+        "SELECT barcode, sub_series, volume, coverage_range, title FROM books WHERE LOWER(set_name) = LOWER(?) AND deleted_at IS NULL AND barcode <> ?",
+        cleanSetName,
+        barcode
+      );
+      if (shouldSuppressSingleVolumeLabel({ set_name: cleanSetName, sub_series: cleanSubSeries, volume: finalVolume, coverage_range: normalizedCov, title: String(title) }, [...sameSetRows, { sub_series: cleanSubSeries, volume: finalVolume, coverage_range: normalizedCov, title: String(title) }])) {
+        finalVolume = "";
+      }
+    } else if (!cleanSetName && finalVolume && shouldSuppressSingleVolumeLabel({ sub_series: cleanSubSeries, volume: finalVolume, coverage_range: normalizedCov, title: String(title) }, [])) {
+      finalVolume = "";
+    }
     const now = new Date().toISOString();
 
     const tagsArr = tags !== undefined ? parseTags(tags) : parseTags(existing.tags);
     const norm = buildNormalizedBookSearch([
       barcode,
       String(title),
-      String(set_name),
-      String(sub_series),
+      cleanSetName,
+      cleanSubSeries,
       String(author),
-      String(volume),
-      String(coverage_range),
+      finalVolume,
+      normalizedCov,
       String(publisher),
       String(pub_year),
       String(edition),
@@ -804,12 +874,12 @@ export async function startOtzarServer(options: OtzarServerOptions = {}): Promis
        SET title = ?, set_name = ?, sub_series = ?, set_global_number = ?, author = ?, volume = ?, coverage_range = ?, publisher = ?, pub_year = ?, edition = ?, category = ?, tags = ?, normalized_search = ?, cabinet_id = ?, shelf_number = ?, notes = ?, status = ?, format_size = ?, thickness_mm = ?, pages_count = ?, barcode_status = ?, updated_at = ?
        WHERE barcode = ?`,
       String(title).trim(),
-      String(set_name || "").trim(),
-      String(sub_series || "").trim(),
+      cleanSetName,
+      cleanSubSeries,
       parsedGlobalNum,
       String(author).trim(),
-      String(volume).trim(),
-      String(coverage_range || "").trim(),
+      finalVolume,
+      normalizedCov,
       String(publisher).trim(),
       String(pub_year).trim(),
       String(edition).trim(),
@@ -837,11 +907,11 @@ export async function startOtzarServer(options: OtzarServerOptions = {}): Promis
     if (cfg.hasAnyKey) {
       const embText = buildBookEmbeddingText({
         title: String(title),
-        set_name: String(set_name),
-        sub_series: String(sub_series),
-        coverage_range: String(coverage_range),
+        set_name: cleanSetName,
+        sub_series: cleanSubSeries,
+        coverage_range: normalizedCov,
         author: String(author),
-        volume: String(volume),
+        volume: finalVolume,
         publisher: String(publisher),
         pub_year: String(pub_year),
         edition: String(edition),
@@ -919,7 +989,307 @@ export async function startOtzarServer(options: OtzarServerOptions = {}): Promis
       const { embedding: _drop, ...rest } = r;
       return { ...rest, tagsList: parseTags(r.tags) };
     });
-    res.json({ books: cleanRows });
+    const ignoredKeys = readIgnoredMissingSet(db);
+    const missingSlots = computeMissingSetSlots(
+      cleanRows.map((r: any) => ({
+        set_name: String(r.set_name || ""),
+        sub_series: String(r.sub_series || ""),
+        volume: String(r.volume || ""),
+        set_global_number: r.set_global_number != null ? Number(r.set_global_number) : null,
+      })),
+      setName,
+      ignoredKeys
+    );
+    const dominantCoverageUnit = inferDominantCoverageUnit(cleanRows.map((r: any) => String(r.coverage_range || "")));
+    res.json({ books: cleanRows, missingSlots, dominantCoverageUnit });
+  });
+
+  // Selective multi-book bulk update (only modifies fields explicitly present in req.body.fields)
+  app.post("/api/books/bulk-update", requireAdmin, (req, res) => {
+    const rawBarcodes = Array.isArray(req.body?.barcodes) ? req.body.barcodes : [];
+    const barcodes: string[] = Array.from(new Set<string>(rawBarcodes.map((b: unknown) => String(b || "").trim()).filter(Boolean)));
+    const fields = req.body?.fields && typeof req.body.fields === "object" ? (req.body.fields as Record<string, any>) : {};
+    const tagsMode = req.body?.tagsMode === "replace" ? "replace" : "merge";
+
+    if (barcodes.length === 0) {
+      return res.status(400).json({ error: "לא נבחרו ספרים לעדכון" });
+    }
+    const fieldKeys = Object.keys(fields);
+    if (fieldKeys.length === 0) {
+      return res.status(400).json({ error: "לא סומן אף שדה לעדכון" });
+    }
+
+    const now = new Date().toISOString();
+    let updatedCount = 0;
+
+    db.transaction(() => {
+      for (const bc of barcodes) {
+        const existing = db.get<Record<string, any>>("SELECT * FROM books WHERE barcode = ? AND deleted_at IS NULL", bc);
+        if (!existing) continue;
+
+        const nextTitle = "title" in fields ? String(fields.title ?? "").trim() : String(existing.title || "");
+        const nextSetName = "set_name" in fields ? String(fields.set_name ?? "").trim() : String(existing.set_name || "");
+        const nextSubSeries = "sub_series" in fields ? String(fields.sub_series ?? "").trim() : String(existing.sub_series || "");
+        const nextGlobalNum =
+          "set_global_number" in fields
+            ? (fields.set_global_number !== null && fields.set_global_number !== "" && Number(fields.set_global_number) > 0
+                ? Math.round(Number(fields.set_global_number))
+                : null)
+            : (existing.set_global_number != null ? Number(existing.set_global_number) : null);
+        const nextAuthor = "author" in fields ? String(fields.author ?? "").trim() : String(existing.author || "");
+        let nextVolume = "volume" in fields ? String(fields.volume ?? "").trim() : String(existing.volume || "");
+        const prefUnit = nextSetName ? resolvePreferredCoverageUnitForSet(db, nextSetName) : "any";
+        const nextCoverage =
+          "coverage_range" in fields
+            ? normalizeCoverageRange(String(fields.coverage_range ?? "").trim(), prefUnit)
+            : String(existing.coverage_range || "");
+        const nextPublisher = "publisher" in fields ? String(fields.publisher ?? "").trim() : String(existing.publisher || "");
+        const nextPubYear = "pub_year" in fields ? String(fields.pub_year ?? "").trim() : String(existing.pub_year || "");
+        const nextEdition = "edition" in fields ? String(fields.edition ?? "").trim() : String(existing.edition || "");
+        const nextCategory = "category" in fields ? String(fields.category ?? "").trim() : String(existing.category || "");
+        const nextFormatSize = "format_size" in fields ? String(fields.format_size ?? "").trim() : String(existing.format_size || "");
+        const nextThickness =
+          "thickness_mm" in fields
+            ? (fields.thickness_mm !== null && fields.thickness_mm !== "" && Number(fields.thickness_mm) > 0 ? Number(fields.thickness_mm) : null)
+            : (existing.thickness_mm != null ? Number(existing.thickness_mm) : null);
+        const nextPages =
+          "pages_count" in fields
+            ? (fields.pages_count !== null && fields.pages_count !== "" && Number(fields.pages_count) > 0 ? Math.round(Number(fields.pages_count)) : null)
+            : (existing.pages_count != null ? Number(existing.pages_count) : null);
+        const nextNotes = "notes" in fields ? String(fields.notes ?? "").trim() : String(existing.notes || "");
+        const nextCabinetId =
+          "cabinet_id" in fields
+            ? (fields.cabinet_id !== null && fields.cabinet_id !== "" && Number(fields.cabinet_id) > 0 ? Number(fields.cabinet_id) : null)
+            : (existing.cabinet_id != null ? Number(existing.cabinet_id) : null);
+        const nextShelfNumber =
+          "shelf_number" in fields
+            ? (fields.shelf_number !== null && fields.shelf_number !== "" && Number(fields.shelf_number) > 0 ? Math.round(Number(fields.shelf_number)) : null)
+            : (existing.shelf_number != null ? Number(existing.shelf_number) : null);
+
+        // Protect books currently borrowed from bulk status override
+        let nextStatus = String(existing.status || "available");
+        if ("status" in fields && nextStatus !== "borrowed") {
+          const st = String(fields.status || "").trim();
+          if (["available", "borrowed", "reference_only", "lost"].includes(st)) {
+            nextStatus = st;
+          }
+        }
+
+        const curTags = parseTags(existing.tags);
+        let nextTags = curTags;
+        if ("tags" in fields) {
+          const incTags = parseTags(fields.tags);
+          nextTags = tagsMode === "replace" ? incTags : Array.from(new Set([...curTags, ...incTags])).filter(Boolean);
+        }
+
+        const norm = buildNormalizedBookSearch([
+          bc,
+          nextTitle,
+          nextSetName,
+          nextSubSeries,
+          nextAuthor,
+          nextVolume,
+          nextCoverage,
+          nextPublisher,
+          nextPubYear,
+          nextEdition,
+          nextCategory,
+          nextTags.join(" "),
+          nextNotes,
+        ]);
+
+        db.run(
+          `UPDATE books
+           SET title = ?, set_name = ?, sub_series = ?, set_global_number = ?, author = ?, volume = ?, coverage_range = ?, publisher = ?, pub_year = ?, edition = ?, category = ?, tags = ?, normalized_search = ?, cabinet_id = ?, shelf_number = ?, notes = ?, status = ?, format_size = ?, thickness_mm = ?, pages_count = ?, updated_at = ?
+           WHERE barcode = ?`,
+          nextTitle || String(existing.title || ""),
+          nextSetName,
+          nextSubSeries,
+          nextGlobalNum,
+          nextAuthor,
+          nextVolume,
+          nextCoverage,
+          nextPublisher,
+          nextPubYear,
+          nextEdition,
+          nextCategory,
+          JSON.stringify(nextTags),
+          norm,
+          nextCabinetId,
+          nextShelfNumber,
+          nextNotes,
+          nextStatus,
+          nextFormatSize,
+          nextThickness,
+          nextPages,
+          now,
+          bc
+        );
+        if (existing.sync_id) {
+          enqueueSyncOutbox(db, "book", String(existing.sync_id), "upsert", { barcode: bc });
+        }
+        updatedCount++;
+      }
+    });
+
+    if (updatedCount > 0) {
+      syncService?.notifyLocalMutation();
+    }
+    res.json({ ok: true, updatedCount });
+  });
+
+  // Ignore / unignore a virtual missing volume slot
+  app.post("/api/books/ignore-missing-volume", requireAdmin, (req, res) => {
+    const rawKey = typeof req.body?.key === "string" ? req.body.key.trim() : "";
+    const setName = String(req.body?.setName || "").trim();
+    const subSeries = String(req.body?.subSeries || "").trim();
+    const slotType = req.body?.slotType === "global" ? "global" : "volume";
+    const index = Number(req.body?.index || 0);
+    const ignore = req.body?.ignore !== false;
+
+    const key = rawKey || (setName && index > 0 ? makeMissingVolumeIgnoreKey(setName, subSeries, slotType, Math.round(index)) : "");
+    if (!key) {
+      return res.status(400).json({ error: "מזהה חסר לעדכון" });
+    }
+    const curSet = readIgnoredMissingSet(db);
+    if (ignore) {
+      curSet.add(key);
+    } else {
+      curSet.delete(key);
+    }
+    writeIgnoredMissingSet(db, curSet);
+    void syncService?.pushLibraryMeta().catch(() => {});
+    res.json({ ok: true, ignoredKeys: Array.from(curSet) });
+  });
+
+  // Normalize all coverage_range values across an entire set to uniform format
+  app.post("/api/books/normalize-set-coverage", requireAdmin, (req, res) => {
+    const setName = String(req.body?.setName || "").trim();
+    const explicitUnit = String(req.body?.targetUnit || "").trim() as CoverageUnit | "";
+    if (!setName) {
+      return res.status(400).json({ error: "נדרש שם סט" });
+    }
+    const rows = db.all<Record<string, any>>(
+      "SELECT * FROM books WHERE LOWER(set_name) = LOWER(?) AND deleted_at IS NULL",
+      setName
+    );
+    const dominantUnit: CoverageUnit =
+      explicitUnit && ["siman", "daf", "perek", "amud"].includes(explicitUnit)
+        ? explicitUnit
+        : inferDominantCoverageUnit(rows.map((r) => String(r.coverage_range || "")));
+
+    const now = new Date().toISOString();
+    let updatedCount = 0;
+
+    db.transaction(() => {
+      for (const b of rows) {
+        const curCov = String(b.coverage_range || "").trim();
+        if (!curCov) continue;
+        const normalized = normalizeCoverageRange(curCov, dominantUnit);
+        if (normalized && normalized !== curCov) {
+          const tagsArr = parseTags(b.tags);
+          const norm = buildNormalizedBookSearch([
+            String(b.barcode),
+            String(b.title || ""),
+            String(b.set_name || ""),
+            String(b.sub_series || ""),
+            String(b.author || ""),
+            String(b.volume || ""),
+            normalized,
+            String(b.publisher || ""),
+            String(b.pub_year || ""),
+            String(b.edition || ""),
+            String(b.category || ""),
+            tagsArr.join(" "),
+            String(b.notes || ""),
+          ]);
+          db.run(
+            "UPDATE books SET coverage_range = ?, normalized_search = ?, updated_at = ? WHERE barcode = ?",
+            normalized,
+            norm,
+            now,
+            b.barcode
+          );
+          if (b.sync_id) {
+            enqueueSyncOutbox(db, "book", String(b.sync_id), "upsert", { barcode: String(b.barcode) });
+          }
+          updatedCount++;
+        }
+      }
+    });
+
+    if (updatedCount > 0) {
+      syncService?.notifyLocalMutation();
+    }
+    res.json({ ok: true, updatedCount, dominantUnit });
+  });
+
+  // Clean spurious volume labels from single-volume units without coverage_range across a set
+  app.post("/api/books/clean-set-single-volumes", requireAdmin, (req, res) => {
+    const setName = String(req.body?.setName || "").trim();
+    if (!setName) {
+      return res.status(400).json({ error: "נדרש שם סט" });
+    }
+    const rows = db.all<Record<string, any>>(
+      "SELECT * FROM books WHERE LOWER(set_name) = LOWER(?) AND deleted_at IS NULL",
+      setName
+    );
+    const now = new Date().toISOString();
+    let updatedCount = 0;
+
+    db.transaction(() => {
+      for (const b of rows) {
+        if (!String(b.volume || "").trim()) continue;
+        if (!shouldSuppressSingleVolumeLabel(
+          {
+            set_name: String(b.set_name || ""),
+            sub_series: String(b.sub_series || ""),
+            volume: String(b.volume || ""),
+            coverage_range: String(b.coverage_range || ""),
+            title: String(b.title || ""),
+          },
+          rows.map((r) => ({
+            sub_series: String(r.sub_series || ""),
+            volume: String(r.volume || ""),
+            coverage_range: String(r.coverage_range || ""),
+            title: String(r.title || ""),
+          }))
+        )) {
+          continue;
+        }
+        const tagsArr = parseTags(b.tags);
+        const norm = buildNormalizedBookSearch([
+          String(b.barcode),
+          String(b.title || ""),
+          String(b.set_name || ""),
+          String(b.sub_series || ""),
+          String(b.author || ""),
+          "",
+          String(b.coverage_range || ""),
+          String(b.publisher || ""),
+          String(b.pub_year || ""),
+          String(b.edition || ""),
+          String(b.category || ""),
+          tagsArr.join(" "),
+          String(b.notes || ""),
+        ]);
+        db.run(
+          "UPDATE books SET volume = '', normalized_search = ?, updated_at = ? WHERE barcode = ?",
+          norm,
+          now,
+          b.barcode
+        );
+        if (b.sync_id) {
+          enqueueSyncOutbox(db, "book", String(b.sync_id), "upsert", { barcode: String(b.barcode) });
+        }
+        updatedCount++;
+      }
+    });
+
+    if (updatedCount > 0) {
+      syncService?.notifyLocalMutation();
+    }
+    res.json({ ok: true, updatedCount });
   });
 
   // Stage 3: Circulation, Borrowers & CSV/Excel Import

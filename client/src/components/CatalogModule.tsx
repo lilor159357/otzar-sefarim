@@ -318,6 +318,13 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
   const [revSetSyncCount, setRevSetSyncCount] = useState<{ booksCount: number; queueCount: number } | null>(null);
   const [showRevPatternBuilder, setShowRevPatternBuilder] = useState(false);
   const [revPatternBuilderField, setRevPatternBuilderField] = useState<PatternTargetField>("title");
+  const [revReprintLabel, setRevReprintLabel] = useState(false);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(REV_SYNC_STORAGE_KEY, JSON.stringify(revSyncFields));
+    } catch {}
+  }, [revSyncFields]);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
@@ -504,6 +511,7 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
   useEffect(() => {
     if (!activeReviewItem) return;
     setSelectedQueueId(activeReviewItem.id);
+    setRevReprintLabel(false);
     setActiveImageIndex(0);
     setImgZoom(1);
     setImgRotate(0);
@@ -1023,11 +1031,11 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
     if (e) e.preventDefault();
     if (!activeReviewItem) return;
     const isBatchShelfSet = Boolean(activeReviewItem.is_shelf_set);
-    const cleanedVolumes = revVolumes.filter((v) => v.volume.trim());
+    const cleanedVolumes = revVolumes.filter((v) => v.volume.trim() || (v.sub_series || "").trim());
     const effectiveTitle = revTitle.trim() || revSetName.trim();
     if (!isBatchShelfSet && !effectiveTitle) return;
     if (isBatchShelfSet && cleanedVolumes.length === 0) {
-      setAiError("יש להגדיר לפחות כרך אחד בטבלת הסט לפני אישור");
+      setAiError("יש להגדיר לפחות כרך או תת-סדרה אחת בטבלת הסט לפני אישור");
       return;
     }
     setApproving(true);
@@ -1061,6 +1069,7 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
           shelf_number: revShelf,
           status: revStatus,
           copiesCount: Math.max(1, revCopies),
+          reprintLabel: Boolean(activeReviewItem.source_book_barcode && revReprintLabel),
           notes: revNotes.trim(),
         }),
       });
@@ -1072,12 +1081,17 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
         .map(([k]) => k);
       if (revSetName.trim() && checkedSyncKeys.length > 0) {
         const syncPayloadFields: Record<string, any> = {};
+        if (revSyncFields.sub_series) syncPayloadFields.sub_series = revSubSeries.trim();
+        if (revSyncFields.coverage_range) syncPayloadFields.coverage_range = revCoverageRange.trim();
         if (revSyncFields.author) syncPayloadFields.author = revAuthor.trim();
         if (revSyncFields.category) syncPayloadFields.category = revCategory.trim();
         if (revSyncFields.publisher) syncPayloadFields.publisher = revPublisher.trim();
         if (revSyncFields.edition) syncPayloadFields.edition = revEdition.trim();
         if (revSyncFields.pub_year) syncPayloadFields.pub_year = revPubYear.trim();
         if (revSyncFields.format_size) syncPayloadFields.format_size = revFormatSize.trim();
+        if (revSyncFields.thickness_mm) syncPayloadFields.thickness_mm = revThicknessMm.trim() ? Number(revThicknessMm) : null;
+        if (revSyncFields.pages_count) syncPayloadFields.pages_count = revPagesCount.trim() ? Number(revPagesCount) : null;
+        if (revSyncFields.notes) syncPayloadFields.notes = revNotes.trim();
         if (revSyncFields.status) syncPayloadFields.status = revStatus;
         if (revSyncFields.tags) {
           syncPayloadFields.tags = revTags
@@ -1105,8 +1119,11 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
           }
         } catch {}
       }
-      setRevSyncFields({});
-      setReviewNotice(`הספר אושר! ברקודים: ${data.barcodes.join(", ")}${syncMsg}`);
+      setReviewNotice(
+        activeReviewItem.source_book_barcode
+          ? `הספר הקיים #${data.barcodes.join(", ")} עודכן בהצלחה!${syncMsg}`
+          : `הספר אושר! ברקודים: ${data.barcodes.join(", ")}${syncMsg}`
+      );
       await Promise.all([loadQueue(), onReload()]);
     } catch (err: any) {
       setAiError(err?.message || "שגיאה באישור");
@@ -2408,6 +2425,24 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
                     </div>
                   )}
 
+                  {activeReviewItem.source_book_barcode && (
+                    <div className="p-2.5 rounded-lg border border-sky-300 bg-sky-50 dark:bg-sky-950/30 dark:border-sky-800 text-sky-900 dark:text-sky-200 text-xs flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <strong>עדכון ספר קיים #{activeReviewItem.source_book_barcode}:</strong>{" "}
+                        הברקוד הקיים, היסטוריית ההשאלות ומצב המדבקה יישמרו באישור.
+                      </div>
+                      <label className="inline-flex items-center gap-1.5 font-semibold cursor-pointer select-none">
+                        <input
+                          type="checkbox"
+                          checked={revReprintLabel}
+                          onChange={(e) => setRevReprintLabel(e.target.checked)}
+                          className="rounded accent-[var(--otzar-accent)]"
+                        />
+                        <span>סמן להדפסת מדבקה חוזרת</span>
+                      </label>
+                    </div>
+                  )}
+
                   {activeReviewItem.processing_status === "error" && (
                     <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-red-800 text-xs flex items-center justify-between">
                       <span>{activeReviewItem.error_message}</span>
@@ -2557,17 +2592,20 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
                         label="תת-סדרה / מסכת / חלק ראשי בסט"
                         labelAction={
                           revSetName.trim() ? (
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setRevPatternBuilderField("sub_series");
-                                setShowRevPatternBuilder(true);
-                              }}
-                              className="inline-flex items-center gap-1 text-[11px] font-bold text-[var(--otzar-accent)] hover:underline cursor-pointer"
-                            >
-                              <Wand2 className="w-3 h-3" />
-                              קבע תבנית לסט
-                            </button>
+                            <div className="flex items-center gap-2">
+                              {renderRevSyncCheckbox("sub_series")}
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setRevPatternBuilderField("sub_series");
+                                  setShowRevPatternBuilder(true);
+                                }}
+                                className="inline-flex items-center gap-1 text-[11px] font-bold text-[var(--otzar-accent)] hover:underline cursor-pointer"
+                              >
+                                <Wand2 className="w-3 h-3" />
+                                קבע תבנית לסט
+                              </button>
+                            </div>
                           ) : undefined
                         }
                         field="sub_series"
@@ -2588,7 +2626,10 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
                       />
                     </div>
                     <div>
-                      <label className="block text-xs font-medium mb-1">טווח סימנים / דפים / פרקים</label>
+                      <div className="flex items-center justify-between gap-2 mb-1">
+                        <label className="block text-xs font-medium">טווח סימנים / דפים / פרקים</label>
+                        {renderRevSyncCheckbox("coverage_range")}
+                      </div>
                       <input
                         type="text"
                         value={revCoverageRange}
@@ -2687,7 +2728,10 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
                         </datalist>
                       </div>
                       <div>
-                        <label className="block text-xs font-medium mb-1">עובי (מ״מ)</label>
+                        <div className="flex items-center justify-between gap-2 mb-1">
+                          <label className="block text-xs font-medium">עובי (מ״מ)</label>
+                          {renderRevSyncCheckbox("thickness_mm")}
+                        </div>
                         <input
                           type="number"
                           min={1}
@@ -2700,7 +2744,10 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
                         />
                       </div>
                       <div>
-                        <label className="block text-xs font-medium mb-1">עמודים</label>
+                        <div className="flex items-center justify-between gap-2 mb-1">
+                          <label className="block text-xs font-medium">עמודים</label>
+                          {renderRevSyncCheckbox("pages_count")}
+                        </div>
                         <input
                           type="number"
                           min={1}
@@ -2937,7 +2984,10 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
                       </select>
                     </div>
                     <div>
-                      <label className="block text-xs font-medium mb-1">הערות</label>
+                      <div className="flex items-center justify-between gap-2 mb-1">
+                        <label className="block text-xs font-medium">הערות</label>
+                        {renderRevSyncCheckbox("notes")}
+                      </div>
                       <input
                         type="text"
                         value={revNotes}
@@ -2947,12 +2997,44 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
                     </div>
                   </div>
 
-                  {revSetName.trim() && Object.values(revSyncFields).some(Boolean) && revSetSyncCount && (
-                    <div className="p-2.5 rounded-lg border border-amber-300 bg-amber-50 dark:bg-amber-950/30 dark:border-amber-800 text-amber-900 dark:text-amber-200 text-xs font-medium">
-                      סינכרון שדות בסט: השדות המסומנים יעדכנו יחד{" "}
-                      <strong>{revSetSyncCount.booksCount} ספרים במאגר</strong> ו-
-                      <strong>{revSetSyncCount.queueCount} פריטים ממתינים בתור ה-AI</strong>{" "}
-                      (תגיות יתמזגו ללא מחיקת תגיות ייחודיות, שם הסט עצמו מוחרג).
+                  {revSetName.trim() && (
+                    <div className="p-2.5 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-surface-alt)] text-xs flex flex-wrap items-center justify-between gap-2">
+                      <span className="text-[var(--otzar-text-muted)]">
+                        סימוני &quot;לכל הסט&quot; נשמרים גם בין אישורי ספרים.
+                        {Object.values(revSyncFields).some(Boolean) && revSetSyncCount ? (
+                          <span className="text-amber-800 dark:text-amber-300 font-semibold mr-1.5">
+                            יעדכן יחד {revSetSyncCount.booksCount} ספרים במאגר ו-{revSetSyncCount.queueCount} בתור ה-AI
+                          </span>
+                        ) : null}
+                      </span>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setRevSyncFields({
+                              author: true,
+                              category: true,
+                              publisher: true,
+                              edition: true,
+                              pub_year: true,
+                              format_size: true,
+                              location: true,
+                            })
+                          }
+                          className="text-[11px] font-semibold text-[var(--otzar-accent)] hover:underline cursor-pointer"
+                        >
+                          סמן פרטי מהדורה ומיקום
+                        </button>
+                        {Object.values(revSyncFields).some(Boolean) && (
+                          <button
+                            type="button"
+                            onClick={() => setRevSyncFields({})}
+                            className="text-[11px] text-[var(--otzar-text-muted)] hover:underline cursor-pointer"
+                          >
+                            נקה סימונים
+                          </button>
+                        )}
+                      </div>
                     </div>
                   )}
 
