@@ -73,7 +73,7 @@ import {
 
 
 interface SearchModuleProps {
-
+  isActive?: boolean;
   books: BookRow[];
 
   cabinets: CabinetRow[];
@@ -117,7 +117,7 @@ const SORT_STORAGE_KEY = "otzar_desktop_search_sort_v1";
 
 
 export const SearchModule: React.FC<SearchModuleProps> = ({
-
+  isActive = true,
   books,
 
   cabinets,
@@ -213,28 +213,18 @@ export const SearchModule: React.FC<SearchModuleProps> = ({
 
 
   useEffect(() => {
-
+    if (!isActive) return;
     fetch("/api/settings")
-
       .then((r) => (r.ok ? r.json() : null))
-
       .then((d) => {
-
         if (d && Array.isArray(d.ignored_missing_volumes)) {
-
           setIgnoredMissingKeys(
-
             new Set(d.ignored_missing_volumes.map((x: unknown) => String(x || "").trim()).filter(Boolean))
-
           );
-
         }
-
       })
-
       .catch(() => {});
-
-  }, [books.length]);
+  }, [books, isActive]);
 
 
 
@@ -546,50 +536,90 @@ export const SearchModule: React.FC<SearchModuleProps> = ({
 
           return compareCatalogBooks(a, b, volumeNotationRules);
 
-        case "title_asc":
-
-          return (a.title || "").localeCompare(b.title || "", "he");
-
-        case "title_desc":
-
-          return (b.title || "").localeCompare(a.title || "", "he");
-
-        case "author_asc":
-
-          return (a.author || "").localeCompare(b.author || "", "he");
-
+        case "title_asc": {
+          const tCmp = (a.title || "").localeCompare(b.title || "", "he");
+          return tCmp !== 0 ? tCmp : compareCatalogBooks(a, b, volumeNotationRules);
+        }
+        case "title_desc": {
+          const tCmp = (b.title || "").localeCompare(a.title || "", "he");
+          return tCmp !== 0 ? tCmp : compareCatalogBooks(b, a, volumeNotationRules);
+        }
+        case "author_asc": {
+          const aa = (a.author || "").trim();
+          const ab = (b.author || "").trim();
+          if (!aa && ab) return 1;
+          if (aa && !ab) return -1;
+          const cmp = aa.localeCompare(ab, "he");
+          return cmp !== 0 ? cmp : compareCatalogBooks(a, b, volumeNotationRules);
+        }
+        case "author_desc": {
+          const aa = (a.author || "").trim();
+          const ab = (b.author || "").trim();
+          if (!aa && ab) return 1;
+          if (aa && !ab) return -1;
+          const cmp = ab.localeCompare(aa, "he");
+          return cmp !== 0 ? cmp : compareCatalogBooks(a, b, volumeNotationRules);
+        }
         case "publisher_asc":
-
           return (a.publisher || "").localeCompare(b.publisher || "", "he");
-
         case "year_desc":
-
           return (b.pub_year || "").localeCompare(a.pub_year || "", "he");
-
         case "year_asc":
-
           return (a.pub_year || "").localeCompare(b.pub_year || "", "he");
-
         case "barcode_asc":
-
-          return (a.barcode || "").localeCompare(b.barcode || "");
-
+          return (a.barcode || "").localeCompare(b.barcode || "", undefined, { numeric: true });
+        case "barcode_desc":
+          return (b.barcode || "").localeCompare(a.barcode || "", undefined, { numeric: true });
         case "location_asc": {
-
           const cabA = a.cabinet_code || "תתת";
-
           const cabB = b.cabinet_code || "תתת";
-
-          if (cabA !== cabB) return cabA.localeCompare(cabB, "he");
-
+          if (cabA !== cabB) return cabA.localeCompare(cabB, "he", { numeric: true });
           const sA = a.shelf_number ?? 999;
-
           const sB = b.shelf_number ?? 999;
-
           if (sA !== sB) return sA - sB;
-
           return compareCatalogBooks(a, b, volumeNotationRules);
-
+        }
+        case "location_desc": {
+          const hasA = Boolean(a.cabinet_code);
+          const hasB = Boolean(b.cabinet_code);
+          if (hasA !== hasB) return hasA ? 1 : -1;
+          const cabA = a.cabinet_code || "";
+          const cabB = b.cabinet_code || "";
+          if (cabA !== cabB) return cabB.localeCompare(cabA, "he", { numeric: true });
+          const sA = a.shelf_number ?? -1;
+          const sB = b.shelf_number ?? -1;
+          if (sA !== sB) return sB - sA;
+          return compareCatalogBooks(a, b, volumeNotationRules);
+        }
+        case "status_asc": {
+          const rank: Record<string, number> = { available: 0, reference_only: 1, borrowed: 2 };
+          const ra = rank[a.status] ?? 9;
+          const rb = rank[b.status] ?? 9;
+          return ra !== rb ? ra - rb : compareCatalogBooks(a, b, volumeNotationRules);
+        }
+        case "status_desc": {
+          const rank: Record<string, number> = { available: 0, reference_only: 1, borrowed: 2 };
+          const ra = rank[a.status] ?? -1;
+          const rb = rank[b.status] ?? -1;
+          return ra !== rb ? rb - ra : compareCatalogBooks(a, b, volumeNotationRules);
+        }
+        case "map_asc": {
+          const mappedA = Boolean(a.cabinet_code && a.shelf_number != null);
+          const mappedB = Boolean(b.cabinet_code && b.shelf_number != null);
+          if (mappedA !== mappedB) return mappedA ? -1 : 1;
+          const cabCmp = (a.cabinet_code || "").localeCompare(b.cabinet_code || "", "he", { numeric: true });
+          if (cabCmp !== 0) return cabCmp;
+          const sCmp = (a.shelf_number ?? 999) - (b.shelf_number ?? 999);
+          return sCmp !== 0 ? sCmp : compareCatalogBooks(a, b, volumeNotationRules);
+        }
+        case "map_desc": {
+          const mappedA = Boolean(a.cabinet_code && a.shelf_number != null);
+          const mappedB = Boolean(b.cabinet_code && b.shelf_number != null);
+          if (mappedA !== mappedB) return mappedA ? 1 : -1;
+          const cabCmp = (b.cabinet_code || "").localeCompare(a.cabinet_code || "", "he", { numeric: true });
+          if (cabCmp !== 0) return cabCmp;
+          const sCmp = (b.shelf_number ?? -1) - (a.shelf_number ?? -1);
+          return sCmp !== 0 ? sCmp : compareCatalogBooks(a, b, volumeNotationRules);
         }
 
         case "recent_desc":
@@ -1518,22 +1548,21 @@ export const SearchModule: React.FC<SearchModuleProps> = ({
 
                 {searchQuery.trim() && <option value="relevance">התאמה לחיפוש</option>}
 
-                <option value="location_asc">ארון ומדף (לסידור)</option>
-
+                <option value="location_asc">ארון ומדף (א–ת)</option>
+                <option value="location_desc">ארון ומדף (הפוך / לא שויך)</option>
                 <option value="title_asc">שם ספר (א–ת)</option>
-
                 <option value="title_desc">שם ספר (ת–א)</option>
-
                 <option value="author_asc">מחבר (א–ת)</option>
-
+                <option value="author_desc">מחבר (ת–א)</option>
+                <option value="status_asc">זמינות (זמין תחילה)</option>
+                <option value="status_desc">זמינות (מושאל תחילה)</option>
+                <option value="map_asc">מפה (ממופים תחילה)</option>
+                <option value="map_desc">מפה (חסרי מפה תחילה)</option>
                 <option value="publisher_asc">הוצאה לאור (א–ת)</option>
-
                 <option value="year_desc">שנת הוצאה (חדש ← ישן)</option>
-
                 <option value="year_asc">שנת הוצאה (ישן ← חדש)</option>
-
                 <option value="barcode_asc">ברקוד (סדר עולה)</option>
-
+                <option value="barcode_desc">ברקוד (סדר יורד)</option>
                 <option value="recent_desc">נוספו לאחרונה</option>
 
               </select>
@@ -2210,17 +2239,52 @@ export const SearchModule: React.FC<SearchModuleProps> = ({
 
                   )}
 
-                  <th className="py-2.5 px-4 font-semibold">ברקוד</th>
-
-                  <th className="py-2.5 px-4 font-semibold">שם הספר</th>
-
-                  <th className="py-2.5 px-4 font-semibold">מחבר</th>
-
-                  <th className="py-2.5 px-4 font-semibold">מיקום</th>
-
-                  <th className="py-2.5 px-4 font-semibold">זמינות</th>
-
-                  <th className="py-2.5 px-4 font-semibold text-left">מפה</th>
+                  {([
+                    { key: "barcode", label: "ברקוד", align: "text-right" },
+                    { key: "title", label: "שם הספר", align: "text-right" },
+                    { key: "author", label: "מחבר", align: "text-right" },
+                    { key: "location", label: "מיקום", align: "text-right" },
+                    { key: "status", label: "זמינות", align: "text-right" },
+                    { key: "map", label: "מפה", align: "text-left" },
+                  ] as const).map((col) => {
+                    const isAsc = sortBy === `${col.key}_asc`;
+                    const isDesc = sortBy === `${col.key}_desc`;
+                    const isColActive = isAsc || isDesc;
+                    const nextLabel = isAsc
+                      ? "לחץ למיון יורד"
+                      : isDesc
+                      ? "לחץ לחזרה לסדר תורני"
+                      : "לחץ למיון עולה";
+                    return (
+                      <th
+                        key={col.key}
+                        aria-sort={isAsc ? "ascending" : isDesc ? "descending" : "none"}
+                        className={`py-2.5 px-4 font-semibold ${col.align}`}
+                      >
+                        <button
+                          type="button"
+                          title={`${col.label} — ${nextLabel}`}
+                          onClick={() => {
+                            if (isAsc) setSortBy(`${col.key}_desc`);
+                            else if (isDesc) setSortBy("torah_order");
+                            else setSortBy(`${col.key}_asc`);
+                          }}
+                          className={`group inline-flex items-center gap-1.5 px-2 py-1 -mx-2 rounded-md whitespace-nowrap cursor-pointer select-none transition-colors hover:bg-black/5 dark:hover:bg-white/5 hover:text-[var(--otzar-accent)] ${
+                            col.align === "text-left" ? "flex-row-reverse" : ""
+                          } ${isColActive ? "bg-[var(--otzar-accent)]/10 text-[var(--otzar-accent)] font-bold" : ""}`}
+                        >
+                          <span>{col.label}</span>
+                          {isAsc ? (
+                            <ArrowUp className="w-3.5 h-3.5 shrink-0 text-[var(--otzar-accent)]" />
+                          ) : isDesc ? (
+                            <ArrowDown className="w-3.5 h-3.5 shrink-0 text-[var(--otzar-accent)]" />
+                          ) : (
+                            <ArrowUpDown className="w-3.5 h-3.5 shrink-0 opacity-45 group-hover:opacity-100 transition-opacity" />
+                          )}
+                        </button>
+                      </th>
+                    );
+                  })}
 
                 </tr>
 
