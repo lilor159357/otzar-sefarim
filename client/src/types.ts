@@ -474,6 +474,7 @@ export interface SmartShelfPlan {
       shelfNumber: number;
       estimatedCapacityCm: number;
       totalThicknessCm: number;
+      estimatedUsedCm?: number;
       booksCount: number;
       fillPercent: number;
     }>;

@@ -361,13 +361,14 @@ export function registerLabelsAndAdminRoutes(app: Express, db: DbClient, dataDir
         .sort((a, b) => a.shelfNumber - b.shelfNumber)
         .map((s) => {
           const usedCm = round1(s.totalThicknessMm / 10);
-          const estUsedCm = usedCm > 0 ? usedCm : s.booksCount > 0 ? round1(s.booksCount * 2.8) : 0;
+          const estUsedCm = s.booksCount > 0 ? round1(usedCm + s.missingThicknessCount * 2.8) : 0;
           const fillPercent = Math.round((estUsedCm / estimatedCapacityCm) * 100);
           return {
             shelfNumber: s.shelfNumber,
             booksCount: s.booksCount,
             totalThicknessMm: round1(s.totalThicknessMm),
             totalThicknessCm: usedCm,
+            estimatedUsedCm: estUsedCm,
             estimatedCapacityCm,
             freeCm: round1(estimatedCapacityCm - estUsedCm),
             fillPercent,
@@ -728,6 +729,7 @@ export function registerLabelsAndAdminRoutes(app: Express, db: DbClient, dataDir
             shelfNumber: s.shelfNumber,
             estimatedCapacityCm: s.estimatedCapacityCm,
             totalThicknessCm: s.totalThicknessCm,
+            estimatedUsedCm: s.estimatedUsedCm,
             booksCount: s.booksCount,
             fillPercent: s.fillPercent,
           })),

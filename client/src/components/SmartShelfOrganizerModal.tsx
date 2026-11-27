@@ -629,146 +629,163 @@ export const SmartShelfOrganizerModal: React.FC<SmartShelfOrganizerModalProps> =
               </div>
             )}
 
-            {/* 2D Cabinets Grid */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
-              {displayCabinets.map((cab) => {
-                const count = Math.max(1, cab.shelves_count || 5);
-                const shelfNums = Array.from({ length: count }, (_, idx) =>
-                  prefs.shelfDirection === "bottom_up" ? count - idx : idx + 1
-                );
+            {/* 2D Bookcase Wall — floor-aligned so shorter cabinets align with bottom shelves */}
+            <div className="rounded-lg border border-[var(--otzar-border-muted)] bg-gradient-to-b from-[var(--otzar-bg)] to-[var(--otzar-surface-alt)]/50 px-3 pt-4 pb-2 overflow-x-auto">
+              <div className="inline-flex min-w-full items-end gap-3.5 border-b-4 border-stone-400/75 dark:border-stone-600">
+                {displayCabinets.map((cab) => {
+                  const count = Math.max(1, cab.shelves_count || 5);
+                  const shelfNums = Array.from({ length: count }, (_, idx) =>
+                    prefs.shelfDirection === "bottom_up" ? count - idx : idx + 1
+                  );
 
-                return (
-                  <div
-                    key={cab.id}
-                    className="rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] overflow-hidden flex flex-col"
-                  >
-                    <div className="px-3 py-2 bg-[var(--otzar-surface)] border-b border-[var(--otzar-border-muted)] flex items-center justify-between gap-2 text-xs">
-                      <span className="font-bold">ארון {cab.code}</span>
-                      {cab.main_subject && (
-                        <span className="text-[11px] text-[var(--otzar-text-muted)] truncate">
-                          {cab.main_subject}
-                        </span>
-                      )}
-                    </div>
+                  return (
+                    <div
+                      key={cab.id}
+                      className="min-w-[230px] flex-1 max-w-[300px] shrink-0 flex flex-col rounded-t-md border-x-[5px] border-t-[6px] border-amber-900/30 dark:border-amber-700/45 bg-[var(--otzar-bg)] shadow-sm overflow-hidden"
+                    >
+                      {/* Cabinet crown / top header */}
+                      <div className="px-2.5 py-1.5 bg-amber-950/[0.06] dark:bg-amber-900/20 border-b-[3px] border-amber-900/25 dark:border-amber-700/40 flex items-center justify-between gap-2 text-xs">
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <span className="font-bold whitespace-nowrap">ארון {cab.code}</span>
+                          <span className="text-[10px] text-[var(--otzar-text-muted)] tabular-nums whitespace-nowrap">
+                            ({count} מדפים)
+                          </span>
+                        </div>
+                        {cab.main_subject && (
+                          <span className="text-[10px] text-[var(--otzar-text-muted)] truncate">
+                            {cab.main_subject}
+                          </span>
+                        )}
+                      </div>
 
-                    <div className="divide-y divide-[var(--otzar-border-muted)]">
-                      {shelfNums.map((sNum) => {
-                        const key = `${cab.id}:${sNum}`;
-                        const inChain = chainIndexMap.get(key);
-                        const sp = shelfPlanMap.get(key);
-                        const shelfReport = cab.shelves?.find((sh) => sh.shelfNumber === sNum);
-                        const recNum = recordedIndexMap.get(key);
-                        const capCm = sp?.capacityCm || shelfReport?.estimatedCapacityCm || 116;
-                        const usedCm = sp ? sp.projectedUsedCm : shelfReport?.totalThicknessCm || 0;
-                        const pct = capCm > 0 ? Math.min(100, Math.round((usedCm / capCm) * 100)) : 0;
-                        const isOver = sp ? sp.isOverflow : (shelfReport?.fillPercent || 0) > 100;
+                      {/* Uniform-height shelves stacked from top to bottom */}
+                      <div className="flex flex-col">
+                        {shelfNums.map((sNum) => {
+                          const key = `${cab.id}:${sNum}`;
+                          const inChain = chainIndexMap.get(key);
+                          const sp = shelfPlanMap.get(key);
+                          const shelfReport = cab.shelves?.find((sh) => sh.shelfNumber === sNum);
+                          const recNum = recordedIndexMap.get(key);
+                          const capCm = sp?.capacityCm || shelfReport?.estimatedCapacityCm || 116;
+                          const usedCm = sp
+                            ? sp.projectedUsedCm
+                            : (shelfReport?.estimatedUsedCm ?? shelfReport?.totalThicknessCm ?? 0);
+                          const pct = capCm > 0 ? Math.min(100, Math.round((usedCm / capCm) * 100)) : 0;
+                          const isOver = sp ? sp.isOverflow : (shelfReport?.fillPercent || 0) > 100;
 
-                        const booksInSetCount = sp
-                          ? sp.expectedItems.reduce(
-                              (acc, it) => (it.kind !== "missing_slot" ? acc + it.copiesCount : acc),
-                              0
-                            )
-                          : 0;
-                        const hasMovesOnShelf =
-                          Boolean(sp && (sp.outgoingItems.length > 0 || sp.expectedItems.some((it) => it.kind === "incoming")));
-
-                        const badgeOrder = isRecording ? recNum : inChain?.order;
-
-                        return (
-                          <button
-                            key={sNum}
-                            type="button"
-                            disabled={loading}
-                            onClick={() =>
-                              handleShelfClickIn2DGrid(
-                                ms,
-                                cab.id,
-                                sNum,
-                                Boolean(inChain),
-                                Boolean(inChain?.step.isManuallyAdded)
+                          const booksInSetCount = sp
+                            ? sp.expectedItems.reduce(
+                                (acc, it) => (it.kind !== "missing_slot" ? acc + it.copiesCount : acc),
+                                0
                               )
-                            }
-                            title={
-                              isRecording
-                                ? recNum
-                                  ? `לחץ להסרה מסדר ההקלטה (נבחר כ-#${recNum})`
-                                  : `לחץ להוספה כמדף הבא בסדר ההקלטה`
-                                : inChain
-                                ? inChain.step.isManuallyAdded
-                                  ? "מדף פנוי שצורף ידנית — לחץ להסרתו מהשרשרת"
-                                  : `מדף #${inChain.order} בשרשרת הסט`
-                                : "מדף מחוץ לשרשרת — לחץ לצרף אותו לשרשרת הסט"
-                            }
-                            className={`w-full px-2.5 py-2 text-right transition-colors cursor-pointer flex flex-col gap-1 ${
-                              isRecording
-                                ? recNum
-                                  ? "bg-[var(--otzar-accent)]/15 hover:bg-[var(--otzar-accent)]/20"
-                                  : inChain
-                                  ? "bg-amber-50/50 dark:bg-amber-950/15 hover:bg-[var(--otzar-surface-alt)]"
-                                  : "hover:bg-[var(--otzar-surface-alt)] opacity-75 hover:opacity-100"
-                                : inChain
-                                ? hasMovesOnShelf
-                                  ? "bg-amber-50/60 dark:bg-amber-950/20 hover:bg-amber-100/50 dark:hover:bg-amber-950/30"
-                                  : "bg-[var(--otzar-surface)]/50 hover:bg-[var(--otzar-surface-alt)]"
-                                : "opacity-60 hover:opacity-100 hover:bg-[var(--otzar-surface-alt)]"
-                            }`}
-                          >
-                            <div className="flex items-center justify-between gap-2 text-[11px] tabular-nums">
-                              <div className="flex items-center gap-1.5 min-w-0">
-                                {badgeOrder != null ? (
-                                  <span
-                                    className={`inline-flex items-center justify-center min-w-[20px] h-5 px-1 rounded text-[10px] font-bold text-white ${
-                                      isRecording ? "bg-emerald-600" : "bg-[var(--otzar-accent)]"
-                                    }`}
-                                  >
-                                    {badgeOrder}
-                                  </span>
-                                ) : (
-                                  <span className="inline-flex items-center justify-center min-w-[20px] h-5 px-1 rounded text-[10px] border border-dashed border-[var(--otzar-border-muted)] text-[var(--otzar-text-muted)]">
-                                    +
-                                  </span>
-                                )}
-                                <span className="font-bold">מדף {sNum}</span>
-                                {inChain?.step.isManuallyAdded && (
-                                  <span className="text-[10px] text-[var(--otzar-accent)]">(נוסף)</span>
-                                )}
-                              </div>
-                              <span className="text-[10px] text-[var(--otzar-text-muted)]">
-                                {inChain
-                                  ? booksInSetCount > 0
-                                    ? `${booksInSetCount} כרכים`
-                                    : "ריק לשרשרת"
-                                  : shelfReport && shelfReport.booksCount > 0
-                                  ? `${shelfReport.booksCount} ספרים אחרים`
-                                  : "מדף פנוי"}
-                              </span>
-                            </div>
+                            : 0;
+                          const hasMovesOnShelf =
+                            Boolean(sp && (sp.outgoingItems.length > 0 || sp.expectedItems.some((it) => it.kind === "incoming")));
 
-                            {/* Shelf fill progress bar */}
-                            <div className="flex items-center gap-2 text-[10px] tabular-nums text-[var(--otzar-text-muted)]">
-                              <div className="flex-1 h-1.5 rounded-full bg-[var(--otzar-surface-alt)] overflow-hidden">
-                                <div
-                                  style={{ width: `${pct}%` }}
-                                  className={`h-full transition-all ${
-                                    isOver
-                                      ? "bg-red-600"
-                                      : pct > 85
-                                      ? "bg-amber-500"
-                                      : inChain
-                                      ? "bg-[var(--otzar-accent)]"
-                                      : "bg-slate-400"
-                                  }`}
-                                />
+                          const badgeOrder = isRecording ? recNum : inChain?.order;
+
+                          return (
+                            <button
+                              key={sNum}
+                              type="button"
+                              disabled={loading}
+                              onClick={() =>
+                                handleShelfClickIn2DGrid(
+                                  ms,
+                                  cab.id,
+                                  sNum,
+                                  Boolean(inChain),
+                                  Boolean(inChain?.step.isManuallyAdded)
+                                )
+                              }
+                              title={
+                                isRecording
+                                  ? recNum
+                                    ? `לחץ להסרה מסדר ההקלטה (נבחר כ-#${recNum})`
+                                    : `לחץ להוספה כמדף הבא בסדר ההקלטה`
+                                  : inChain
+                                  ? inChain.step.isManuallyAdded
+                                    ? "מדף פנוי שצורף ידנית — לחץ להסרתו מהשרשרת"
+                                    : `מדף #${inChain.order} בשרשרת הסט`
+                                  : "מדף מחוץ לשרשרת — לחץ לצרף אותו לשרשרת הסט"
+                              }
+                              className={`w-full h-[62px] px-2.5 py-1.5 text-right transition-colors cursor-pointer flex flex-col justify-between border-b-[3px] border-amber-900/25 dark:border-amber-700/40 ${
+                                isRecording
+                                  ? recNum
+                                    ? "bg-[var(--otzar-accent)]/15 hover:bg-[var(--otzar-accent)]/20"
+                                    : inChain
+                                    ? "bg-amber-50/50 dark:bg-amber-950/15 hover:bg-[var(--otzar-surface-alt)]"
+                                    : "hover:bg-[var(--otzar-surface-alt)] opacity-75 hover:opacity-100"
+                                  : inChain
+                                  ? hasMovesOnShelf
+                                    ? "bg-amber-50/60 dark:bg-amber-950/20 hover:bg-amber-100/50 dark:hover:bg-amber-950/30"
+                                    : "bg-[var(--otzar-surface)]/65 hover:bg-[var(--otzar-surface-alt)]"
+                                  : "bg-[var(--otzar-bg)] opacity-70 hover:opacity-100 hover:bg-[var(--otzar-surface-alt)]"
+                              }`}
+                            >
+                              <div className="flex items-center justify-between gap-2 text-[11px] tabular-nums">
+                                <div className="flex items-center gap-1.5 min-w-0">
+                                  {badgeOrder != null ? (
+                                    <span
+                                      className={`inline-flex items-center justify-center min-w-[20px] h-5 px-1 rounded text-[10px] font-bold text-white ${
+                                        isRecording ? "bg-emerald-600" : "bg-[var(--otzar-accent)]"
+                                      }`}
+                                    >
+                                      {badgeOrder}
+                                    </span>
+                                  ) : (
+                                    <span className="inline-flex items-center justify-center min-w-[20px] h-5 px-1 rounded text-[10px] border border-dashed border-[var(--otzar-border-muted)] text-[var(--otzar-text-muted)]">
+                                      +
+                                    </span>
+                                  )}
+                                  <span className="font-bold">מדף {sNum}</span>
+                                  {inChain?.step.isManuallyAdded && (
+                                    <span className="text-[10px] text-[var(--otzar-accent)]">(נוסף)</span>
+                                  )}
+                                </div>
+                                <span className="text-[10px] text-[var(--otzar-text-muted)] truncate">
+                                  {inChain
+                                    ? booksInSetCount > 0
+                                      ? `${booksInSetCount} כרכים`
+                                      : "ריק לשרשרת"
+                                    : shelfReport && shelfReport.booksCount > 0
+                                    ? `${shelfReport.booksCount} ספרים אחרים`
+                                    : "מדף פנוי"}
+                                </span>
                               </div>
-                              <span>{Math.round(usedCm)}/{Math.round(capCm)} ס״מ</span>
-                            </div>
-                          </button>
-                        );
-                      })}
+
+                              {/* Shelf book-fill progress bar resting right above the wood plank */}
+                              <div className="flex items-center gap-2 text-[10px] tabular-nums text-[var(--otzar-text-muted)]">
+                                <div className="flex-1 h-2 rounded-xs bg-[var(--otzar-surface-alt)] overflow-hidden">
+                                  <div
+                                    style={{ width: `${pct}%` }}
+                                    className={`h-full transition-all ${
+                                      isOver
+                                        ? "bg-red-600"
+                                        : pct > 85
+                                        ? "bg-amber-500"
+                                        : inChain
+                                        ? "bg-[var(--otzar-accent)]"
+                                        : "bg-slate-400"
+                                    }`}
+                                  />
+                                </div>
+                                <span>{Math.round(usedCm)}/{Math.round(capCm)} ס״מ</span>
+                              </div>
+                            </button>
+                          );
+                        })}
+                      </div>
+
+                      {/* Cabinet floor plinth */}
+                      <div className="h-2.5 bg-amber-950/15 dark:bg-amber-800/30" />
                     </div>
-                  </div>
-                );
-              })}
+                  );
+                })}
+              </div>
+              <div className="mt-1 flex items-center justify-between text-[10px] text-[var(--otzar-text-muted)] px-1">
+                <span>קו רצפת בית המדרש (ארונות נמוכים מיושרים למדפים התחתונים של הארונות הגבוהים)</span>
+              </div>
             </div>
           </div>
 

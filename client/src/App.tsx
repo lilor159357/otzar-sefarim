@@ -1177,7 +1177,7 @@ export default function App() {
       <BugReportModal
         isOpen={showBugReportModal}
         onClose={() => setShowBugReportModal(false)}
-        appVersion="v1.0.29"
+        appVersion="v1.0.30"
         totalBooks={books.length}
         totalCabinets={cabinets.length}
       />
