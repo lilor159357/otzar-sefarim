@@ -463,15 +463,21 @@ export default function App() {
         </aside>
 
         {/* Main Workspace */}
-        <main className="flex-1 min-w-0 overflow-y-auto p-6 space-y-6">
+        <main
+          className={
+            effectiveTab === "search"
+              ? "flex-1 min-w-0 min-h-0 flex flex-col overflow-hidden p-6 gap-4"
+              : "flex-1 min-w-0 overflow-y-auto p-6 space-y-6"
+          }
+        >
           {errorMsg && (
-            <div className="p-3.5 rounded-lg border border-red-300 bg-red-50 text-red-800 text-sm">
+            <div className="shrink-0 p-3.5 rounded-lg border border-red-300 bg-red-50 text-red-800 text-sm">
               {errorMsg}
             </div>
           )}
 
           {isAdmin && updateBehindCount > 0 && !dismissUpdateBanner && !(effectiveTab === "admin" && adminSubTab === "settings") && (
-            <div className="p-3 rounded-xl border border-[var(--otzar-accent)]/40 bg-[var(--otzar-surface)] flex flex-wrap items-center justify-between gap-2 text-sm">
+            <div className="shrink-0 p-3 rounded-xl border border-[var(--otzar-accent)]/40 bg-[var(--otzar-surface)] flex flex-wrap items-center justify-between gap-2 text-sm">
               <div className="flex items-center gap-2 font-medium">
                 <RefreshCw className="w-4 h-4 text-[var(--otzar-accent)] shrink-0" />
                 <span>
@@ -1177,7 +1183,7 @@ export default function App() {
       <BugReportModal
         isOpen={showBugReportModal}
         onClose={() => setShowBugReportModal(false)}
-        appVersion="v1.0.30"
+        appVersion="v1.0.31"
         totalBooks={books.length}
         totalCabinets={cabinets.length}
       />

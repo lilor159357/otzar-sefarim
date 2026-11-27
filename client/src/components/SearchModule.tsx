@@ -1290,9 +1290,9 @@ export const SearchModule: React.FC<SearchModuleProps> = ({
 
   return (
 
-    <div className="space-y-4 max-w-7xl">
+    <div className="flex-1 min-h-0 flex flex-col gap-4 max-w-7xl w-full">
 
-      <div className="flex flex-wrap items-center justify-between gap-4">
+      <div className="shrink-0 flex flex-wrap items-center justify-between gap-4">
 
         <div>
 
@@ -1368,7 +1368,7 @@ export const SearchModule: React.FC<SearchModuleProps> = ({
 
       {/* Main Search & Top Sort Bar */}
 
-      <div className="p-4 rounded-xl border border-[var(--otzar-border-muted)] bg-[var(--otzar-surface-alt)] space-y-3">
+      <div className="shrink-0 p-4 rounded-xl border border-[var(--otzar-border-muted)] bg-[var(--otzar-surface-alt)] space-y-3">
 
         <div className="relative">
 
@@ -1601,7 +1601,7 @@ export const SearchModule: React.FC<SearchModuleProps> = ({
 
           onSubmit={handleQuickAdd}
 
-          className="p-4 rounded-xl border border-[var(--otzar-border)] bg-[var(--otzar-surface)] grid grid-cols-1 md:grid-cols-6 gap-3 items-end"
+          className="shrink-0 max-h-[42vh] overflow-y-auto p-4 rounded-xl border border-[var(--otzar-border)] bg-[var(--otzar-surface)] grid grid-cols-1 md:grid-cols-6 gap-3 items-end"
 
         >
 
@@ -1723,7 +1723,7 @@ export const SearchModule: React.FC<SearchModuleProps> = ({
 
       {saveNotice && (
 
-        <div className="flex items-center gap-2 p-3 rounded-lg border border-emerald-300 bg-emerald-50 dark:bg-emerald-950/30 dark:border-emerald-800 text-emerald-800 dark:text-emerald-200 text-sm">
+        <div className="shrink-0 flex items-center gap-2 p-3 rounded-lg border border-emerald-300 bg-emerald-50 dark:bg-emerald-950/30 dark:border-emerald-800 text-emerald-800 dark:text-emerald-200 text-sm">
 
           <CheckCircle2 className="w-4 h-4 shrink-0" />
 
@@ -1735,7 +1735,7 @@ export const SearchModule: React.FC<SearchModuleProps> = ({
 
       {saveError && (
 
-        <div className="flex items-center gap-2 p-3 rounded-lg border border-red-300 bg-red-50 dark:bg-red-950/30 dark:border-red-800 text-red-800 dark:text-red-200 text-sm">
+        <div className="shrink-0 flex items-center gap-2 p-3 rounded-lg border border-red-300 bg-red-50 dark:bg-red-950/30 dark:border-red-800 text-red-800 dark:text-red-200 text-sm">
 
           <AlertCircle className="w-4 h-4 shrink-0" />
 
@@ -1749,11 +1749,11 @@ export const SearchModule: React.FC<SearchModuleProps> = ({
 
       {/* Dual-zone Workspace: RTL Filter Sidebar + Results Table */}
 
-      <div className="flex flex-col lg:flex-row gap-4 items-start">
+      <div className="flex-1 min-h-0 flex flex-col lg:flex-row gap-4 items-stretch overflow-hidden">
 
         {sidebarOpen && (
 
-          <aside className="w-full lg:w-[252px] shrink-0 rounded-xl border border-[var(--otzar-border-muted)] bg-[var(--otzar-surface-alt)] p-3.5 space-y-3 text-xs">
+          <aside className="w-full lg:w-[252px] shrink-0 rounded-xl border border-[var(--otzar-border-muted)] bg-[var(--otzar-surface-alt)] p-3.5 space-y-3 text-xs lg:h-full max-h-[38vh] lg:max-h-none overflow-y-auto">
 
             <div className="flex items-center justify-between border-b border-[var(--otzar-border-muted)] pb-2">
 
@@ -2047,13 +2047,13 @@ export const SearchModule: React.FC<SearchModuleProps> = ({
 
         {/* Right/Left Main Table Workspace */}
 
-        <div className="flex-1 min-w-0 w-full space-y-3">
+        <div className="flex-1 min-w-0 min-h-0 w-full flex flex-col gap-3">
 
           {/* Bulk Action Bar (visible when admin selects 1+ books) */}
 
           {isAdmin && selectedBarcodes.length > 0 && (
 
-            <div className="p-3 rounded-xl border border-[var(--otzar-accent)]/50 bg-[var(--otzar-surface)] flex flex-wrap items-center justify-between gap-3 text-xs">
+            <div className="shrink-0 p-3 rounded-xl border border-[var(--otzar-accent)]/50 bg-[var(--otzar-surface)] flex flex-wrap items-center justify-between gap-3 text-xs">
 
               <div className="flex items-center gap-2 font-bold text-[var(--otzar-accent)] tabular-nums">
 
@@ -2209,11 +2209,11 @@ export const SearchModule: React.FC<SearchModuleProps> = ({
 
           {/* Results Table */}
 
-          <div className="rounded-xl border border-[var(--otzar-border-muted)] overflow-hidden bg-[var(--otzar-bg)]">
+          <div className="flex-1 min-h-0 rounded-xl border border-[var(--otzar-border-muted)] overflow-auto bg-[var(--otzar-bg)]">
 
             <table className="w-full text-sm text-right border-collapse">
 
-              <thead className="bg-[var(--otzar-surface-alt)] border-b border-[var(--otzar-border-muted)] text-[var(--otzar-text-muted)] text-xs">
+              <thead className="sticky top-0 z-10 bg-[var(--otzar-surface-alt)] border-b border-[var(--otzar-border-muted)] text-[var(--otzar-text-muted)] text-xs shadow-[0_1px_0_var(--otzar-border-muted)]">
 
                 <tr>
 
