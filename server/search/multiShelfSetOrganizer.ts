@@ -101,6 +101,10 @@ export interface ShelfSequencePlan {
   missingReservedCm: number;
   borrowedCount: number;
   borrowedCm: number;
+  currentSetCount: number;
+  incomingCount: number;
+  outgoingCount: number;
+  currentUsedCm: number;
   projectedUsedCm: number;
   fillPercent: number;
   isOverflow: boolean;
@@ -773,6 +777,17 @@ export function analyzeMultiShelfSets(params: {
           }
         }
 
+        const stayingCount = expectedItems.reduce(
+          (acc, it) => (it.kind === "staying" ? acc + it.copiesCount : acc),
+          0
+        );
+        const incomingCount = expectedItems.reduce(
+          (acc, it) => (it.kind === "incoming" ? acc + it.copiesCount : acc),
+          0
+        );
+        const outgoingCount = outgoingItems.reduce((acc, oi) => acc + oi.copiesCount, 0);
+        const currentSetCount = stayingCount + outgoingCount;
+        const currentUsedCm = round1(stayingCm[sIdx] + outgoingCm[sIdx] + step.foreignCm);
         const projectedUsedCm = round1(
           projectedSetCm[sIdx] + step.foreignCm + missingReservedCmPerShelf[sIdx]
         );
@@ -794,6 +809,10 @@ export function analyzeMultiShelfSets(params: {
           missingReservedCm: missingReservedCmPerShelf[sIdx],
           borrowedCount: borrowedCountsPerShelf[sIdx],
           borrowedCm: round1(borrowedCmPerShelf[sIdx]),
+          currentSetCount,
+          incomingCount,
+          outgoingCount,
+          currentUsedCm,
           projectedUsedCm,
           fillPercent,
           isOverflow: shelfOverflowCm[sIdx] > 0,

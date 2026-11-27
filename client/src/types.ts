@@ -410,6 +410,10 @@ export interface ShelfSequencePlan {
   missingReservedCm: number;
   borrowedCount: number;
   borrowedCm: number;
+  currentSetCount?: number;
+  incomingCount?: number;
+  outgoingCount?: number;
+  currentUsedCm?: number;
   projectedUsedCm: number;
   fillPercent: number;
   isOverflow: boolean;
