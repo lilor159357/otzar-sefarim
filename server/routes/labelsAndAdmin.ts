@@ -722,6 +722,15 @@ export function registerLabelsAndAdminRoutes(app: Express, db: DbClient, dataDir
         code: c.code,
         main_subject: c.main_subject,
         shelves_count: c.shelves_count,
+        shelves: c.shelves
+          .filter((s) => s.shelfNumber > 0)
+          .map((s) => ({
+            shelfNumber: s.shelfNumber,
+            estimatedCapacityCm: s.estimatedCapacityCm,
+            totalThicknessCm: s.totalThicknessCm,
+            booksCount: s.booksCount,
+            fillPercent: s.fillPercent,
+          })),
       }));
     res.json({ ok: true, summary, aiUsed, aiError, moves, multiShelfSets, prefs: effectivePrefs, cabinetsMeta });
   });

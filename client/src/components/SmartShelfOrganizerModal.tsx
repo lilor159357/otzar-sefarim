@@ -6,13 +6,13 @@ import {
   Loader2,
   ArrowLeftRight,
   AlertTriangle,
-  ArrowUp,
-  ArrowDown,
-  Plus,
   RotateCcw,
   ChevronDown,
   ChevronUp,
   Layers,
+  CircleDot,
+  Undo2,
+  Building2,
 } from "lucide-react";
 import type {
   CustomShelfOrderItem,
@@ -54,6 +54,27 @@ function saveLocalPrefs(prefs: SmartShelfPrefs) {
   } catch {}
 }
 
+function compareNaturalCodes(aCode: string, bCode: string): number {
+  const aParts = String(aCode || "").trim().split(/(\d+)/);
+  const bParts = String(bCode || "").trim().split(/(\d+)/);
+  const maxLen = Math.max(aParts.length, bParts.length);
+  for (let i = 0; i < maxLen; i++) {
+    const ap = aParts[i] ?? "";
+    const bp = bParts[i] ?? "";
+    if (!ap && !bp) continue;
+    const aNum = /^\d+$/.test(ap);
+    const bNum = /^\d+$/.test(bp);
+    if (aNum && bNum) {
+      const diff = Number(ap) - Number(bp);
+      if (diff !== 0) return diff;
+    } else {
+      const cmp = ap.localeCompare(bp, "he", { sensitivity: "base" });
+      if (cmp !== 0) return cmp;
+    }
+  }
+  return 0;
+}
+
 const SEVERITY_LABEL: Record<SmartShelfMove["severity"], { text: string; cls: string }> = {
   high: { text: "דחוף", cls: "text-red-700 dark:text-red-400 font-bold" },
   warning: { text: "מומלץ", cls: "text-amber-700 dark:text-amber-400 font-semibold" },
@@ -72,9 +93,12 @@ export const SmartShelfOrganizerModal: React.FC<SmartShelfOrganizerModalProps> =
   const [setModes, setSetModes] = useState<Record<string, "minimal" | "rebalance">>({});
   const [expandedSequences, setExpandedSequences] = useState<Record<string, boolean>>({});
   const [showOrderedSets, setShowOrderedSets] = useState(false);
-  const [addingShelfForSet, setAddingShelfForSet] = useState<string | null>(null);
-  const [newStepCabinetId, setNewStepCabinetId] = useState<string>("");
-  const [newStepShelfNum, setNewStepShelfNum] = useState<number>(1);
+
+  // Click-to-record shelf order mode + 2D cabinet grid controls
+  const [recordingSetName, setRecordingSetName] = useState<string | null>(null);
+  const [recordedChain, setRecordedChain] = useState<CustomShelfOrderItem[]>([]);
+  const [showAllCabsForSet, setShowAllCabsForSet] = useState<Record<string, boolean>>({});
+
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -279,78 +303,76 @@ export const SmartShelfOrganizerModal: React.FC<SmartShelfOrganizerModalProps> =
     await runAnalysis(useAi, nextPrefs);
   };
 
-  const moveChainStep = async (ms: MultiShelfSetAnalysis, idx: number, delta: -1 | 1) => {
-    const targetIdx = idx + delta;
-    if (targetIdx < 0 || targetIdx >= ms.shelfChain.length) return;
-    const chain: CustomShelfOrderItem[] = ms.shelfChain.map((s) => ({
-      cabinetId: s.cabinetId,
-      shelfNumber: s.shelfNumber,
-      manual: s.isManuallyAdded,
-    }));
-    const [moved] = chain.splice(idx, 1);
-    chain.splice(targetIdx, 0, moved);
-    await updateSetChain(ms, chain);
+  const startRecording = (ms: MultiShelfSetAnalysis) => {
+    setRecordingSetName(ms.setName);
+    setRecordedChain([]);
   };
 
-  const removeManualChainStep = async (ms: MultiShelfSetAnalysis, idx: number) => {
-    const step = ms.shelfChain[idx];
-    if (!step || !step.isManuallyAdded) return;
-    const chain: CustomShelfOrderItem[] = ms.shelfChain
-      .filter((_, i) => i !== idx)
-      .map((s) => ({
-        cabinetId: s.cabinetId,
-        shelfNumber: s.shelfNumber,
-        manual: s.isManuallyAdded,
-      }));
-    await updateSetChain(ms, chain);
+  const cancelRecording = () => {
+    setRecordingSetName(null);
+    setRecordedChain([]);
   };
 
-  const handleAddShelfToChain = async (ms: MultiShelfSetAnalysis) => {
-    const cabIdNum = Number(newStepCabinetId);
-    if (!cabIdNum) return;
-    const exists = ms.shelfChain.some(
-      (s) => s.cabinetId === cabIdNum && s.shelfNumber === newStepShelfNum
-    );
-    if (exists) {
-      setAddingShelfForSet(null);
-      return;
-    }
-    const chain: CustomShelfOrderItem[] = [
-      ...ms.shelfChain.map((s) => ({
-        cabinetId: s.cabinetId,
-        shelfNumber: s.shelfNumber,
-        manual: s.isManuallyAdded,
-      })),
-      { cabinetId: cabIdNum, shelfNumber: newStepShelfNum, manual: true },
-    ];
-    setAddingShelfForSet(null);
-    await updateSetChain(ms, chain);
-  };
-
-  const openAddShelfPicker = (ms: MultiShelfSetAnalysis) => {
-    if (addingShelfForSet === ms.setName) {
-      setAddingShelfForSet(null);
-      return;
-    }
-    const lastStep = ms.shelfChain[ms.shelfChain.length - 1];
-    const cabsMeta = plan?.cabinetsMeta || [];
-    const defaultCab =
-      cabsMeta.find((c) => c.id === lastStep?.cabinetId) || cabsMeta[0] || null;
-    if (defaultCab) {
-      setNewStepCabinetId(String(defaultCab.id));
-      const usedInCab = new Set(
-        ms.shelfChain.filter((s) => s.cabinetId === defaultCab.id).map((s) => s.shelfNumber)
-      );
-      let suggestedShelf = 1;
-      for (let s = 1; s <= defaultCab.shelves_count; s++) {
-        if (!usedInCab.has(s)) {
-          suggestedShelf = s;
-          break;
+  const handleShelfClickIn2DGrid = async (
+    ms: MultiShelfSetAnalysis,
+    cabinetId: number,
+    shelfNumber: number,
+    isInSetChain: boolean,
+    isManuallyAdded: boolean
+  ) => {
+    const isRecording = recordingSetName === ms.setName;
+    if (isRecording) {
+      setRecordedChain((prev) => {
+        const existingIdx = prev.findIndex(
+          (x) => x.cabinetId === cabinetId && x.shelfNumber === shelfNumber
+        );
+        if (existingIdx >= 0) {
+          return prev.filter((_, idx) => idx !== existingIdx);
         }
-      }
-      setNewStepShelfNum(suggestedShelf);
+        return [
+          ...prev,
+          {
+            cabinetId,
+            shelfNumber,
+            manual: !isInSetChain || isManuallyAdded,
+          },
+        ];
+      });
+      return;
     }
-    setAddingShelfForSet(ms.setName);
+
+    // Outside recording mode: clicking an empty shelf toggles adding/removing it in the set chain
+    if (!isInSetChain) {
+      const nextChain: CustomShelfOrderItem[] = [
+        ...ms.shelfChain.map((s) => ({
+          cabinetId: s.cabinetId,
+          shelfNumber: s.shelfNumber,
+          manual: s.isManuallyAdded,
+        })),
+        { cabinetId, shelfNumber, manual: true },
+      ];
+      await updateSetChain(ms, nextChain);
+    } else if (isManuallyAdded) {
+      const nextChain: CustomShelfOrderItem[] = ms.shelfChain
+        .filter((s) => !(s.cabinetId === cabinetId && s.shelfNumber === shelfNumber))
+        .map((s) => ({
+          cabinetId: s.cabinetId,
+          shelfNumber: s.shelfNumber,
+          manual: s.isManuallyAdded,
+        }));
+      await updateSetChain(ms, nextChain);
+    }
+  };
+
+  const finishRecording = async (ms: MultiShelfSetAnalysis) => {
+    if (recordedChain.length === 0) {
+      cancelRecording();
+      return;
+    }
+    const chainCopy = [...recordedChain];
+    setRecordingSetName(null);
+    setRecordedChain([]);
+    await updateSetChain(ms, chainCopy);
   };
 
   const handleApplySelected = async () => {
@@ -391,17 +413,46 @@ export const SmartShelfOrganizerModal: React.FC<SmartShelfOrganizerModalProps> =
     (ms) => ms.minimalMode.isOrdered && ms.shelfChain.every((s) => s.foreignAlerts.length === 0)
   );
 
-  const selectedCabForPicker = (plan?.cabinetsMeta || []).find(
-    (c) => String(c.id) === newStepCabinetId
-  );
-
   const renderMultiShelfCard = (ms: MultiShelfSetAnalysis) => {
     const activeMode = setModes[ms.setName] || "minimal";
     const modeRes = activeMode === "rebalance" ? ms.rebalanceMode : ms.minimalMode;
     const isSeqExpanded = Boolean(expandedSequences[ms.setName]);
+    const isRecording = recordingSetName === ms.setName;
+    const showAllCabs = Boolean(showAllCabsForSet[ms.setName]);
+
     const foreignAlertsAll = ms.shelfChain.flatMap((step) =>
-      step.foreignAlerts.map((fa) => ({ ...fa, cabinetCode: step.cabinetCode, shelfNumber: step.shelfNumber }))
+      step.foreignAlerts.map((fa) => ({
+        ...fa,
+        cabinetCode: step.cabinetCode,
+        shelfNumber: step.shelfNumber,
+      }))
     );
+
+    const chainIndexMap = new Map<string, { order: number; step: typeof ms.shelfChain[number] }>();
+    ms.shelfChain.forEach((step, idx) => {
+      chainIndexMap.set(`${step.cabinetId}:${step.shelfNumber}`, { order: idx + 1, step });
+    });
+
+    const shelfPlanMap = new Map<string, typeof modeRes.shelfPlans[number]>();
+    modeRes.shelfPlans.forEach((sp) => {
+      shelfPlanMap.set(`${sp.cabinetId}:${sp.shelfNumber}`, sp);
+    });
+
+    const recordedIndexMap = new Map<string, number>();
+    if (isRecording) {
+      recordedChain.forEach((rc, idx) => {
+        recordedIndexMap.set(`${rc.cabinetId}:${rc.shelfNumber}`, idx + 1);
+      });
+    }
+
+    // Build 2D cabinet list: participating cabinets (or all cabinets when toggled) sorted naturally
+    const participatingCabIds = new Set(ms.shelfChain.map((s) => s.cabinetId));
+    const allCabsMeta = plan?.cabinetsMeta || [];
+    const displayCabinets = (
+      showAllCabs
+        ? allCabsMeta
+        : allCabsMeta.filter((c) => participatingCabIds.has(c.id))
+    ).sort((a, b) => compareNaturalCodes(a.code, b.code));
 
     return (
       <div
@@ -479,130 +530,250 @@ export const SmartShelfOrganizerModal: React.FC<SmartShelfOrganizerModalProps> =
             </div>
           )}
 
-          {/* Editable Shelf Chain Strip */}
-          <div className="p-3.5 space-y-2.5 bg-[var(--otzar-surface-alt)]/30">
+          {/* 2D Cabinet & Shelf Grid + Click-to-Record Order */}
+          <div className="p-4 space-y-3 bg-[var(--otzar-surface-alt)]/25">
             <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
-              <span className="font-semibold text-[var(--otzar-text-muted)]">
-                סדר שרשרת המדפים עבור סט זה (ניתנת לסידור ידני):
-              </span>
-              <div className="flex items-center gap-2">
-                {ms.hasCustomOrder && (
+              <div className="space-y-0.5">
+                <div className="font-bold text-[var(--otzar-text)]">
+                  מבט ארונות דו-ממדי והיררכיית המדפים
+                </div>
+                <div className="text-[11px] text-[var(--otzar-text-muted)]">
+                  {isRecording
+                    ? "לחץ על המדפים בארונות לפי הסדר הפיזי הרצוי (#1 ← #2 ← #3...). לחיצה חוזרת על מדף תסיר אותו."
+                    : "מוצגים הארונות והמדפים של הסט במבנה דו-ממדי. ניתן להקליט סדר מדפים בלחיצות או לצרף מדף פנוי בלחיצה עליו."}
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() =>
+                    setShowAllCabsForSet((prev) => ({
+                      ...prev,
+                      [ms.setName]: !prev[ms.setName],
+                    }))
+                  }
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] text-[11px] font-medium hover:text-[var(--otzar-accent)] cursor-pointer whitespace-nowrap"
+                >
+                  <Building2 className="w-3.5 h-3.5" />
+                  {showAllCabs ? "הצג רק ארונות הסט" : "הצג את כל ארונות הספרייה"}
+                </button>
+
+                {ms.hasCustomOrder && !isRecording && (
                   <button
                     type="button"
+                    disabled={loading}
                     onClick={() => updateSetChain(ms, null)}
-                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] text-[11px] font-medium hover:text-[var(--otzar-accent)] cursor-pointer whitespace-nowrap"
+                    className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] text-[11px] font-medium hover:text-[var(--otzar-accent)] cursor-pointer whitespace-nowrap"
                   >
                     <RotateCcw className="w-3 h-3" />
                     איפוס לסדר טבעי
                   </button>
                 )}
-                <button
-                  type="button"
-                  onClick={() => openAddShelfPicker(ms)}
-                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md border border-[var(--otzar-accent)]/40 bg-[var(--otzar-accent)]/10 text-[var(--otzar-accent)] text-[11px] font-bold hover:bg-[var(--otzar-accent)]/20 cursor-pointer whitespace-nowrap"
-                >
-                  <Plus className="w-3.5 h-3.5" />
-                  הוסף מדף לשרשרת
-                </button>
-              </div>
-            </div>
 
-            <div className="flex flex-wrap items-center gap-1.5 text-xs tabular-nums">
-              {ms.shelfChain.map((step, idx) => (
-                <div
-                  key={`${step.cabinetId}-${step.shelfNumber}`}
-                  className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)]"
-                >
-                  <span className="text-[11px] text-[var(--otzar-text-muted)]">{idx + 1}.</span>
-                  <span className="font-semibold">
-                    ארון {step.cabinetCode} מדף {step.shelfNumber}
-                  </span>
-                  {step.isManuallyAdded && (
-                    <span className="text-[10px] text-[var(--otzar-accent)] font-medium">(נוסף)</span>
-                  )}
+                {!isRecording ? (
                   <button
                     type="button"
-                    disabled={idx === 0 || loading}
-                    onClick={() => moveChainStep(ms, idx, -1)}
-                    title="הקדם מדף בשרשרת"
-                    className="p-0.5 rounded hover:bg-[var(--otzar-surface-alt)] disabled:opacity-30 cursor-pointer"
+                    disabled={loading}
+                    onClick={() => startRecording(ms)}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-[var(--otzar-accent)] text-white text-xs font-bold hover:bg-[var(--otzar-accent-hover)] cursor-pointer whitespace-nowrap"
                   >
-                    <ArrowUp className="w-3 h-3" />
+                    <CircleDot className="w-3.5 h-3.5" />
+                    הקלט סדר מדפים בלחיצה
                   </button>
-                  <button
-                    type="button"
-                    disabled={idx === ms.shelfChain.length - 1 || loading}
-                    onClick={() => moveChainStep(ms, idx, 1)}
-                    title="אחר מדף בשרשרת"
-                    className="p-0.5 rounded hover:bg-[var(--otzar-surface-alt)] disabled:opacity-30 cursor-pointer"
-                  >
-                    <ArrowDown className="w-3 h-3" />
-                  </button>
-                  {step.isManuallyAdded && (
+                ) : (
+                  <>
                     <button
                       type="button"
-                      disabled={loading}
-                      onClick={() => removeManualChainStep(ms, idx)}
-                      title="הסר מדף ריק מהשרשרת"
-                      className="p-0.5 rounded text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/30 cursor-pointer"
+                      disabled={recordedChain.length === 0}
+                      onClick={() => setRecordedChain((prev) => prev.slice(0, -1))}
+                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] text-xs font-medium cursor-pointer disabled:opacity-40 whitespace-nowrap"
                     >
-                      <X className="w-3 h-3" />
+                      <Undo2 className="w-3.5 h-3.5" />
+                      בטל צעד
                     </button>
-                  )}
-                </div>
-              ))}
+                    <button
+                      type="button"
+                      onClick={cancelRecording}
+                      className="px-2.5 py-1.5 rounded-md border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] text-xs font-medium cursor-pointer whitespace-nowrap"
+                    >
+                      ביטול
+                    </button>
+                    <button
+                      type="button"
+                      disabled={recordedChain.length === 0 || loading}
+                      onClick={() => finishRecording(ms)}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-emerald-600 text-white text-xs font-bold hover:bg-emerald-700 cursor-pointer disabled:opacity-40 whitespace-nowrap tabular-nums"
+                    >
+                      <CheckCircle2 className="w-3.5 h-3.5" />
+                      סיים והחל סדר ({recordedChain.length})
+                    </button>
+                  </>
+                )}
+              </div>
             </div>
 
-            {addingShelfForSet === ms.setName && (
-              <div className="pt-2 flex flex-wrap items-center gap-2 text-xs">
-                <select
-                  value={newStepCabinetId}
-                  onChange={(e) => {
-                    setNewStepCabinetId(e.target.value);
-                    setNewStepShelfNum(1);
-                  }}
-                  className="px-2.5 py-1.5 rounded-md border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)]"
-                >
-                  {(plan?.cabinetsMeta || []).map((c) => (
-                    <option key={c.id} value={String(c.id)}>
-                      ארון {c.code} {c.main_subject ? `(${c.main_subject})` : ""}
-                    </option>
-                  ))}
-                </select>
-                <select
-                  value={newStepShelfNum}
-                  onChange={(e) => setNewStepShelfNum(Number(e.target.value) || 1)}
-                  className="px-2.5 py-1.5 rounded-md border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] tabular-nums"
-                >
-                  {Array.from(
-                    { length: selectedCabForPicker?.shelves_count || 5 },
-                    (_, i) => i + 1
-                  ).map((n) => (
-                    <option key={n} value={n}>
-                      מדף {n}
-                    </option>
-                  ))}
-                </select>
-                <button
-                  type="button"
-                  onClick={() => handleAddShelfToChain(ms)}
-                  className="px-3 py-1.5 rounded-md bg-[var(--otzar-accent)] text-white font-bold hover:bg-[var(--otzar-accent-hover)] cursor-pointer"
-                >
-                  צרף מדף
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setAddingShelfForSet(null)}
-                  className="px-2.5 py-1.5 rounded-md border border-[var(--otzar-border-muted)] cursor-pointer"
-                >
-                  ביטול
-                </button>
+            {isRecording && (
+              <div className="px-3 py-2 rounded-lg border border-[var(--otzar-accent)]/40 bg-[var(--otzar-accent)]/10 text-xs flex flex-wrap items-center justify-between gap-2 tabular-nums">
+                <span className="font-semibold text-[var(--otzar-accent)]">
+                  מצב הקלטה פעיל — נבחרו עד כה {recordedChain.length} מדפים:
+                  {recordedChain.length > 0 &&
+                    " " +
+                      recordedChain
+                        .map((rc, i) => {
+                          const cab = allCabsMeta.find((c) => c.id === rc.cabinetId);
+                          return `#${i + 1} ${cab?.code || "?"}:${rc.shelfNumber}`;
+                        })
+                        .join(" ← ")}
+                </span>
               </div>
             )}
+
+            {/* 2D Cabinets Grid */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
+              {displayCabinets.map((cab) => {
+                const count = Math.max(1, cab.shelves_count || 5);
+                const shelfNums = Array.from({ length: count }, (_, idx) =>
+                  prefs.shelfDirection === "bottom_up" ? count - idx : idx + 1
+                );
+
+                return (
+                  <div
+                    key={cab.id}
+                    className="rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] overflow-hidden flex flex-col"
+                  >
+                    <div className="px-3 py-2 bg-[var(--otzar-surface)] border-b border-[var(--otzar-border-muted)] flex items-center justify-between gap-2 text-xs">
+                      <span className="font-bold">ארון {cab.code}</span>
+                      {cab.main_subject && (
+                        <span className="text-[11px] text-[var(--otzar-text-muted)] truncate">
+                          {cab.main_subject}
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="divide-y divide-[var(--otzar-border-muted)]">
+                      {shelfNums.map((sNum) => {
+                        const key = `${cab.id}:${sNum}`;
+                        const inChain = chainIndexMap.get(key);
+                        const sp = shelfPlanMap.get(key);
+                        const shelfReport = cab.shelves?.find((sh) => sh.shelfNumber === sNum);
+                        const recNum = recordedIndexMap.get(key);
+                        const capCm = sp?.capacityCm || shelfReport?.estimatedCapacityCm || 116;
+                        const usedCm = sp ? sp.projectedUsedCm : shelfReport?.totalThicknessCm || 0;
+                        const pct = capCm > 0 ? Math.min(100, Math.round((usedCm / capCm) * 100)) : 0;
+                        const isOver = sp ? sp.isOverflow : (shelfReport?.fillPercent || 0) > 100;
+
+                        const booksInSetCount = sp
+                          ? sp.expectedItems.reduce(
+                              (acc, it) => (it.kind !== "missing_slot" ? acc + it.copiesCount : acc),
+                              0
+                            )
+                          : 0;
+                        const hasMovesOnShelf =
+                          Boolean(sp && (sp.outgoingItems.length > 0 || sp.expectedItems.some((it) => it.kind === "incoming")));
+
+                        const badgeOrder = isRecording ? recNum : inChain?.order;
+
+                        return (
+                          <button
+                            key={sNum}
+                            type="button"
+                            disabled={loading}
+                            onClick={() =>
+                              handleShelfClickIn2DGrid(
+                                ms,
+                                cab.id,
+                                sNum,
+                                Boolean(inChain),
+                                Boolean(inChain?.step.isManuallyAdded)
+                              )
+                            }
+                            title={
+                              isRecording
+                                ? recNum
+                                  ? `לחץ להסרה מסדר ההקלטה (נבחר כ-#${recNum})`
+                                  : `לחץ להוספה כמדף הבא בסדר ההקלטה`
+                                : inChain
+                                ? inChain.step.isManuallyAdded
+                                  ? "מדף פנוי שצורף ידנית — לחץ להסרתו מהשרשרת"
+                                  : `מדף #${inChain.order} בשרשרת הסט`
+                                : "מדף מחוץ לשרשרת — לחץ לצרף אותו לשרשרת הסט"
+                            }
+                            className={`w-full px-2.5 py-2 text-right transition-colors cursor-pointer flex flex-col gap-1 ${
+                              isRecording
+                                ? recNum
+                                  ? "bg-[var(--otzar-accent)]/15 hover:bg-[var(--otzar-accent)]/20"
+                                  : inChain
+                                  ? "bg-amber-50/50 dark:bg-amber-950/15 hover:bg-[var(--otzar-surface-alt)]"
+                                  : "hover:bg-[var(--otzar-surface-alt)] opacity-75 hover:opacity-100"
+                                : inChain
+                                ? hasMovesOnShelf
+                                  ? "bg-amber-50/60 dark:bg-amber-950/20 hover:bg-amber-100/50 dark:hover:bg-amber-950/30"
+                                  : "bg-[var(--otzar-surface)]/50 hover:bg-[var(--otzar-surface-alt)]"
+                                : "opacity-60 hover:opacity-100 hover:bg-[var(--otzar-surface-alt)]"
+                            }`}
+                          >
+                            <div className="flex items-center justify-between gap-2 text-[11px] tabular-nums">
+                              <div className="flex items-center gap-1.5 min-w-0">
+                                {badgeOrder != null ? (
+                                  <span
+                                    className={`inline-flex items-center justify-center min-w-[20px] h-5 px-1 rounded text-[10px] font-bold text-white ${
+                                      isRecording ? "bg-emerald-600" : "bg-[var(--otzar-accent)]"
+                                    }`}
+                                  >
+                                    {badgeOrder}
+                                  </span>
+                                ) : (
+                                  <span className="inline-flex items-center justify-center min-w-[20px] h-5 px-1 rounded text-[10px] border border-dashed border-[var(--otzar-border-muted)] text-[var(--otzar-text-muted)]">
+                                    +
+                                  </span>
+                                )}
+                                <span className="font-bold">מדף {sNum}</span>
+                                {inChain?.step.isManuallyAdded && (
+                                  <span className="text-[10px] text-[var(--otzar-accent)]">(נוסף)</span>
+                                )}
+                              </div>
+                              <span className="text-[10px] text-[var(--otzar-text-muted)]">
+                                {inChain
+                                  ? booksInSetCount > 0
+                                    ? `${booksInSetCount} כרכים`
+                                    : "ריק לשרשרת"
+                                  : shelfReport && shelfReport.booksCount > 0
+                                  ? `${shelfReport.booksCount} ספרים אחרים`
+                                  : "מדף פנוי"}
+                              </span>
+                            </div>
+
+                            {/* Shelf fill progress bar */}
+                            <div className="flex items-center gap-2 text-[10px] tabular-nums text-[var(--otzar-text-muted)]">
+                              <div className="flex-1 h-1.5 rounded-full bg-[var(--otzar-surface-alt)] overflow-hidden">
+                                <div
+                                  style={{ width: `${pct}%` }}
+                                  className={`h-full transition-all ${
+                                    isOver
+                                      ? "bg-red-600"
+                                      : pct > 85
+                                      ? "bg-amber-500"
+                                      : inChain
+                                      ? "bg-[var(--otzar-accent)]"
+                                      : "bg-slate-400"
+                                  }`}
+                                />
+                              </div>
+                              <span>{Math.round(usedCm)}/{Math.round(capCm)} ס״מ</span>
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
           </div>
 
           {/* Alerts: Capacity overflow / Needs extra shelf / Foreign category books */}
-          {(activeMode === "minimal" && modeRes.hasCapacityOverflow) && (
+          {activeMode === "minimal" && modeRes.hasCapacityOverflow && (
             <div className="p-3 bg-red-50 dark:bg-red-950/30 text-red-800 dark:text-red-300 text-xs flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-2 font-medium">
                 <AlertTriangle className="w-4 h-4 shrink-0" />
@@ -620,12 +791,12 @@ export const SmartShelfOrganizerModal: React.FC<SmartShelfOrganizerModalProps> =
             </div>
           )}
 
-          {(activeMode === "rebalance" && modeRes.needsExtraShelf) && (
+          {activeMode === "rebalance" && modeRes.needsExtraShelf && (
             <div className="p-3 bg-amber-50 dark:bg-amber-950/30 text-amber-900 dark:text-amber-300 text-xs flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-2 font-medium">
                 <AlertTriangle className="w-4 h-4 shrink-0" />
                 <span>
-                  סה״כ רוחב הסט (כולל רזרבת 8% ומרווח לכרכים חסרים) עולה על קיבולת השרשרת הנוכחית — מומלץ להוסיף מדף פנוי דרך "+ הוסף מדף לשרשרת".
+                  סה״כ רוחב הסט (כולל רזרבת 8% ומרווח לכרכים חסרים) עולה על קיבולת השרשרת הנוכחית — לחץ על מדף פנוי בארון הדו-ממדי כדי לצרפו לשרשרת.
                 </span>
               </div>
             </div>
@@ -809,7 +980,7 @@ export const SmartShelfOrganizerModal: React.FC<SmartShelfOrganizerModalProps> =
       onClick={onClose}
     >
       <div
-        className="w-full max-w-4xl max-h-[90vh] flex flex-col rounded-2xl border border-[var(--otzar-border)] bg-[var(--otzar-surface)] shadow-2xl overflow-hidden"
+        className="w-full max-w-5xl max-h-[92vh] flex flex-col rounded-2xl border border-[var(--otzar-border)] bg-[var(--otzar-surface)] shadow-2xl overflow-hidden"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--otzar-border-muted)]">
@@ -819,7 +990,7 @@ export const SmartShelfOrganizerModal: React.FC<SmartShelfOrganizerModalProps> =
               מסדר מדפים חכם (חישוב ס״מ + סדר תורני + AI)
             </h3>
             <p className="text-xs text-[var(--otzar-text-muted)] mt-0.5">
-              מאתר מדפים חורגים ברוחב בס״מ, מנתח רצף של סטים גדולים על פני מדפים, מאחד סטים מפוצלים ומשבץ ספרים ללא מיקום.
+              מאתר מדפים חורגים ברוחב בס״מ, מציג ארונות במבנה דו-ממדי לסידור סטים רב-מדפיים, מאחד סטים מפוצלים ומשבץ ספרים ללא מיקום.
             </p>
           </div>
           <button
@@ -914,7 +1085,6 @@ export const SmartShelfOrganizerModal: React.FC<SmartShelfOrganizerModalProps> =
                 {plan.summary}
               </div>
 
-              {/* Multi-shelf canonical sequence analysis */}
               {disorderedSets.length > 0 && (
                 <div className="space-y-3">
                   <div className="flex items-center justify-between">
@@ -928,7 +1098,6 @@ export const SmartShelfOrganizerModal: React.FC<SmartShelfOrganizerModalProps> =
                 </div>
               )}
 
-              {/* Standard moves (overloads, single-shelf split sets, unassigned, AI) */}
               {plan.moves.length > 0 && (
                 <div className="space-y-2">
                   {disorderedSets.length > 0 && (
@@ -985,7 +1154,6 @@ export const SmartShelfOrganizerModal: React.FC<SmartShelfOrganizerModalProps> =
                 </div>
               )}
 
-              {/* Already-ordered multi-shelf sets (collapsible for inspection / manual rebalance) */}
               {orderedSets.length > 0 && (
                 <div className="space-y-2">
                   <button

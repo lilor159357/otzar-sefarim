@@ -465,7 +465,19 @@ export interface SmartShelfPlan {
   moves: SmartShelfMove[];
   multiShelfSets?: MultiShelfSetAnalysis[];
   prefs?: SmartShelfPrefs;
-  cabinetsMeta?: Array<{ id: number; code: string; main_subject: string; shelves_count: number }>;
+  cabinetsMeta?: Array<{
+    id: number;
+    code: string;
+    main_subject: string;
+    shelves_count: number;
+    shelves?: Array<{
+      shelfNumber: number;
+      estimatedCapacityCm: number;
+      totalThicknessCm: number;
+      booksCount: number;
+      fillPercent: number;
+    }>;
+  }>;
   summary: string;
   usedAi: boolean;
   aiError?: string | null;

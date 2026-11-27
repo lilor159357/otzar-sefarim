@@ -25,6 +25,7 @@ import {
   AlertCircle,
   ChevronUp,
   ChevronDown,
+  Maximize2,
 } from "lucide-react";
 import { FORMAT_SIZE_OPTIONS, type AiQueueItem, type CabinetRow, type VolumeNotationRule } from "../types.ts";
 import { RecycleBinModal } from "./RecycleBinModal.tsx";
@@ -288,6 +289,12 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
   const [activeImageIndex, setActiveImageIndex] = useState(0);
   const [imgZoom, setImgZoom] = useState(1);
   const [imgRotate, setImgRotate] = useState(0);
+  const [imgNaturalSize, setImgNaturalSize] = useState<{ w: number; h: number } | null>(null);
+  const [imgBoxSize, setImgBoxSize] = useState<{ w: number; h: number }>({ w: 420, h: 410 });
+  const [imgFullscreen, setImgFullscreen] = useState(false);
+  const [isDraggingImg, setIsDraggingImg] = useState(false);
+  const imgViewerRef = useRef<HTMLDivElement>(null);
+  const imgDragRef = useRef<{ startX: number; startY: number; scrollLeft: number; scrollTop: number } | null>(null);
   const [revTitle, setRevTitle] = useState("");
   const [revSetName, setRevSetName] = useState("");
   const [revAuthor, setRevAuthor] = useState("");
@@ -572,6 +579,25 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
     queueItems.find((i) => i.processing_status === "done") ||
     queueItems[0] ||
     null;
+
+  useEffect(() => {
+    const el = imgViewerRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver((entries) => {
+      for (const ent of entries) {
+        const { width, height } = ent.contentRect;
+        if (width > 80 && height > 80) {
+          setImgBoxSize({ w: Math.round(width), h: Math.round(height) });
+        }
+      }
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [activeReviewItem?.id]);
+
+  useEffect(() => {
+    setImgNaturalSize(null);
+  }, [activeReviewItem?.id, activeImageIndex]);
 
   useEffect(() => {
     if (!activeReviewItem) return;
@@ -2579,7 +2605,7 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
                     <div className="flex items-center gap-1">
                       <button
                         type="button"
-                        onClick={() => setImgZoom((z) => Math.max(0.75, z - 0.25))}
+                        onClick={() => setImgZoom((z) => Math.max(0.5, Number((z - 0.25).toFixed(2))))}
                         className="p-1.5 rounded border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] cursor-pointer"
                         title="הקטן"
                       >
@@ -2587,7 +2613,15 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
                       </button>
                       <button
                         type="button"
-                        onClick={() => setImgZoom((z) => Math.min(2.5, z + 0.25))}
+                        onClick={() => setImgZoom(1)}
+                        className="px-2 py-1 rounded border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] text-[11px] font-medium tabular-nums cursor-pointer"
+                        title="איפוס זום ל-100%"
+                      >
+                        {Math.round(imgZoom * 100)}%
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setImgZoom((z) => Math.min(4, Number((z + 0.25).toFixed(2))))}
                         className="p-1.5 rounded border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] cursor-pointer"
                         title="הגדל"
                       >
@@ -2601,6 +2635,16 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
                       >
                         <RotateCw className="w-3.5 h-3.5" />
                       </button>
+                      {activeReviewItem.has_image && (
+                        <button
+                          type="button"
+                          onClick={() => setImgFullscreen(true)}
+                          className="p-1.5 rounded border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] cursor-pointer"
+                          title="הגדל למסך מלא"
+                        >
+                          <Maximize2 className="w-3.5 h-3.5" />
+                        </button>
+                      )}
                     </div>
                   </div>
                   {(activeReviewItem.image_count ?? 1) > 1 && (
@@ -2621,22 +2665,167 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
                       ))}
                     </div>
                   )}
-                  <div className="h-[430px] overflow-auto rounded-lg border border-[var(--otzar-border-muted)] bg-black/5 flex items-center justify-center p-2">
+                  <div
+                    ref={imgViewerRef}
+                    dir="ltr"
+                    onMouseDown={(e) => {
+                      if (!imgViewerRef.current || imgZoom <= 1) return;
+                      setIsDraggingImg(true);
+                      imgDragRef.current = {
+                        startX: e.clientX,
+                        startY: e.clientY,
+                        scrollLeft: imgViewerRef.current.scrollLeft,
+                        scrollTop: imgViewerRef.current.scrollTop,
+                      };
+                    }}
+                    onMouseMove={(e) => {
+                      if (!isDraggingImg || !imgDragRef.current || !imgViewerRef.current) return;
+                      e.preventDefault();
+                      const dx = e.clientX - imgDragRef.current.startX;
+                      const dy = e.clientY - imgDragRef.current.startY;
+                      imgViewerRef.current.scrollLeft = imgDragRef.current.scrollLeft - dx;
+                      imgViewerRef.current.scrollTop = imgDragRef.current.scrollTop - dy;
+                    }}
+                    onMouseUp={() => {
+                      setIsDraggingImg(false);
+                      imgDragRef.current = null;
+                    }}
+                    onMouseLeave={() => {
+                      setIsDraggingImg(false);
+                      imgDragRef.current = null;
+                    }}
+                    className={`h-[430px] overflow-auto rounded-lg border border-[var(--otzar-border-muted)] bg-black/5 select-none ${
+                      imgZoom > 1 ? (isDraggingImg ? "cursor-grabbing" : "cursor-grab") : ""
+                    }`}
+                  >
                     {activeReviewItem.has_image ? (
-                      <img
-                        src={`/api/ai-queue/image/${activeReviewItem.id}?index=${activeImageIndex}&adminToken=${encodeURIComponent(getAdminToken())}`}
-                        alt="שער הספר"
-                        style={{
-                          transform: `scale(${imgZoom}) rotate(${imgRotate}deg)`,
-                          transformOrigin: "center",
-                          transition: "transform 150ms ease",
-                        }}
-                        className="max-h-full max-w-full object-contain"
-                      />
+                      (() => {
+                        const natW = imgNaturalSize?.w || 800;
+                        const natH = imgNaturalSize?.h || 1000;
+                        const rotated = imgRotate % 180 !== 0;
+                        const availW = Math.max(200, imgBoxSize.w - 20);
+                        const availH = Math.max(200, imgBoxSize.h - 20);
+                        const fitScale = Math.min(
+                          availW / (rotated ? natH : natW),
+                          availH / (rotated ? natW : natH)
+                        );
+                        const drawW = Math.max(40, Math.round(natW * fitScale * imgZoom));
+                        const drawH = Math.max(40, Math.round(natH * fitScale * imgZoom));
+                        const stageW = rotated ? drawH : drawW;
+                        const stageH = rotated ? drawW : drawH;
+                        return (
+                          <div className="w-fit h-fit min-w-full min-h-full flex items-center justify-center p-2">
+                            <div
+                              style={{ width: `${stageW}px`, height: `${stageH}px` }}
+                              className="relative shrink-0 flex items-center justify-center"
+                            >
+                              <img
+                                src={`/api/ai-queue/image/${activeReviewItem.id}?index=${activeImageIndex}&adminToken=${encodeURIComponent(getAdminToken())}`}
+                                alt="שער הספר"
+                                draggable={false}
+                                onLoad={(e) => {
+                                  const w = e.currentTarget.naturalWidth;
+                                  const h = e.currentTarget.naturalHeight;
+                                  if (w > 0 && h > 0) setImgNaturalSize({ w, h });
+                                }}
+                                style={{
+                                  width: `${drawW}px`,
+                                  height: `${drawH}px`,
+                                  maxWidth: "none",
+                                  maxHeight: "none",
+                                  transform: `rotate(${imgRotate}deg)`,
+                                  transition: "width 120ms ease, height 120ms ease, transform 150ms ease",
+                                }}
+                                className="shrink-0 object-contain select-none"
+                              />
+                            </div>
+                          </div>
+                        );
+                      })()
                     ) : (
-                      <span className="text-xs text-[var(--otzar-text-muted)]">תמונה לא זמינה</span>
+                      <div className="w-full h-full flex items-center justify-center">
+                        <span className="text-xs text-[var(--otzar-text-muted)]">תמונה לא זמינה</span>
+                      </div>
                     )}
                   </div>
+                  {imgFullscreen && activeReviewItem.has_image && (
+                    <div
+                      className="fixed inset-0 z-50 bg-black/85 flex flex-col p-4"
+                      onClick={() => setImgFullscreen(false)}
+                    >
+                      <div
+                        className="flex items-center justify-between gap-3 pb-3 text-white text-xs"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <span className="font-bold">
+                          צילום שער הספר (#{activeReviewItem.id})
+                          {(activeReviewItem.image_count ?? 1) > 1 ? ` · דף ${activeImageIndex + 1} מתוך ${activeReviewItem.image_count}` : ""}
+                        </span>
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => setImgZoom((z) => Math.max(0.5, Number((z - 0.25).toFixed(2))))}
+                            className="p-2 rounded bg-white/10 hover:bg-white/20 cursor-pointer"
+                            title="הקטן"
+                          >
+                            <ZoomOut className="w-4 h-4" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setImgZoom(1)}
+                            className="px-2.5 py-1.5 rounded bg-white/10 hover:bg-white/20 tabular-nums cursor-pointer"
+                          >
+                            {Math.round(imgZoom * 100)}%
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setImgZoom((z) => Math.min(4, Number((z + 0.25).toFixed(2))))}
+                            className="p-2 rounded bg-white/10 hover:bg-white/20 cursor-pointer"
+                            title="הגדל"
+                          >
+                            <ZoomIn className="w-4 h-4" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setImgRotate((r) => (r + 90) % 360)}
+                            className="p-2 rounded bg-white/10 hover:bg-white/20 cursor-pointer"
+                            title="סובב 90°"
+                          >
+                            <RotateCw className="w-4 h-4" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setImgFullscreen(false)}
+                            className="p-2 rounded bg-white/10 hover:bg-white/20 cursor-pointer"
+                            title="סגור מסך מלא"
+                          >
+                            <X className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </div>
+                      <div
+                        dir="ltr"
+                        className="flex-1 overflow-auto rounded-xl bg-black/40"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <div className="w-fit h-fit min-w-full min-h-full flex items-center justify-center p-6">
+                          <img
+                            src={`/api/ai-queue/image/${activeReviewItem.id}?index=${activeImageIndex}&adminToken=${encodeURIComponent(getAdminToken())}`}
+                            alt="שער הספר בהגדלה"
+                            style={{
+                              width: imgNaturalSize
+                                ? `${Math.round(imgNaturalSize.w * Math.min(900 / imgNaturalSize.w, 680 / imgNaturalSize.h) * imgZoom)}px`
+                                : undefined,
+                              maxWidth: imgNaturalSize ? "none" : "90vw",
+                              maxHeight: imgNaturalSize ? "none" : "80vh",
+                              transform: `rotate(${imgRotate}deg)`,
+                            }}
+                            className="object-contain select-none"
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 {/* Editable Form */}

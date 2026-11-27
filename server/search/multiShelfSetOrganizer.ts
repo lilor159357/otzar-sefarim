@@ -157,10 +157,24 @@ function round1(n: number): number {
 }
 
 export function compareCabinetCodeNatural(aCode: string, bCode: string): number {
-  return String(aCode || "").localeCompare(String(bCode || ""), "he", {
-    numeric: true,
-    sensitivity: "base",
-  });
+  const aParts = String(aCode || "").trim().split(/(\d+)/);
+  const bParts = String(bCode || "").trim().split(/(\d+)/);
+  const maxLen = Math.max(aParts.length, bParts.length);
+  for (let i = 0; i < maxLen; i++) {
+    const ap = aParts[i] ?? "";
+    const bp = bParts[i] ?? "";
+    if (!ap && !bp) continue;
+    const aNum = /^\d+$/.test(ap);
+    const bNum = /^\d+$/.test(bp);
+    if (aNum && bNum) {
+      const diff = Number(ap) - Number(bp);
+      if (diff !== 0) return diff;
+    } else {
+      const cmp = ap.localeCompare(bp, "he", { sensitivity: "base" });
+      if (cmp !== 0) return cmp;
+    }
+  }
+  return 0;
 }
 
 function compareShelfSlotNatural(
