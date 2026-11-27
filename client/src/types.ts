@@ -342,8 +342,130 @@ export interface SmartShelfMove {
   setName?: string;
 }
 
+export type ShelfDirection = "top_down" | "bottom_up";
+
+export interface CustomShelfOrderItem {
+  cabinetId: number;
+  shelfNumber: number;
+  manual?: boolean;
+}
+
+export interface SmartShelfPrefs {
+  shelfDirection: ShelfDirection;
+  customShelfOrders: Record<string, CustomShelfOrderItem[]>;
+}
+
+export interface ForeignBookAlert {
+  barcode: string;
+  title: string;
+  category: string;
+  thicknessCm: number;
+  suggestedCabinetId?: number;
+  suggestedCabinetCode?: string;
+}
+
+export interface ShelfChainStep {
+  cabinetId: number;
+  cabinetCode: string;
+  shelfNumber: number;
+  isManuallyAdded: boolean;
+  capacityCm: number;
+  foreignCm: number;
+  foreignBooksCount: number;
+  foreignAlerts: ForeignBookAlert[];
+}
+
+export interface ShelfSequenceItem {
+  kind: "staying" | "incoming" | "missing_slot";
+  label: string;
+  copiesCount: number;
+  borrowedCount: number;
+  barcodes: string[];
+  fromCabinetCode?: string;
+  fromShelf?: number;
+  thicknessCm: number;
+}
+
+export interface ShelfOutgoingItem {
+  label: string;
+  copiesCount: number;
+  borrowedCount: number;
+  barcodes: string[];
+  toCabinetCode: string;
+  toShelf: number;
+}
+
+export interface ShelfSequencePlan {
+  cabinetId: number;
+  cabinetCode: string;
+  shelfNumber: number;
+  isManuallyAdded: boolean;
+  capacityCm: number;
+  foreignCm: number;
+  foreignBooksCount: number;
+  foreignAlerts: ForeignBookAlert[];
+  stayingCm: number;
+  incomingCm: number;
+  outgoingCm: number;
+  missingReservedCm: number;
+  borrowedCount: number;
+  borrowedCm: number;
+  projectedUsedCm: number;
+  fillPercent: number;
+  isOverflow: boolean;
+  overflowCm: number;
+  expectedItems: ShelfSequenceItem[];
+  outgoingItems: ShelfOutgoingItem[];
+}
+
+export interface MultiShelfSetMove {
+  id: string;
+  title: string;
+  description: string;
+  reason: string;
+  severity: "info" | "warning" | "high";
+  fromCabinetId: number;
+  fromCabinetCode: string;
+  fromShelf: number;
+  toCabinetId: number;
+  toCabinetCode: string;
+  toShelf: number;
+  barcodes: string[];
+  bookLabels: string[];
+  hasBorrowed: boolean;
+  borrowedCount: number;
+  targetOverflowCm: number;
+}
+
+export interface MultiShelfModeResult {
+  isOrdered: boolean;
+  movesCount: number;
+  hasCapacityOverflow: boolean;
+  needsExtraShelf: boolean;
+  moves: MultiShelfSetMove[];
+  shelfPlans: ShelfSequencePlan[];
+}
+
+export interface MultiShelfSetAnalysis {
+  setName: string;
+  dominantCategory: string;
+  assignedCount: number;
+  unassignedCount: number;
+  borrowedCount: number;
+  activeMissingCount: number;
+  totalAssignedCm: number;
+  avgVolumeCm: number;
+  hasCustomOrder: boolean;
+  shelfChain: ShelfChainStep[];
+  minimalMode: MultiShelfModeResult;
+  rebalanceMode: MultiShelfModeResult;
+}
+
 export interface SmartShelfPlan {
   moves: SmartShelfMove[];
+  multiShelfSets?: MultiShelfSetAnalysis[];
+  prefs?: SmartShelfPrefs;
+  cabinetsMeta?: Array<{ id: number; code: string; main_subject: string; shelves_count: number }>;
   summary: string;
   usedAi: boolean;
   aiError?: string | null;

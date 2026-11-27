@@ -8,6 +8,8 @@ import { extractTokenFromRequest, isAdminRequest, issueAdminToken, requireAdmin,
 import { generateLabelsPdfBuffer, type A4TemplateConfig, type LabelBookInput, type LabelDesignConfig } from "../pdf/labelsPdf.ts";
 import { fallbackT, type StringsTranslateFn } from "../../shared/strings/engine.ts";
 import { formatGeminiError, generateSmartShelfPlanWithAi, getAiConfig } from "../ai/geminiService.ts";
+import { readCustomVolumeNotationRules } from "../search/torahAuthority.ts";
+import { analyzeMultiShelfSets, compareCabinetCodeNatural, type MultiShelfPrefs } from "../search/multiShelfSetOrganizer.ts";
 
 function getJsonSetting<T>(db: DbClient, key: string, fallback: T): T {
   const row = db.get<{ value: string }>("SELECT value FROM settings WHERE key = ?", key);
@@ -205,6 +207,10 @@ export function registerLabelsAndAdminRoutes(app: Express, db: DbClient, dataDir
       barcode: string;
       title: string;
       set_name: string;
+      sub_series: string;
+      volume: string;
+      set_global_number: number | null;
+      coverage_range: string;
       category: string;
       cabinet_id: number | null;
       shelf_number: number | null;
@@ -213,7 +219,7 @@ export function registerLabelsAndAdminRoutes(app: Express, db: DbClient, dataDir
       pages_count: number | null;
       status: string;
     }>(
-      "SELECT barcode, title, set_name, category, cabinet_id, shelf_number, format_size, thickness_mm, pages_count, status FROM books WHERE deleted_at IS NULL"
+      "SELECT barcode, title, set_name, sub_series, volume, set_global_number, coverage_range, category, cabinet_id, shelf_number, format_size, thickness_mm, pages_count, status FROM books WHERE deleted_at IS NULL"
     );
 
     const roomRaw = getJsonSetting<{ width_m?: number; length_m?: number }>(db, "room_dimensions", { width_m: 6, length_m: 5 });
@@ -439,9 +445,54 @@ export function registerLabelsAndAdminRoutes(app: Express, db: DbClient, dataDir
     res.json(report);
   });
 
+  app.put("/api/shelving/smart-organize-prefs", requireAdmin, (req, res) => {
+    const raw = req.body || {};
+    const prefs: MultiShelfPrefs = {
+      shelfDirection: raw.shelfDirection === "bottom_up" ? "bottom_up" : "top_down",
+      customShelfOrders:
+        raw.customShelfOrders && typeof raw.customShelfOrders === "object"
+          ? raw.customShelfOrders
+          : {},
+    };
+    db.run(
+      "INSERT INTO settings (key, value) VALUES ('smart_shelf_prefs', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      JSON.stringify(prefs)
+    );
+    res.json({ ok: true, prefs });
+  });
+
   app.post("/api/shelving/smart-organize", requireAdmin, async (req, res) => {
     const useAi = Boolean(req.body?.useAi);
+    const storedPrefs = getJsonSetting<Partial<MultiShelfPrefs>>(db, "smart_shelf_prefs", {
+      shelfDirection: "top_down",
+      customShelfOrders: {},
+    });
+    const bodyPrefs = req.body?.prefs as Partial<MultiShelfPrefs> | undefined;
+    const effectivePrefs: MultiShelfPrefs = {
+      shelfDirection:
+        bodyPrefs?.shelfDirection === "bottom_up" || (!bodyPrefs?.shelfDirection && storedPrefs?.shelfDirection === "bottom_up")
+          ? "bottom_up"
+          : "top_down",
+      customShelfOrders:
+        bodyPrefs?.customShelfOrders && typeof bodyPrefs.customShelfOrders === "object"
+          ? bodyPrefs.customShelfOrders
+          : storedPrefs?.customShelfOrders && typeof storedPrefs.customShelfOrders === "object"
+          ? storedPrefs.customShelfOrders
+          : {},
+    };
+    const ignoredRaw = getJsonSetting<unknown[]>(db, "ignored_missing_volumes", []);
+    const ignoredMissingKeys = new Set(
+      (Array.isArray(ignoredRaw) ? ignoredRaw : []).map((x) => String(x || "").trim()).filter(Boolean)
+    );
+    const volumeNotationRules = readCustomVolumeNotationRules(db);
     const { report, books } = buildShelvingReportSnapshot();
+    const { multiShelfSets, handledSetNames } = analyzeMultiShelfSets({
+      cabinets: report.cabinets,
+      books,
+      ignoredMissingKeys,
+      volumeNotationRules,
+      prefs: effectivePrefs,
+    });
     const cabById = new Map(report.cabinets.map((c) => [c.id, c]));
     const cabByCode = new Map(report.cabinets.map((c) => [c.code.trim(), c]));
 
@@ -525,6 +576,7 @@ export function registerLabelsAndAdminRoutes(app: Express, db: DbClient, dataDir
       bySet.set(sn, arr);
     }
     for (const [setName, setBooks] of bySet.entries()) {
+      if (handledSetNames.has(setName) || handledSetNames.has(setName.toLowerCase())) continue;
       if (setBooks.length < 2) continue;
       const locGroups = new Map<string, typeof books>();
       for (const b of setBooks) {
@@ -600,10 +652,14 @@ export function registerLabelsAndAdminRoutes(app: Express, db: DbClient, dataDir
       }
     }
 
+    const disorderedMultiCount = multiShelfSets.filter(
+      (ms) => !ms.minimalMode.isOrdered || ms.shelfChain.some((s) => s.foreignAlerts.length > 0)
+    ).length;
+    const totalIssuesCount = moves.length + disorderedMultiCount;
     let summary =
-      moves.length > 0
-        ? `נמצאו ${moves.length} המלצות לשיפור סדר המדפים וניצול השטח`
-        : "הספרייה מסודרת היטב — לא נמצאו מדפים עמוסים או סטים מפוצלים";
+      totalIssuesCount > 0
+        ? `נמצאו ${moves.length} המלצות רוחב/שיבוץ ו-${disorderedMultiCount} סטים רב-מדפיים לסידור רצף`
+        : "הספרייה מסודרת היטב — לא נמצאו מדפים עמוסים או סטים מבולגנים";
     let aiUsed = false;
     let aiError: string | undefined;
 
@@ -659,7 +715,15 @@ export function registerLabelsAndAdminRoutes(app: Express, db: DbClient, dataDir
       }
     }
 
-    res.json({ ok: true, summary, aiUsed, aiError, moves });
+    const cabinetsMeta = [...report.cabinets]
+      .sort((a, b) => compareCabinetCodeNatural(a.code, b.code))
+      .map((c) => ({
+        id: c.id,
+        code: c.code,
+        main_subject: c.main_subject,
+        shelves_count: c.shelves_count,
+      }));
+    res.json({ ok: true, summary, aiUsed, aiError, moves, multiShelfSets, prefs: effectivePrefs, cabinetsMeta });
   });
 
   app.post("/api/shelving/apply-moves", requireAdmin, (req, res) => {
