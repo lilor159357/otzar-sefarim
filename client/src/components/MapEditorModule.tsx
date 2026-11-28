@@ -311,12 +311,16 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
   const initialTargetCanvas = getRoomCanvasSize(initialRoom);
   const initialSrcCanvas = getSourceCanvasForCabinets(roomDimensions, cabinets);
   const [draftCabinets, setDraftCabinets] = useState<CabinetRow[]>(() =>
-    adaptCabinetsToCanvas(cabinets, initialSrcCanvas.w, initialSrcCanvas.h, initialTargetCanvas.canvasW, initialTargetCanvas.canvasH, true)
+    adaptCabinetsToCanvas(cabinets, initialSrcCanvas.w, initialSrcCanvas.h, initialTargetCanvas.canvasW, initialTargetCanvas.canvasH, true, initialTargetCanvas.pxPerCm)
   );
   const [draftEntrance, setDraftEntrance] = useState<MapEntrance>(entrance || DEFAULT_ENTRANCE);
   const [draftRoom, setDraftRoom] = useState<RoomDimensions>(initialRoom);
   const [lengthInput, setLengthInput] = useState<string>(String(initialRoom.length_m));
   const [widthInput, setWidthInput] = useState<string>(String(initialRoom.width_m));
+  const [cabShelvesInput, setCabShelvesInput] = useState<string>("");
+  const [cabWidthInput, setCabWidthInput] = useState<string>("");
+  const [cabDepthInput, setCabDepthInput] = useState<string>("");
+  const editingCabFieldRef = useRef<"shelves" | "width" | "depth" | null>(null);
   const cabinetFrameRef = useRef<{ w: number; h: number }>({ w: initialTargetCanvas.canvasW, h: initialTargetCanvas.canvasH });
   const [selectedId, setSelectedId] = useState<number | null>(cabinets[0]?.id ?? null);
   const [saving, setSaving] = useState(false);
@@ -379,7 +383,7 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
     setDraftRoom(nextRoom);
     setLengthInput(String(nextRoom.length_m));
     setWidthInput(String(nextRoom.width_m));
-    setDraftCabinets(adaptCabinetsToCanvas(cabinets, src.w, src.h, target.canvasW, target.canvasH, true));
+    setDraftCabinets(adaptCabinetsToCanvas(cabinets, src.w, src.h, target.canvasW, target.canvasH, true, target.pxPerCm));
     cabinetFrameRef.current = { w: target.canvasW, h: target.canvasH };
     if (selectedId && !cabinets.some((c) => c.id === selectedId)) {
       setSelectedId(cabinets[0]?.id ?? null);
@@ -403,12 +407,36 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
   const { canvasW, canvasH, pxPerCm } = getRoomCanvasSize(draftRoom);
   const roomBounds = getRoomBounds(canvasW, canvasH);
 
+  useEffect(() => {
+    if (!selectedCab) {
+      setCabShelvesInput("");
+      setCabWidthInput("");
+      setCabDepthInput("");
+      return;
+    }
+    if (editingCabFieldRef.current !== "shelves") {
+      setCabShelvesInput(String(selectedCab.shelves_count ?? 5));
+    }
+    if (editingCabFieldRef.current !== "width") {
+      const wVal = selectedCab.width_cm != null && Number(selectedCab.width_cm) > 0
+        ? Number(selectedCab.width_cm)
+        : Math.round((selectedCab.width / pxPerCm) * 10) / 10;
+      setCabWidthInput(String(wVal));
+    }
+    if (editingCabFieldRef.current !== "depth") {
+      const dVal = selectedCab.depth_cm != null && Number(selectedCab.depth_cm) > 0
+        ? Number(selectedCab.depth_cm)
+        : Math.round((selectedCab.height / pxPerCm) * 10) / 10;
+      setCabDepthInput(String(dVal));
+    }
+  }, [selectedCab?.id, selectedCab?.shelves_count, selectedCab?.width_cm, selectedCab?.depth_cm, selectedCab?.width, selectedCab?.height, pxPerCm]);
+
   const applyDraftRoomDimensions = (nextRoom: RoomDimensions) => {
     const nextCanvas = getRoomCanvasSize(nextRoom);
     const curFrame = cabinetFrameRef.current;
     setDraftRoom(nextRoom);
     if (Math.abs(curFrame.w - nextCanvas.canvasW) >= 1 || Math.abs(curFrame.h - nextCanvas.canvasH) >= 1) {
-      setDraftCabinets((prev) => adaptCabinetsToCanvas(prev, curFrame.w, curFrame.h, nextCanvas.canvasW, nextCanvas.canvasH, false));
+      setDraftCabinets((prev) => adaptCabinetsToCanvas(prev, curFrame.w, curFrame.h, nextCanvas.canvasW, nextCanvas.canvasH, false, nextCanvas.pxPerCm));
       cabinetFrameRef.current = { w: nextCanvas.canvasW, h: nextCanvas.canvasH };
     }
   };
@@ -526,19 +554,22 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
       let shiftLocalX = 0;
       let shiftLocalY = 0;
 
+      const minPx = Math.max(8, Math.round(5 * pxPerCm));
+      const maxRoomW = Math.max(100, canvasW - 20);
+      const maxRoomH = Math.max(100, canvasH - 20);
       if (dir.includes("e")) {
-        newWidth = Math.max(20, Math.min(480, snapVal(startCab.width + dxLocal)));
+        newWidth = Math.max(minPx, Math.min(maxRoomW, snapVal(startCab.width + dxLocal)));
         shiftLocalX = (newWidth - startCab.width) / 2;
       } else if (dir.includes("w")) {
-        newWidth = Math.max(20, Math.min(480, snapVal(startCab.width - dxLocal)));
+        newWidth = Math.max(minPx, Math.min(maxRoomW, snapVal(startCab.width - dxLocal)));
         shiftLocalX = -(newWidth - startCab.width) / 2;
       }
 
       if (dir.includes("s")) {
-        newHeight = Math.max(20, Math.min(360, snapVal(startCab.height + dyLocal)));
+        newHeight = Math.max(minPx, Math.min(maxRoomH, snapVal(startCab.height + dyLocal)));
         shiftLocalY = (newHeight - startCab.height) / 2;
       } else if (dir.includes("n")) {
-        newHeight = Math.max(20, Math.min(360, snapVal(startCab.height - dyLocal)));
+        newHeight = Math.max(minPx, Math.min(maxRoomH, snapVal(startCab.height - dyLocal)));
         shiftLocalY = -(newHeight - startCab.height) / 2;
       }
 
@@ -551,8 +582,8 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
         ...startCab,
         width: newWidth,
         height: newHeight,
-        width_cm: Math.max(20, Math.round(newWidth / pxPerCm)),
-        depth_cm: Math.max(20, Math.round(newHeight / pxPerCm)),
+        width_cm: Math.max(5, Math.round((newWidth / pxPerCm) * 10) / 10),
+        depth_cm: Math.max(5, Math.round((newHeight / pxPerCm) * 10) / 10),
         x: newCx - newWidth / 2,
         y: newCy - newHeight / 2,
       };
@@ -669,8 +700,8 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
           ...c,
           x: cl.x,
           y: cl.y,
-          width: Math.max(20, Math.round(c.width)),
-          height: Math.max(20, Math.round(c.height)),
+          width: Math.max(8, Math.round(c.width * 10) / 10),
+          height: Math.max(8, Math.round(c.height * 10) / 10),
         };
       });
       const payloadRoom: RoomDimensions = {
@@ -716,8 +747,12 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
           main_subject: newSubject.trim(),
           shelves_count: Number(newShelves) || 5,
           ...(() => {
-            const rawW = Math.max(20, Math.min(480, Math.round((Number(newWidthCm) || 120) * pxPerCm)));
-            const rawH = Math.max(20, Math.min(360, Math.round((Number(newDepthCm) || 40) * pxPerCm)));
+            const parsedW = Number(newWidthCm);
+            const parsedD = Number(newDepthCm);
+            const wCm = Number.isFinite(parsedW) && parsedW > 0 ? parsedW : 120;
+            const dCm = Number.isFinite(parsedD) && parsedD > 0 ? parsedD : 40;
+            const rawW = Math.max(8, Math.min(canvasW - 20, Math.round(wCm * pxPerCm * 10) / 10));
+            const rawH = Math.max(8, Math.min(canvasH - 20, Math.round(dCm * pxPerCm * 10) / 10));
             const freeSpot = findFreeSpotInRoom(
               { width: rawW, height: rawH, rotation: 0 },
               draftCabinets,
@@ -725,12 +760,8 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
               60 + ((draftCabinets.length * 30) % Math.max(120, canvasW - 140)),
               Math.round(canvasH / 2)
             );
-            return { x: freeSpot.x, y: freeSpot.y };
+            return { x: freeSpot.x, y: freeSpot.y, width: rawW, height: rawH, width_cm: wCm, depth_cm: dCm };
           })(),
-          width: Math.max(20, Math.min(480, Math.round((Number(newWidthCm) || 120) * pxPerCm))),
-          height: Math.max(20, Math.min(360, Math.round((Number(newDepthCm) || 40) * pxPerCm))),
-          width_cm: Number(newWidthCm) || 120,
-          depth_cm: Number(newDepthCm) || 40,
           rotation: 0,
         }),
       });
@@ -760,10 +791,10 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
     setDraftCabinets((prev) => {
       const placed: CabinetRow[] = [];
       for (const c of prev) {
-        const wCm = Number(c.width_cm) > 0 ? Number(c.width_cm) : Math.round(c.width / pxPerCm);
-        const dCm = Number(c.depth_cm) > 0 ? Number(c.depth_cm) : Math.round(c.height / pxPerCm);
-        const wPx = Math.max(20, Math.min(480, Math.round(wCm * pxPerCm)));
-        const hPx = Math.max(20, Math.min(360, Math.round(dCm * pxPerCm)));
+        const wCm = Number(c.width_cm) > 0 ? Number(c.width_cm) : Math.round((c.width / pxPerCm) * 10) / 10;
+        const dCm = Number(c.depth_cm) > 0 ? Number(c.depth_cm) : Math.round((c.height / pxPerCm) * 10) / 10;
+        const wPx = Math.max(8, Math.min(canvasW - 20, Math.round(wCm * pxPerCm * 10) / 10));
+        const hPx = Math.max(8, Math.min(canvasH - 20, Math.round(dCm * pxPerCm * 10) / 10));
         const merged = { ...c, width_cm: wCm, depth_cm: dCm, width: wPx, height: hPx };
         const clamped = clampRotatedCabinet(merged, merged.x, merged.y, roomBounds);
         const cand = { ...merged, x: clamped.x, y: clamped.y };
@@ -948,7 +979,7 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
               type="number"
               min={1}
               max={60}
-              step="0.5"
+              step="any"
               value={lengthInput}
               onChange={(e) => {
                 const raw = e.target.value;
@@ -973,7 +1004,7 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
               type="number"
               min={1}
               max={60}
-              step="0.5"
+              step="any"
               value={widthInput}
               onChange={(e) => {
                 const raw = e.target.value;
@@ -1069,8 +1100,9 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
           <label className="block text-xs font-medium mb-1">רוחב (ס״מ)</label>
           <input
             type="number"
-            min={30}
-            max={500}
+            min={5}
+            max={1000}
+            step="any"
             value={newWidthCm}
             onChange={(e) => setNewWidthCm(e.target.value)}
             className="w-full px-2.5 py-1.5 text-sm rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] tabular-nums"
@@ -1080,8 +1112,9 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
           <label className="block text-xs font-medium mb-1">עומק (ס״מ)</label>
           <input
             type="number"
-            min={20}
-            max={200}
+            min={5}
+            max={1000}
+            step="any"
             value={newDepthCm}
             onChange={(e) => setNewDepthCm(e.target.value)}
             className="w-full px-2.5 py-1.5 text-sm rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] tabular-nums"
@@ -1325,9 +1358,24 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
                     <input
                       type="number"
                       min={1}
-                      max={25}
-                      value={selectedCab.shelves_count}
-                      onChange={(e) => updateSelectedField({ shelves_count: Math.max(1, Number(e.target.value) || 1) })}
+                      max={30}
+                      value={cabShelvesInput}
+                      onFocus={() => { editingCabFieldRef.current = "shelves"; }}
+                      onChange={(e) => {
+                        const raw = e.target.value;
+                        setCabShelvesInput(raw);
+                        const parsed = Math.round(Number(raw));
+                        if (raw.trim() !== "" && Number.isFinite(parsed) && parsed >= 1 && parsed <= 30) {
+                          updateSelectedField({ shelves_count: parsed });
+                        }
+                      }}
+                      onBlur={() => {
+                        editingCabFieldRef.current = null;
+                        const parsed = Math.round(Number(cabShelvesInput));
+                        const safe = Number.isFinite(parsed) && parsed >= 1 ? Math.min(30, parsed) : (selectedCab.shelves_count || 5);
+                        setCabShelvesInput(String(safe));
+                        if (safe !== selectedCab.shelves_count) updateSelectedField({ shelves_count: safe });
+                      }}
                       className="w-full px-3 py-1.5 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] tabular-nums"
                     />
                   </div>
@@ -1348,15 +1396,31 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
                     <label className="block text-xs font-medium mb-1">רוחב ארון (ס״מ)</label>
                     <input
                       type="number"
-                      min={30}
-                      max={600}
-                      step={5}
-                      value={selectedCab.width_cm ?? Math.round(selectedCab.width / pxPerCm)}
+                      min={5}
+                      max={1000}
+                      step="any"
+                      value={cabWidthInput}
+                      onFocus={() => { editingCabFieldRef.current = "width"; }}
                       onChange={(e) => {
-                        const cm = Math.max(20, Number(e.target.value) || 120);
+                        const raw = e.target.value;
+                        setCabWidthInput(raw);
+                        const parsed = Number(raw);
+                        if (raw.trim() !== "" && !raw.endsWith(".") && Number.isFinite(parsed) && parsed >= 5 && parsed <= 1000) {
+                          updateSelectedField({
+                            width_cm: parsed,
+                            width: Math.max(8, Math.min(canvasW - 20, Math.round(parsed * pxPerCm * 10) / 10)),
+                          });
+                        }
+                      }}
+                      onBlur={() => {
+                        editingCabFieldRef.current = null;
+                        const parsed = Number(cabWidthInput);
+                        const fallback = Number(selectedCab.width_cm) > 0 ? Number(selectedCab.width_cm) : Math.round((selectedCab.width / pxPerCm) * 10) / 10;
+                        const safe = Number.isFinite(parsed) && parsed >= 5 ? Math.min(1000, parsed) : fallback;
+                        setCabWidthInput(String(safe));
                         updateSelectedField({
-                          width_cm: cm,
-                          width: Math.max(20, Math.min(480, Math.round(cm * pxPerCm))),
+                          width_cm: safe,
+                          width: Math.max(8, Math.min(canvasW - 20, Math.round(safe * pxPerCm * 10) / 10)),
                         });
                       }}
                       className="w-full px-3 py-1.5 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] tabular-nums"
@@ -1366,15 +1430,31 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
                     <label className="block text-xs font-medium mb-1">עומק ארון (ס״מ)</label>
                     <input
                       type="number"
-                      min={20}
-                      max={300}
-                      step={5}
-                      value={selectedCab.depth_cm ?? Math.round(selectedCab.height / pxPerCm)}
+                      min={5}
+                      max={1000}
+                      step="any"
+                      value={cabDepthInput}
+                      onFocus={() => { editingCabFieldRef.current = "depth"; }}
                       onChange={(e) => {
-                        const cm = Math.max(20, Number(e.target.value) || 40);
+                        const raw = e.target.value;
+                        setCabDepthInput(raw);
+                        const parsed = Number(raw);
+                        if (raw.trim() !== "" && !raw.endsWith(".") && Number.isFinite(parsed) && parsed >= 5 && parsed <= 1000) {
+                          updateSelectedField({
+                            depth_cm: parsed,
+                            height: Math.max(8, Math.min(canvasH - 20, Math.round(parsed * pxPerCm * 10) / 10)),
+                          });
+                        }
+                      }}
+                      onBlur={() => {
+                        editingCabFieldRef.current = null;
+                        const parsed = Number(cabDepthInput);
+                        const fallback = Number(selectedCab.depth_cm) > 0 ? Number(selectedCab.depth_cm) : Math.round((selectedCab.height / pxPerCm) * 10) / 10;
+                        const safe = Number.isFinite(parsed) && parsed >= 5 ? Math.min(1000, parsed) : fallback;
+                        setCabDepthInput(String(safe));
                         updateSelectedField({
-                          depth_cm: cm,
-                          height: Math.max(20, Math.min(360, Math.round(cm * pxPerCm))),
+                          depth_cm: safe,
+                          height: Math.max(8, Math.min(canvasH - 20, Math.round(safe * pxPerCm * 10) / 10)),
                         });
                       }}
                       className="w-full px-3 py-1.5 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] tabular-nums"

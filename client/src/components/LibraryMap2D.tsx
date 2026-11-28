@@ -75,16 +75,27 @@ export function getSourceCanvasForCabinets(
 }
 
 export function adaptCabinetsToCanvas<
-  T extends { x: number; y: number; width: number; height: number; rotation?: number }
+  T extends {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    width_cm?: number | null;
+    depth_cm?: number | null;
+    rotation?: number;
+  }
 >(
   cabinets: T[],
   fromW: number,
   fromH: number,
   toW: number,
   toH: number,
-  round = true
+  round = true,
+  targetPxPerCm?: number
 ): T[] {
-  if (Math.abs(fromW - toW) < 1 && Math.abs(fromH - toH) < 1) {
+  const frameChanged = Math.abs(fromW - toW) >= 1 || Math.abs(fromH - toH) >= 1;
+  const hasPxScale = typeof targetPxPerCm === "number" && targetPxPerCm > 0;
+  if (!frameChanged && !hasPxScale) {
     return cabinets;
   }
   const fromInnerW = Math.max(100, fromW - MAP_PADDING * 2);
@@ -92,14 +103,27 @@ export function adaptCabinetsToCanvas<
   const toInnerW = Math.max(100, toW - MAP_PADDING * 2);
   const toInnerH = Math.max(100, toH - MAP_PADDING * 2);
   const sizeScale = Math.min(toInnerW / fromInnerW, toInnerH / fromInnerH);
+  const r1 = (n: number) => Math.round(n * 10) / 10;
 
   return cabinets.map((c) => {
     const oldCx = c.x + c.width / 2;
     const oldCy = c.y + c.height / 2;
-    let newCx = MAP_PADDING + ((oldCx - MAP_PADDING) / fromInnerW) * toInnerW;
-    let newCy = MAP_PADDING + ((oldCy - MAP_PADDING) / fromInnerH) * toInnerH;
-    const newW = Math.max(20, c.width * sizeScale);
-    const newH = Math.max(20, c.height * sizeScale);
+    let newCx = frameChanged ? MAP_PADDING + ((oldCx - MAP_PADDING) / fromInnerW) * toInnerW : oldCx;
+    let newCy = frameChanged ? MAP_PADDING + ((oldCy - MAP_PADDING) / fromInnerH) * toInnerH : oldCy;
+
+    const wCm = Number(c.width_cm);
+    const dCm = Number(c.depth_cm);
+    const useCm = hasPxScale && wCm > 0 && dCm > 0;
+    const newW = useCm
+      ? Math.max(8, Math.min(toInnerW, wCm * targetPxPerCm!))
+      : Math.max(8, c.width * sizeScale);
+    const newH = useCm
+      ? Math.max(8, Math.min(toInnerH, dCm * targetPxPerCm!))
+      : Math.max(8, c.height * sizeScale);
+
+    if (!frameChanged && Math.abs(newW - c.width) < 0.25 && Math.abs(newH - c.height) < 0.25) {
+      return c;
+    }
 
     const rad = ((c.rotation || 0) * Math.PI) / 180;
     const halfW = (Math.abs(newW * Math.cos(rad)) + Math.abs(newH * Math.sin(rad))) / 2;
@@ -115,10 +139,10 @@ export function adaptCabinetsToCanvas<
     const ny = newCy - newH / 2;
     return {
       ...c,
-      x: round ? Math.round(nx) : nx,
-      y: round ? Math.round(ny) : ny,
-      width: round ? Math.round(newW) : newW,
-      height: round ? Math.round(newH) : newH,
+      x: round ? r1(nx) : nx,
+      y: round ? r1(ny) : ny,
+      width: round ? r1(newW) : newW,
+      height: round ? r1(newH) : newH,
     };
   });
 }
@@ -195,9 +219,18 @@ export const LibraryMap2D: React.FC<LibraryMap2DProps> = ({
   const roomWidthM = Number(roomDimensions?.width_m) || 0;
   const roomLengthM = Number(roomDimensions?.length_m) || 0;
   const roomArea = roomWidthM > 0 && roomLengthM > 0 ? Math.round(roomWidthM * roomLengthM * 10) / 10 : 0;
-  const { canvasW, canvasH } = getRoomCanvasSize(roomDimensions);
+  const { canvasW, canvasH, pxPerCm } = getRoomCanvasSize(roomDimensions);
   const sourceCanvas = getSourceCanvasForCabinets(roomDimensions, cabinets);
-  const displayCabinets = adaptCabinetsToCanvas(cabinets, sourceCanvas.w, sourceCanvas.h, canvasW, canvasH, true);
+  const hasExplicitRoom = Number(roomDimensions?.length_m) > 0 && Number(roomDimensions?.width_m) > 0;
+  const displayCabinets = adaptCabinetsToCanvas(
+    cabinets,
+    sourceCanvas.w,
+    sourceCanvas.h,
+    canvasW,
+    canvasH,
+    true,
+    hasExplicitRoom ? pxPerCm : undefined
+  );
 
   return (
     <div className="w-full rounded-xl border border-[var(--otzar-border-muted)] bg-[var(--otzar-surface-alt)] overflow-hidden">
