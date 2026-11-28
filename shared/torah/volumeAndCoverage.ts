@@ -1618,6 +1618,34 @@ export function computeMissingSetSlots(
   return slots;
 }
 
+function isSymbolicVolumeMarker(vol: string): boolean {
+  return /(\*+|•+|★+|✦+|●+|◆+|▪+|◊+)/.test(vol);
+}
+
+function hasExplicitVolumeNumberSuffix(vol: string): boolean {
+  if (extractVolumeNumberIndex(vol, null) != null) return true;
+  const stripped = vol.replace(/^(חלק|כרך|ספר|מסכת|ח['"״׳]|כ['"״׳])\s*/i, "").trim();
+  if (/(?:חלק|כרך|ספר)\s*([א-ת]{1,2}|\d+)['"״׳]?\s*$/.test(stripped)) return true;
+  if (/\d+\s*$/.test(stripped)) return true;
+  return false;
+}
+
+export function isVolumeAlreadyInTitle(title: string | undefined | null, volume: string | undefined | null): boolean {
+  const rawTitle = String(title || "").trim().replace(/["״]/g, '"').replace(/['׳]/g, "'");
+  const rawVol = String(volume || "").trim().replace(/["״]/g, '"').replace(/['׳]/g, "'");
+  if (!rawTitle || !rawVol) return false;
+  const normTitle = normalizeCanonInput(rawTitle);
+  const normVol = normalizeCanonInput(rawVol);
+  if (!normTitle || !normVol) return false;
+  if (normTitle === normVol) return true;
+  const escRaw = escapeRegExpCanon(rawVol);
+  const sepEndRe = new RegExp("(?:[\\-–—·/(]|^)\\s*" + escRaw + "\\)?\\s*$");
+  if (normVol.length <= 2) {
+    return sepEndRe.test(rawTitle);
+  }
+  return normTitle.endsWith(" " + normVol) || sepEndRe.test(rawTitle);
+}
+
 export function shouldSuppressSingleVolumeLabel(
   book: {
     set_name?: string;
@@ -1635,10 +1663,31 @@ export function shouldSuppressSingleVolumeLabel(
 ): boolean {
   const vol = String(book.volume || "").trim();
   if (!vol) return false;
+
+  const sub = String(book.sub_series || "").trim();
+  const titleStr = String(book.title || "").trim();
+
+  // Always suppress pure non-numeric tractate / Chumash / sub-series labels misplaced in volume
+  // (e.g. volume="מסכת מכות" when sub_series/title already has "מסכת מכות", even if coverage_range exists)
+  if (!isSymbolicVolumeMarker(vol) && !hasExplicitVolumeNumberSuffix(vol)) {
+    const volWithoutPrefix = vol.replace(/^(?:כרך|חלק|ספר|מסכת|חומש)\s+/g, "").trim();
+    if (torahSubSeriesRank(volWithoutPrefix) < 999999 || torahSubSeriesRank(vol) < 999999) {
+      return true;
+    }
+    const normVol = normalizeCanonInput(vol);
+    const normSub = normalizeCanonInput(sub);
+    if (normVol && normSub && (normVol === normSub || normSub.startsWith(normVol) || normSub.endsWith(normVol))) {
+      return true;
+    }
+    const normTitle = normalizeCanonInput(titleStr);
+    if (normVol && normTitle && (normTitle === normVol || normTitle.endsWith(" " + normVol))) {
+      return true;
+    }
+  }
+
   const cov = String(book.coverage_range || "").trim();
   if (cov) return false;
 
-  const sub = String(book.sub_series || "").trim();
   const setBooks = Array.isArray(sameSetBooks) ? sameSetBooks : [];
 
   if (sub) {

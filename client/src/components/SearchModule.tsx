@@ -68,6 +68,8 @@ import {
 
   shouldSuppressSingleVolumeLabel,
 
+  isVolumeAlreadyInTitle,
+
 } from "../lib/torahUtils.ts";
 
 
@@ -2326,7 +2328,11 @@ export const SearchModule: React.FC<SearchModuleProps> = ({
 
                     const showVol =
 
-                      Boolean(b.volume) && !shouldSuppressSingleVolumeLabel(b, sameSet);
+                      Boolean(b.volume) &&
+
+                      !shouldSuppressSingleVolumeLabel(b, sameSet) &&
+
+                      !isVolumeAlreadyInTitle(b.title, b.volume);
 
                     return (
 

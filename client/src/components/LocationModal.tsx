@@ -40,6 +40,7 @@ import { AutocompleteInput } from "./AutocompleteInput.tsx";
 import {
   groupSetBySubSeries,
   shouldSuppressSingleVolumeLabel,
+  isVolumeAlreadyInTitle,
   deriveTitleFromSetTemplate,
   detectBookCoverageTypoWarnings,
   type CoverageAnomalyWarning,
@@ -858,7 +859,9 @@ export const LocationModal: React.FC<LocationModalProps> = ({
             </div>
             <h2 className="text-xl font-bold">
               {book.title}
-              {book.volume && !shouldSuppressSingleVolumeLabel(book, setBooks) ? (
+              {book.volume &&
+              !shouldSuppressSingleVolumeLabel(book, setBooks) &&
+              !isVolumeAlreadyInTitle(book.title, book.volume) ? (
                 <span className="text-[var(--otzar-text-muted)] font-normal"> — {book.volume}</span>
               ) : null}
             </h2>
