@@ -911,6 +911,25 @@ export class OtzarFirebaseSyncService {
       }
     );
     this.unsubscribers.push(unsubStrings);
+
+    // 4. Real-time library_meta/settings listener (room_dimensions, map_entrance, volume_notation_rules, etc.)
+    let isFirstMetaSnap = true;
+    const unsubMeta = onSnapshot(
+      doc(fsClient, "library_meta", "settings"),
+      (snap) => {
+        if (isFirstMetaSnap) {
+          isFirstMetaSnap = false;
+          return;
+        }
+        if (!snap.exists()) return;
+        this.addSparkUsage({ reads: 1 });
+        if (this.applyRemoteLibraryMeta(snap.data() as Record<string, unknown>)) {
+          setSyncStateVal(this.db, "last_sync_at", new Date().toISOString());
+        }
+      },
+      () => {}
+    );
+    this.unsubscribers.push(unsubMeta);
   }
 
   
@@ -1195,22 +1214,98 @@ export class OtzarFirebaseSyncService {
       }
     });
 
-    await this.pushLibraryMeta();
+    await this.pushLibraryMeta(true);
     const res = await this.syncNow();
     setSyncStateVal(this.db, "initial_seed_done", "1");
     return { queued, ...res };
   }
 
-  public async pushLibraryMeta(): Promise<void> {
+  public markLibraryMetaDirty(): string {
+    const nowIso = new Date().toISOString();
+    setSyncStateVal(this.db, "meta_settings_updated_at", nowIso);
+    setSyncStateVal(this.db, "meta_settings_dirty", "1");
+    return nowIso;
+  }
+
+  private applyRemoteLibraryMeta(data: Record<string, unknown>): boolean {
+    const remoteUpdated = String(data.updated_at || "");
+    const sourceDevice = String(data.source_device || "");
+    const localMetaUpdated = getSyncStateVal(this.db, "meta_settings_updated_at", "");
+    const localDirty = getSyncStateVal(this.db, "meta_settings_dirty", "0") === "1";
+
+    if (sourceDevice === this.deviceId) {
+      if (!localMetaUpdated && remoteUpdated) {
+        setSyncStateVal(this.db, "meta_settings_updated_at", remoteUpdated);
+      }
+      return false;
+    }
+
+    const shouldApply =
+      (!localMetaUpdated && !localDirty) ||
+      Boolean(remoteUpdated && (!localMetaUpdated || remoteUpdated > localMetaUpdated));
+    if (!shouldApply) return false;
+
+    let changed = false;
+    this.db.transaction(() => {
+      if (typeof data.library_name === "string" && data.library_name.trim()) {
+        setSettingVal(this.db, "library_name", data.library_name.trim());
+        changed = true;
+      }
+      if (data.default_loan_days != null && Number(data.default_loan_days) > 0) {
+        setSettingVal(this.db, "default_loan_days", String(Math.round(Number(data.default_loan_days))));
+        changed = true;
+      }
+      if (data.map_entrance && typeof data.map_entrance === "object") {
+        setSettingVal(this.db, "map_entrance", JSON.stringify(data.map_entrance));
+        changed = true;
+      }
+      if (data.room_dimensions && typeof data.room_dimensions === "object") {
+        const rd = data.room_dimensions as Record<string, unknown>;
+        if (Number(rd.width_m) > 0 || Number(rd.length_m) > 0) {
+          setSettingVal(this.db, "room_dimensions", JSON.stringify(rd));
+          changed = true;
+        }
+      }
+      if (Array.isArray(data.volume_notation_rules)) {
+        setSettingVal(this.db, "volume_notation_rules", JSON.stringify(data.volume_notation_rules));
+        changed = true;
+      }
+      if (Array.isArray(data.ignored_missing_volumes)) {
+        setSettingVal(this.db, "ignored_missing_volumes", JSON.stringify(data.ignored_missing_volumes));
+        changed = true;
+      }
+      setSyncStateVal(this.db, "meta_settings_updated_at", remoteUpdated || new Date().toISOString());
+      setSyncStateVal(this.db, "meta_settings_dirty", "0");
+    });
+    return changed;
+  }
+
+  public async pullLibraryMeta(): Promise<{ exists: boolean; updated: boolean }> {
+    if (!this.firestore) return { exists: false, updated: false };
+    const snap = await getDoc(doc(this.firestore, "library_meta", "settings"));
+    this.addSparkUsage({ reads: 1 });
+    if (!snap.exists()) return { exists: false, updated: false };
+    const updated = this.applyRemoteLibraryMeta(snap.data() as Record<string, unknown>);
+    return { exists: true, updated };
+  }
+
+  public async pushLibraryMeta(markDirty = false): Promise<void> {
+    let ts = markDirty ? this.markLibraryMetaDirty() : getSyncStateVal(this.db, "meta_settings_updated_at", "");
+    if (!ts) {
+      ts = new Date().toISOString();
+      setSyncStateVal(this.db, "meta_settings_updated_at", ts);
+    }
     if (!this.firestore) return;
     const libraryName = getSettingVal(this.db, "library_name", "אוצר ספרים");
     const defaultLoanDays = parseInt(getSettingVal(this.db, "default_loan_days", "14"), 10) || 14;
     let mapEntrance: unknown = { wall: "bottom", offset: 50 };
     try { mapEntrance = JSON.parse(getSettingVal(this.db, "map_entrance", "{}")); } catch {}
-    let roomDimensions: unknown = { width_m: 6, length_m: 5 };
+    let roomDimensions: unknown = { width_m: 8, length_m: 6 };
     try { roomDimensions = JSON.parse(getSettingVal(this.db, "room_dimensions", "{}")); } catch {}
     let volumeNotationRules: unknown = [];
     try { volumeNotationRules = JSON.parse(getSettingVal(this.db, "volume_notation_rules", "[]")); } catch {}
+    let ignoredMissingVolumes: unknown = [];
+    try { ignoredMissingVolumes = JSON.parse(getSettingVal(this.db, "ignored_missing_volumes", "[]")); } catch {}
     await setDoc(
       doc(this.firestore, "library_meta", "settings"),
       {
@@ -1219,11 +1314,13 @@ export class OtzarFirebaseSyncService {
         map_entrance: mapEntrance,
         room_dimensions: roomDimensions,
         volume_notation_rules: Array.isArray(volumeNotationRules) ? volumeNotationRules : [],
-        updated_at: new Date().toISOString(),
+        ignored_missing_volumes: Array.isArray(ignoredMissingVolumes) ? ignoredMissingVolumes : [],
+        updated_at: ts,
         source_device: this.deviceId,
       },
       { merge: true }
     );
+    setSyncStateVal(this.db, "meta_settings_dirty", "0");
     this.addSparkUsage({ writes: 1 });
   }
 
@@ -1239,7 +1336,11 @@ export class OtzarFirebaseSyncService {
         }
       }
       try {
-        await this.pushLibraryMeta().catch(() => {});
+        const metaPull = await this.pullLibraryMeta().catch(() => ({ exists: true, updated: false }));
+        const metaDirty = getSyncStateVal(this.db, "meta_settings_dirty", "0") === "1";
+        if (!metaPull.exists || metaDirty) {
+          await this.pushLibraryMeta(false).catch(() => {});
+        }
         const pushed = await this.pushOutboxAll();
         const pulled = await this.pullDeltaAll();
         this.offline = false;

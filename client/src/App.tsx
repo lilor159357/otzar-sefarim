@@ -231,6 +231,29 @@ export default function App() {
     return () => document.removeEventListener("fullscreenchange", onFsChange);
   }, []);
 
+  const refreshSettingsAndCabinetsIfChanged = async () => {
+    try {
+      const [sRes, cRes] = await Promise.all([fetch("/api/settings"), fetch("/api/cabinets")]);
+      if (sRes.ok) {
+        const nextS = await sRes.json();
+        setSettings((prev) => (JSON.stringify(prev) === JSON.stringify(nextS) ? prev : nextS));
+      }
+      if (cRes.ok) {
+        const nextC = await cRes.json();
+        setCabinets((prev) => (JSON.stringify(prev) === JSON.stringify(nextC) ? prev : nextC));
+      }
+    } catch {}
+  };
+
+  useEffect(() => {
+    const bootTimer = setTimeout(() => {
+      void refreshSettingsAndCabinetsIfChanged();
+    }, 4500);
+    return () => clearTimeout(bootTimer);
+  }, []);
+
+
+
   const toggleFullscreen = async () => {
     try {
       if (!document.fullscreenElement) {
@@ -259,6 +282,17 @@ export default function App() {
     !isAdmin && activeTab !== "search" && activeTab !== "circulation"
       ? "search"
       : activeTab;
+
+  const didMountTabRefresh = React.useRef(false);
+  useEffect(() => {
+    if (!didMountTabRefresh.current) {
+      didMountTabRefresh.current = true;
+      return;
+    }
+    if (effectiveTab === "search" || (effectiveTab === "admin" && adminSubTab === "map")) {
+      void refreshSettingsAndCabinetsIfChanged();
+    }
+  }, [effectiveTab, adminSubTab]);
 
   useEffect(() => {
     setVisitedTabs((prev) => {
@@ -1186,7 +1220,7 @@ export default function App() {
       <BugReportModal
         isOpen={showBugReportModal}
         onClose={() => setShowBugReportModal(false)}
-        appVersion="v1.0.34"
+        appVersion="v1.0.35"
         totalBooks={books.length}
         totalCabinets={cabinets.length}
       />

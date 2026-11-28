@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Plus, Save, RotateCw, Trash2, CheckCircle2, BarChart3, X, RefreshCw, Copy, Sparkles, ArrowLeftRight, Ruler, Magnet, AlertTriangle } from "lucide-react";
 import type { CabinetRow, MapEntrance, RoomDimensions, ShelvingReport } from "../types.ts";
-import { DEFAULT_ENTRANCE, EntranceMarker, MAP_HEIGHT, MAP_WIDTH } from "./LibraryMap2D.tsx";
+import { adaptCabinetsToCanvas, DEFAULT_ENTRANCE, EntranceMarker, getRoomCanvasSize, getSourceCanvasForCabinets, MAP_HEIGHT, MAP_WIDTH } from "./LibraryMap2D.tsx";
 import { SmartShelfOrganizerModal } from "./SmartShelfOrganizerModal.tsx";
 import { useStrings } from "../lib/stringsContext.tsx";
 
@@ -17,10 +17,17 @@ type ResizeDir = "n" | "s" | "e" | "w" | "ne" | "nw" | "se" | "sw";
 const SNAP = 10;
 const MAGNET_THRESHOLD = 10;
 const OVERLAP_EPS = 0.6;
-const ROOM_MIN_X = 15;
-const ROOM_MAX_X = MAP_WIDTH - 15;
-const ROOM_MIN_Y = 15;
-const ROOM_MAX_Y = MAP_HEIGHT - 20;
+
+interface RoomBounds {
+  minX: number;
+  maxX: number;
+  minY: number;
+  maxY: number;
+}
+
+function getRoomBounds(canvasW: number, canvasH: number): RoomBounds {
+  return { minX: 15, maxX: canvasW - 15, minY: 15, maxY: canvasH - 20 };
+}
 
 const snapVal = (v: number) => Math.round(v / SNAP) * SNAP;
 
@@ -72,14 +79,14 @@ function totalOverlapWithOthers(
   return sum;
 }
 
-function clampRotatedCabinet(c: { width: number; height: number; rotation?: number }, targetX: number, targetY: number) {
+function clampRotatedCabinet(c: { width: number; height: number; rotation?: number }, targetX: number, targetY: number, bounds: RoomBounds) {
   const rad = ((c.rotation || 0) * Math.PI) / 180;
   const halfW = (Math.abs(c.width * Math.cos(rad)) + Math.abs(c.height * Math.sin(rad))) / 2;
   const halfH = (Math.abs(c.width * Math.sin(rad)) + Math.abs(c.height * Math.cos(rad))) / 2;
-  const minCx = ROOM_MIN_X + halfW;
-  const maxCx = Math.max(minCx, ROOM_MAX_X - halfW);
-  const minCy = ROOM_MIN_Y + halfH;
-  const maxCy = Math.max(minCy, ROOM_MAX_Y - halfH);
+  const minCx = bounds.minX + halfW;
+  const maxCx = Math.max(minCx, bounds.maxX - halfW);
+  const minCy = bounds.minY + halfH;
+  const maxCy = Math.max(minCy, bounds.maxY - halfH);
   const targetCx = targetX + c.width / 2;
   const targetCy = targetY + c.height / 2;
   const clampedCx = Math.max(minCx, Math.min(maxCx, targetCx));
@@ -92,7 +99,8 @@ function clampRotatedCabinet(c: { width: number; height: number; rotation?: numb
 
 function applyMagneticSnap(
   cab: { x: number; y: number; width: number; height: number; rotation?: number },
-  others: CabinetRow[]
+  others: CabinetRow[],
+  bounds: RoomBounds
 ): { x: number; y: number } {
   const bA = getCabBounds(cab);
   let bestDx: { delta: number; abs: number } | null = null;
@@ -112,10 +120,10 @@ function applyMagneticSnap(
   };
 
   // Snap to room walls
-  tryX(ROOM_MIN_X - bA.left);
-  tryX(ROOM_MAX_X - bA.right);
-  tryY(ROOM_MIN_Y - bA.top);
-  tryY(ROOM_MAX_Y - bA.bottom);
+  tryX(bounds.minX - bA.left);
+  tryX(bounds.maxX - bA.right);
+  tryY(bounds.minY - bA.top);
+  tryY(bounds.maxY - bA.bottom);
 
   // Snap to other cabinets (flush edge-to-edge & aligned edges/centers)
   for (const o of others) {
@@ -141,10 +149,11 @@ function applyMagneticSnap(
 
 function pushOutOfOverlaps(
   cab: CabinetRow,
-  others: CabinetRow[]
+  others: CabinetRow[],
+  bounds: RoomBounds
 ): { x: number; y: number; hasOverlap: boolean } {
   let cur = { ...cab };
-  const c0 = clampRotatedCabinet(cur, cur.x, cur.y);
+  const c0 = clampRotatedCabinet(cur, cur.x, cur.y, bounds);
   cur.x = c0.x;
   cur.y = c0.y;
 
@@ -172,7 +181,7 @@ function pushOutOfOverlaps(
     ].map((m) => {
       const nextX = Math.round(cur.x + m.dx);
       const nextY = Math.round(cur.y + m.dy);
-      const cl = clampRotatedCabinet(cur, nextX, nextY);
+      const cl = clampRotatedCabinet(cur, nextX, nextY, bounds);
       const wallBlocked = Math.abs(cl.x - nextX) > 1 || Math.abs(cl.y - nextY) > 1;
       const dist = Math.hypot(m.dx, m.dy);
       const overlapAfter = totalOverlapWithOthers({ ...cur, x: cl.x, y: cl.y }, others);
@@ -193,45 +202,47 @@ function pushOutOfOverlaps(
 function findFreeSpotInRoom(
   cab: { width: number; height: number; rotation?: number },
   others: CabinetRow[],
+  bounds: RoomBounds,
   startX = 40,
   startY = 40
 ): { x: number; y: number } {
   const b = getCabBounds({ ...cab, x: 0, y: 0 });
   const step = 20;
-  for (let y = ROOM_MIN_Y + 5; y + b.effH <= ROOM_MAX_Y; y += step) {
-    for (let x = ROOM_MIN_X + 5; x + b.effW <= ROOM_MAX_X; x += step) {
+  for (let y = bounds.minY + 5; y + b.effH <= bounds.maxY; y += step) {
+    for (let x = bounds.minX + 5; x + b.effW <= bounds.maxX; x += step) {
       const candX = Math.round(x + b.effW / 2 - cab.width / 2);
       const candY = Math.round(y + b.effH / 2 - cab.height / 2);
-      const cl = clampRotatedCabinet(cab, candX, candY);
+      const cl = clampRotatedCabinet(cab, candX, candY, bounds);
       if (totalOverlapWithOthers({ ...cab, x: cl.x, y: cl.y }, others) <= 0.5) {
         return cl;
       }
     }
   }
-  return clampRotatedCabinet(cab, startX, startY);
+  return clampRotatedCabinet(cab, startX, startY, bounds);
 }
 
 function resolveNonOverlappingMove(
   candidate: CabinetRow,
   prevCab: CabinetRow,
-  others: CabinetRow[]
+  others: CabinetRow[],
+  bounds: RoomBounds
 ): { x: number; y: number } {
-  const clamped = clampRotatedCabinet(candidate, candidate.x, candidate.y);
+  const clamped = clampRotatedCabinet(candidate, candidate.x, candidate.y, bounds);
   const candClamped = { ...candidate, x: clamped.x, y: clamped.y };
   if (totalOverlapWithOthers(candClamped, others) <= 0) {
     return clamped;
   }
 
   const prevOverlap = totalOverlapWithOthers(prevCab, others);
-  const pushed = pushOutOfOverlaps(candClamped, others);
+  const pushed = pushOutOfOverlaps(candClamped, others, bounds);
   if (!pushed.hasOverlap) {
     return { x: pushed.x, y: pushed.y };
   }
 
   if (prevOverlap <= 0) {
-    const slideX = pushOutOfOverlaps({ ...candClamped, y: prevCab.y }, others);
+    const slideX = pushOutOfOverlaps({ ...candClamped, y: prevCab.y }, others, bounds);
     if (!slideX.hasOverlap) return { x: slideX.x, y: slideX.y };
-    const slideY = pushOutOfOverlaps({ ...candClamped, x: prevCab.x }, others);
+    const slideY = pushOutOfOverlaps({ ...candClamped, x: prevCab.x }, others, bounds);
     if (!slideY.hasOverlap) return { x: slideY.x, y: slideY.y };
     return { x: prevCab.x, y: prevCab.y };
   }
@@ -247,17 +258,18 @@ function resolveNonOverlappingMove(
 
 function collectSnapGuides(
   cab: { x: number; y: number; width: number; height: number; rotation?: number },
-  others: CabinetRow[]
+  others: CabinetRow[],
+  bounds: RoomBounds
 ): { x: number[]; y: number[] } {
   const bA = getCabBounds(cab);
   const xSet = new Set<number>();
   const ySet = new Set<number>();
   const TOL = 0.8;
 
-  if (Math.abs(bA.left - ROOM_MIN_X) <= TOL) xSet.add(ROOM_MIN_X);
-  if (Math.abs(bA.right - ROOM_MAX_X) <= TOL) xSet.add(ROOM_MAX_X);
-  if (Math.abs(bA.top - ROOM_MIN_Y) <= TOL) ySet.add(ROOM_MIN_Y);
-  if (Math.abs(bA.bottom - ROOM_MAX_Y) <= TOL) ySet.add(ROOM_MAX_Y);
+  if (Math.abs(bA.left - bounds.minX) <= TOL) xSet.add(bounds.minX);
+  if (Math.abs(bA.right - bounds.maxX) <= TOL) xSet.add(bounds.maxX);
+  if (Math.abs(bA.top - bounds.minY) <= TOL) ySet.add(bounds.minY);
+  if (Math.abs(bA.bottom - bounds.maxY) <= TOL) ySet.add(bounds.maxY);
 
   for (const o of others) {
     const bO = getCabBounds(o);
@@ -292,12 +304,20 @@ function getHandleCursor(dir: ResizeDir, rotation: number): string {
 
 export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entrance, roomDimensions, onReload }) => {
   const { t } = useStrings();
-  const [draftCabinets, setDraftCabinets] = useState<CabinetRow[]>(cabinets);
-  const [draftEntrance, setDraftEntrance] = useState<MapEntrance>(entrance || DEFAULT_ENTRANCE);
-  const [draftRoom, setDraftRoom] = useState<RoomDimensions>(() => ({
-    width_m: Number(roomDimensions?.width_m) > 0 ? Number(roomDimensions?.width_m) : 5,
+  const initialRoom: RoomDimensions = {
+    width_m: Number(roomDimensions?.width_m) > 0 ? Number(roomDimensions?.width_m) : 8,
     length_m: Number(roomDimensions?.length_m) > 0 ? Number(roomDimensions?.length_m) : 6,
-  }));
+  };
+  const initialTargetCanvas = getRoomCanvasSize(initialRoom);
+  const initialSrcCanvas = getSourceCanvasForCabinets(roomDimensions, cabinets);
+  const [draftCabinets, setDraftCabinets] = useState<CabinetRow[]>(() =>
+    adaptCabinetsToCanvas(cabinets, initialSrcCanvas.w, initialSrcCanvas.h, initialTargetCanvas.canvasW, initialTargetCanvas.canvasH, true)
+  );
+  const [draftEntrance, setDraftEntrance] = useState<MapEntrance>(entrance || DEFAULT_ENTRANCE);
+  const [draftRoom, setDraftRoom] = useState<RoomDimensions>(initialRoom);
+  const [lengthInput, setLengthInput] = useState<string>(String(initialRoom.length_m));
+  const [widthInput, setWidthInput] = useState<string>(String(initialRoom.width_m));
+  const cabinetFrameRef = useRef<{ w: number; h: number }>({ w: initialTargetCanvas.canvasW, h: initialTargetCanvas.canvasH });
   const [selectedId, setSelectedId] = useState<number | null>(cabinets[0]?.id ?? null);
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -350,26 +370,27 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
   >(null);
 
   useEffect(() => {
-    setDraftCabinets(cabinets);
+    const nextRoom: RoomDimensions = {
+      width_m: Number(roomDimensions?.width_m) > 0 ? Number(roomDimensions?.width_m) : 8,
+      length_m: Number(roomDimensions?.length_m) > 0 ? Number(roomDimensions?.length_m) : 6,
+    };
+    const target = getRoomCanvasSize(nextRoom);
+    const src = getSourceCanvasForCabinets(roomDimensions, cabinets);
+    setDraftRoom(nextRoom);
+    setLengthInput(String(nextRoom.length_m));
+    setWidthInput(String(nextRoom.width_m));
+    setDraftCabinets(adaptCabinetsToCanvas(cabinets, src.w, src.h, target.canvasW, target.canvasH, true));
+    cabinetFrameRef.current = { w: target.canvasW, h: target.canvasH };
     if (selectedId && !cabinets.some((c) => c.id === selectedId)) {
       setSelectedId(cabinets[0]?.id ?? null);
     } else if (!selectedId && cabinets[0]) {
       setSelectedId(cabinets[0].id);
     }
-  }, [cabinets]);
+  }, [cabinets, roomDimensions?.width_m, roomDimensions?.length_m, roomDimensions?.canvas_w, roomDimensions?.canvas_h]);
 
   useEffect(() => {
     if (entrance) setDraftEntrance(entrance);
   }, [entrance?.wall, entrance?.offset]);
-
-  useEffect(() => {
-    if (roomDimensions && (Number(roomDimensions.width_m) > 0 || Number(roomDimensions.length_m) > 0)) {
-      setDraftRoom({
-        width_m: Number(roomDimensions.width_m) > 0 ? Number(roomDimensions.width_m) : 5,
-        length_m: Number(roomDimensions.length_m) > 0 ? Number(roomDimensions.length_m) : 6,
-      });
-    }
-  }, [roomDimensions?.width_m, roomDimensions?.length_m]);
 
   useEffect(() => {
     fetch("/api/reports/shelving")
@@ -379,8 +400,18 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
   }, [cabinets.length]);
 
   const selectedCab = draftCabinets.find((c) => c.id === selectedId) || null;
-  const pxPerCmX = (MAP_WIDTH - 20) / Math.max(100, (Number(draftRoom.length_m) || 6) * 100);
-  const pxPerCmY = (MAP_HEIGHT - 20) / Math.max(100, (Number(draftRoom.width_m) || 5) * 100);
+  const { canvasW, canvasH, pxPerCm } = getRoomCanvasSize(draftRoom);
+  const roomBounds = getRoomBounds(canvasW, canvasH);
+
+  const applyDraftRoomDimensions = (nextRoom: RoomDimensions) => {
+    const nextCanvas = getRoomCanvasSize(nextRoom);
+    const curFrame = cabinetFrameRef.current;
+    setDraftRoom(nextRoom);
+    if (Math.abs(curFrame.w - nextCanvas.canvasW) >= 1 || Math.abs(curFrame.h - nextCanvas.canvasH) >= 1) {
+      setDraftCabinets((prev) => adaptCabinetsToCanvas(prev, curFrame.w, curFrame.h, nextCanvas.canvasW, nextCanvas.canvasH, false));
+      cabinetFrameRef.current = { w: nextCanvas.canvasW, h: nextCanvas.canvasH };
+    }
+  };
 
   const getSvgCoords = (clientX: number, clientY: number) => {
     const svg = svgRef.current;
@@ -395,8 +426,8 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
     }
     const rect = svg.getBoundingClientRect();
     return {
-      x: ((clientX - rect.left) / rect.width) * MAP_WIDTH,
-      y: ((clientY - rect.top) / rect.height) * MAP_HEIGHT,
+      x: ((clientX - rect.left) / rect.width) * canvasW,
+      y: ((clientY - rect.top) / rect.height) * canvasH,
     };
   };
 
@@ -451,25 +482,25 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
         dragRef.current.moved = true;
       }
       const distTop = Math.abs(pt.y - 10);
-      const distBottom = Math.abs(MAP_HEIGHT - 10 - pt.y);
+      const distBottom = Math.abs(canvasH - 10 - pt.y);
       const distLeft = Math.abs(pt.x - 10);
-      const distRight = Math.abs(MAP_WIDTH - 10 - pt.x);
+      const distRight = Math.abs(canvasW - 10 - pt.x);
       const minD = Math.min(distTop, distBottom, distLeft, distRight);
 
       let wall: MapEntrance["wall"] = "bottom";
       let offset = 50;
       if (minD === distTop) {
         wall = "top";
-        offset = ((pt.x - 10) / (MAP_WIDTH - 20)) * 100;
+        offset = ((pt.x - 10) / (canvasW - 20)) * 100;
       } else if (minD === distBottom) {
         wall = "bottom";
-        offset = ((pt.x - 10) / (MAP_WIDTH - 20)) * 100;
+        offset = ((pt.x - 10) / (canvasW - 20)) * 100;
       } else if (minD === distLeft) {
         wall = "left";
-        offset = ((pt.y - 10) / (MAP_HEIGHT - 20)) * 100;
+        offset = ((pt.y - 10) / (canvasH - 20)) * 100;
       } else {
         wall = "right";
-        offset = ((pt.y - 10) / (MAP_HEIGHT - 20)) * 100;
+        offset = ((pt.y - 10) / (canvasH - 20)) * 100;
       }
       setDraftEntrance({
         wall,
@@ -496,18 +527,18 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
       let shiftLocalY = 0;
 
       if (dir.includes("e")) {
-        newWidth = Math.max(40, Math.min(420, snapVal(startCab.width + dxLocal)));
+        newWidth = Math.max(20, Math.min(480, snapVal(startCab.width + dxLocal)));
         shiftLocalX = (newWidth - startCab.width) / 2;
       } else if (dir.includes("w")) {
-        newWidth = Math.max(40, Math.min(420, snapVal(startCab.width - dxLocal)));
+        newWidth = Math.max(20, Math.min(480, snapVal(startCab.width - dxLocal)));
         shiftLocalX = -(newWidth - startCab.width) / 2;
       }
 
       if (dir.includes("s")) {
-        newHeight = Math.max(30, Math.min(300, snapVal(startCab.height + dyLocal)));
+        newHeight = Math.max(20, Math.min(360, snapVal(startCab.height + dyLocal)));
         shiftLocalY = (newHeight - startCab.height) / 2;
       } else if (dir.includes("n")) {
-        newHeight = Math.max(30, Math.min(300, snapVal(startCab.height - dyLocal)));
+        newHeight = Math.max(20, Math.min(360, snapVal(startCab.height - dyLocal)));
         shiftLocalY = -(newHeight - startCab.height) / 2;
       }
 
@@ -520,24 +551,24 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
         ...startCab,
         width: newWidth,
         height: newHeight,
-        width_cm: Math.max(30, Math.round(newWidth / pxPerCmX)),
-        depth_cm: Math.max(20, Math.round(newHeight / pxPerCmY)),
+        width_cm: Math.max(20, Math.round(newWidth / pxPerCm)),
+        depth_cm: Math.max(20, Math.round(newHeight / pxPerCm)),
         x: newCx - newWidth / 2,
         y: newCy - newHeight / 2,
       };
-      const clamped = clampRotatedCabinet(candidate, candidate.x, candidate.y);
+      const clamped = clampRotatedCabinet(candidate, candidate.x, candidate.y, roomBounds);
       const nextCand: CabinetRow = { ...candidate, x: clamped.x, y: clamped.y };
       const others = draftCabinets.filter((c) => c.id !== id);
       const startOverlap = totalOverlapWithOthers(startCab, others);
       const nextOverlap = totalOverlapWithOthers(nextCand, others);
 
       if (snapEnabled && startOverlap <= 0 && nextOverlap > 0) {
-        setSnapGuides(collectSnapGuides(dragRef.current.lastValidCab, others));
+        setSnapGuides(collectSnapGuides(dragRef.current.lastValidCab, others, roomBounds));
         return;
       }
 
       dragRef.current.lastValidCab = nextCand;
-      setSnapGuides(snapEnabled ? collectSnapGuides(nextCand, others) : { x: [], y: [] });
+      setSnapGuides(snapEnabled ? collectSnapGuides(nextCand, others, roomBounds) : { x: [], y: [] });
       setDraftCabinets((prev) =>
         prev.map((c) => (c.id === id ? nextCand : c))
       );
@@ -558,17 +589,18 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
 
     let finalPos: { x: number; y: number };
     if (snapEnabled) {
-      const snapped = applyMagneticSnap(rawCandidate, others);
+      const snapped = applyMagneticSnap(rawCandidate, others, roomBounds);
       finalPos = resolveNonOverlappingMove(
         { ...currentCab, x: snapped.x, y: snapped.y },
         lastValidCab,
-        others
+        others,
+        roomBounds
       );
       const finalCab = { ...currentCab, x: finalPos.x, y: finalPos.y };
-      setSnapGuides(collectSnapGuides(finalCab, others));
+      setSnapGuides(collectSnapGuides(finalCab, others, roomBounds));
       dragInfo.lastValidCab = finalCab;
     } else {
-      finalPos = clampRotatedCabinet(currentCab, snapVal(rawCandidate.x), snapVal(rawCandidate.y));
+      finalPos = clampRotatedCabinet(currentCab, snapVal(rawCandidate.x), snapVal(rawCandidate.y), roomBounds);
       setSnapGuides({ x: [], y: [] });
       dragInfo.lastValidCab = { ...currentCab, x: finalPos.x, y: finalPos.y };
     }
@@ -590,12 +622,12 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
       return prev.map((c) => {
         if (c.id !== selectedCab.id) return c;
         const merged = { ...c, ...patch };
-        const clamped = clampRotatedCabinet(merged, merged.x, merged.y);
+        const clamped = clampRotatedCabinet(merged, merged.x, merged.y, roomBounds);
         if (
           snapEnabled &&
           ("rotation" in patch || "width" in patch || "height" in patch || "width_cm" in patch || "depth_cm" in patch)
         ) {
-          const resolved = resolveNonOverlappingMove({ ...merged, x: clamped.x, y: clamped.y }, c, others);
+          const resolved = resolveNonOverlappingMove({ ...merged, x: clamped.x, y: clamped.y }, c, others, roomBounds);
           return { ...merged, x: resolved.x, y: resolved.y };
         }
         return { ...merged, x: clamped.x, y: clamped.y };
@@ -607,17 +639,17 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
     setDraftCabinets((prev) => {
       const placed: CabinetRow[] = [];
       for (const c of prev) {
-        const cl = clampRotatedCabinet(c, c.x, c.y);
+        const cl = clampRotatedCabinet(c, c.x, c.y, roomBounds);
         const cand = { ...c, x: cl.x, y: cl.y };
         if (totalOverlapWithOthers(cand, placed) <= 0.5) {
           placed.push(cand);
           continue;
         }
-        const pushed = pushOutOfOverlaps(cand, placed);
+        const pushed = pushOutOfOverlaps(cand, placed, roomBounds);
         if (!pushed.hasOverlap) {
           placed.push({ ...cand, x: pushed.x, y: pushed.y });
         } else {
-          const free = findFreeSpotInRoom(cand, placed, cand.x, cand.y);
+          const free = findFreeSpotInRoom(cand, placed, roomBounds, cand.x, cand.y);
           placed.push({ ...cand, x: free.x, y: free.y });
         }
       }
@@ -631,16 +663,31 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
     setError(null);
     setNotice(null);
     try {
+      const roundedCabinets = draftCabinets.map((c) => {
+        const cl = clampRotatedCabinet(c, c.x, c.y, roomBounds);
+        return {
+          ...c,
+          x: cl.x,
+          y: cl.y,
+          width: Math.max(20, Math.round(c.width)),
+          height: Math.max(20, Math.round(c.height)),
+        };
+      });
+      const payloadRoom: RoomDimensions = {
+        ...draftRoom,
+        canvas_w: canvasW,
+        canvas_h: canvasH,
+      };
       const [cabRes, setRes] = await Promise.all([
         fetch("/api/cabinets/layout/batch", {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ cabinets: draftCabinets }),
+          body: JSON.stringify({ cabinets: roundedCabinets }),
         }),
         fetch("/api/settings", {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ map_entrance: draftEntrance, room_dimensions: draftRoom }),
+          body: JSON.stringify({ map_entrance: draftEntrance, room_dimensions: payloadRoom }),
         }),
       ]);
       if (!cabRes.ok || !setRes.ok) {
@@ -669,18 +716,19 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
           main_subject: newSubject.trim(),
           shelves_count: Number(newShelves) || 5,
           ...(() => {
-            const rawW = Math.max(40, Math.min(420, Math.round((Number(newWidthCm) || 120) * pxPerCmX)));
-            const rawH = Math.max(30, Math.min(300, Math.round((Number(newDepthCm) || 40) * pxPerCmY)));
+            const rawW = Math.max(20, Math.min(480, Math.round((Number(newWidthCm) || 120) * pxPerCm)));
+            const rawH = Math.max(20, Math.min(360, Math.round((Number(newDepthCm) || 40) * pxPerCm)));
             const freeSpot = findFreeSpotInRoom(
               { width: rawW, height: rawH, rotation: 0 },
               draftCabinets,
-              60 + ((draftCabinets.length * 30) % 400),
-              240
+              roomBounds,
+              60 + ((draftCabinets.length * 30) % Math.max(120, canvasW - 140)),
+              Math.round(canvasH / 2)
             );
             return { x: freeSpot.x, y: freeSpot.y };
           })(),
-          width: Math.max(40, Math.min(420, Math.round((Number(newWidthCm) || 120) * pxPerCmX))),
-          height: Math.max(30, Math.min(300, Math.round((Number(newDepthCm) || 40) * pxPerCmY))),
+          width: Math.max(20, Math.min(480, Math.round((Number(newWidthCm) || 120) * pxPerCm))),
+          height: Math.max(20, Math.min(360, Math.round((Number(newDepthCm) || 40) * pxPerCm))),
           width_cm: Number(newWidthCm) || 120,
           depth_cm: Number(newDepthCm) || 40,
           rotation: 0,
@@ -712,19 +760,19 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
     setDraftCabinets((prev) => {
       const placed: CabinetRow[] = [];
       for (const c of prev) {
-        const wCm = Number(c.width_cm) > 0 ? Number(c.width_cm) : Math.round(c.width / pxPerCmX);
-        const dCm = Number(c.depth_cm) > 0 ? Number(c.depth_cm) : Math.round(c.height / pxPerCmY);
-        const wPx = Math.max(40, Math.min(420, Math.round(wCm * pxPerCmX)));
-        const hPx = Math.max(30, Math.min(300, Math.round(dCm * pxPerCmY)));
+        const wCm = Number(c.width_cm) > 0 ? Number(c.width_cm) : Math.round(c.width / pxPerCm);
+        const dCm = Number(c.depth_cm) > 0 ? Number(c.depth_cm) : Math.round(c.height / pxPerCm);
+        const wPx = Math.max(20, Math.min(480, Math.round(wCm * pxPerCm)));
+        const hPx = Math.max(20, Math.min(360, Math.round(dCm * pxPerCm)));
         const merged = { ...c, width_cm: wCm, depth_cm: dCm, width: wPx, height: hPx };
-        const clamped = clampRotatedCabinet(merged, merged.x, merged.y);
+        const clamped = clampRotatedCabinet(merged, merged.x, merged.y, roomBounds);
         const cand = { ...merged, x: clamped.x, y: clamped.y };
         if (snapEnabled && totalOverlapWithOthers(cand, placed) > 0.5) {
-          const pushed = pushOutOfOverlaps(cand, placed);
+          const pushed = pushOutOfOverlaps(cand, placed, roomBounds);
           if (!pushed.hasOverlap) {
             placed.push({ ...cand, x: pushed.x, y: pushed.y });
           } else {
-            const free = findFreeSpotInRoom(cand, placed, cand.x, cand.y);
+            const free = findFreeSpotInRoom(cand, placed, roomBounds, cand.x, cand.y);
             placed.push({ ...cand, x: free.x, y: free.y });
           }
         } else {
@@ -733,7 +781,7 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
       }
       return placed;
     });
-    setNotice("מידות הארונות במפה הותאמו לקנה המידה של החדר.");
+    setNotice("מידות הארונות במפה הותאמו לקנה המידה האחיד של החדר.");
   };
 
   const handleDuplicateCabinet = async () => {
@@ -818,13 +866,13 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
     }
   };
 
-  const roomWidthM = Math.max(1, Number(draftRoom.width_m) || 5);
+  const roomWidthM = Math.max(1, Number(draftRoom.width_m) || 8);
   const roomLengthM = Math.max(1, Number(draftRoom.length_m) || 6);
   const roomAreaSqm = Math.round(roomWidthM * roomLengthM * 100) / 100;
   const cabFootprintSqm = Math.round(
     draftCabinets.reduce((sum, c) => {
-      const wCm = Number(c.width_cm) > 0 ? Number(c.width_cm) : Math.round(c.width / pxPerCmX);
-      const dCm = Number(c.depth_cm) > 0 ? Number(c.depth_cm) : Math.round(c.height / pxPerCmY);
+      const wCm = Number(c.width_cm) > 0 ? Number(c.width_cm) : Math.round(c.width / pxPerCm);
+      const dCm = Number(c.depth_cm) > 0 ? Number(c.depth_cm) : Math.round(c.height / pxPerCm);
       return sum + (wCm / 100) * (dCm / 100);
     }, 0) * 100
   ) / 100;
@@ -901,8 +949,21 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
               min={1}
               max={60}
               step="0.5"
-              value={draftRoom.length_m}
-              onChange={(e) => setDraftRoom((p) => ({ ...p, length_m: Math.max(1, Number(e.target.value) || 1) }))}
+              value={lengthInput}
+              onChange={(e) => {
+                const raw = e.target.value;
+                setLengthInput(raw);
+                const parsed = Number(raw);
+                if (raw.trim() !== "" && Number.isFinite(parsed) && parsed >= 1 && parsed <= 60) {
+                  applyDraftRoomDimensions({ ...draftRoom, length_m: parsed });
+                }
+              }}
+              onBlur={() => {
+                const parsed = Number(lengthInput);
+                const safe = Number.isFinite(parsed) && parsed >= 1 ? Math.min(60, parsed) : draftRoom.length_m;
+                setLengthInput(String(safe));
+                if (safe !== draftRoom.length_m) applyDraftRoomDimensions({ ...draftRoom, length_m: safe });
+              }}
               className="w-24 px-2.5 py-1.5 text-sm rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] tabular-nums"
             />
           </div>
@@ -913,8 +974,21 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
               min={1}
               max={60}
               step="0.5"
-              value={draftRoom.width_m}
-              onChange={(e) => setDraftRoom((p) => ({ ...p, width_m: Math.max(1, Number(e.target.value) || 1) }))}
+              value={widthInput}
+              onChange={(e) => {
+                const raw = e.target.value;
+                setWidthInput(raw);
+                const parsed = Number(raw);
+                if (raw.trim() !== "" && Number.isFinite(parsed) && parsed >= 1 && parsed <= 60) {
+                  applyDraftRoomDimensions({ ...draftRoom, width_m: parsed });
+                }
+              }}
+              onBlur={() => {
+                const parsed = Number(widthInput);
+                const safe = Number.isFinite(parsed) && parsed >= 1 ? Math.min(60, parsed) : draftRoom.width_m;
+                setWidthInput(String(safe));
+                if (safe !== draftRoom.width_m) applyDraftRoomDimensions({ ...draftRoom, width_m: safe });
+              }}
               className="w-24 px-2.5 py-1.5 text-sm rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] tabular-nums"
             />
           </div>
@@ -1045,8 +1119,10 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
         <div className="lg:col-span-2 rounded-xl border border-[var(--otzar-border-muted)] bg-[var(--otzar-surface-alt)] overflow-hidden select-none">
           <svg
             ref={svgRef}
-            viewBox={`0 0 ${MAP_WIDTH} ${MAP_HEIGHT}`}
-            className="w-full aspect-[760/440] block touch-none"
+            viewBox={`0 0 ${canvasW} ${canvasH}`}
+            width={canvasW * 2}
+            height={canvasH * 2}
+            className="w-auto max-w-full h-auto max-h-[560px] mx-auto block touch-none"
             onPointerMove={handlePointerMove}
             onPointerUp={handlePointerUp}
             onPointerLeave={handlePointerUp}
@@ -1056,10 +1132,10 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
                 <path d="M 20 0 L 0 0 0 20" fill="none" stroke="currentColor" strokeOpacity="0.09" strokeWidth="1" />
               </pattern>
             </defs>
-            <rect width={MAP_WIDTH} height={MAP_HEIGHT} fill="url(#editor-grid)" />
-            <rect x="10" y="10" width={MAP_WIDTH - 20} height={MAP_HEIGHT - 20} rx="8" fill="none" stroke="currentColor" strokeOpacity="0.2" strokeWidth="2" />
+            <rect width={canvasW} height={canvasH} fill="url(#editor-grid)" />
+            <rect x="10" y="10" width={canvasW - 20} height={canvasH - 20} rx="8" fill="none" stroke="currentColor" strokeOpacity="0.2" strokeWidth="2" />
 
-            <EntranceMarker entrance={draftEntrance} draggable onPointerDown={handleEntrancePointerDown} />
+            <EntranceMarker entrance={draftEntrance} canvasW={canvasW} canvasH={canvasH} draggable onPointerDown={handleEntrancePointerDown} />
 
             {draftCabinets.map((cab) => {
               const isSel = cab.id === selectedId;
@@ -1187,9 +1263,9 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
               <line
                 key={`gx-${gx}`}
                 x1={gx}
-                y1={ROOM_MIN_Y}
+                y1={roomBounds.minY}
                 x2={gx}
-                y2={ROOM_MAX_Y}
+                y2={roomBounds.maxY}
                 stroke="var(--otzar-accent)"
                 strokeWidth="1.2"
                 strokeDasharray="4 3"
@@ -1200,9 +1276,9 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
             {snapGuides.y.map((gy) => (
               <line
                 key={`gy-${gy}`}
-                x1={ROOM_MIN_X}
+                x1={roomBounds.minX}
                 y1={gy}
-                x2={ROOM_MAX_X}
+                x2={roomBounds.maxX}
                 y2={gy}
                 stroke="var(--otzar-accent)"
                 strokeWidth="1.2"
@@ -1275,12 +1351,12 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
                       min={30}
                       max={600}
                       step={5}
-                      value={selectedCab.width_cm ?? Math.round(selectedCab.width / pxPerCmX)}
+                      value={selectedCab.width_cm ?? Math.round(selectedCab.width / pxPerCm)}
                       onChange={(e) => {
-                        const cm = Math.max(30, Number(e.target.value) || 120);
+                        const cm = Math.max(20, Number(e.target.value) || 120);
                         updateSelectedField({
                           width_cm: cm,
-                          width: Math.max(40, Math.min(420, Math.round(cm * pxPerCmX))),
+                          width: Math.max(20, Math.min(480, Math.round(cm * pxPerCm))),
                         });
                       }}
                       className="w-full px-3 py-1.5 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] tabular-nums"
@@ -1293,12 +1369,12 @@ export const MapEditorModule: React.FC<MapEditorModuleProps> = ({ cabinets, entr
                       min={20}
                       max={300}
                       step={5}
-                      value={selectedCab.depth_cm ?? Math.round(selectedCab.height / pxPerCmY)}
+                      value={selectedCab.depth_cm ?? Math.round(selectedCab.height / pxPerCm)}
                       onChange={(e) => {
                         const cm = Math.max(20, Number(e.target.value) || 40);
                         updateSelectedField({
                           depth_cm: cm,
-                          height: Math.max(30, Math.min(300, Math.round(cm * pxPerCmY))),
+                          height: Math.max(20, Math.min(360, Math.round(cm * pxPerCm))),
                         });
                       }}
                       className="w-full px-3 py-1.5 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)] tabular-nums"

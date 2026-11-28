@@ -993,7 +993,7 @@ function buildExistingSetConsistencyPrompt(ctx?: ExistingSetContext): string {
   if (ctx.publisher) lines.push(`- הוצאה קיימת: ${ctx.publisher}`);
   if (ctx.edition) lines.push(`- מהדורה קיימת: ${ctx.edition}`);
   if (ctx.dominantCoverageUnit && ctx.dominantCoverageUnit !== "any") {
-    const uName = ctx.dominantCoverageUnit === "siman" ? "סימנים א׳–ל״ד" : ctx.dominantCoverageUnit === "daf" ? "דפים ב׳–ל״ו" : ctx.dominantCoverageUnit === "perek" ? "פרקים א׳–י׳" : "עמודים א׳–כ׳";
+    const uName = ctx.dominantCoverageUnit === "siman" ? "סימנים א׳–ל״ד" : ctx.dominantCoverageUnit === "daf" ? "דפים ב׳–ל״ו" : ctx.dominantCoverageUnit === "perek" ? "פרקים א׳–י׳" : ctx.dominantCoverageUnit === "kerech" ? "כרכים א׳–ד׳" : "עמודים א׳–כ׳";
     lines.push(`- פורמט טווח קיים בסט (חובה לשמור עליו בכל הספרים): ${uName} (אותיות עבריות עם גרש/גרשיים ומקף –).`);
   }
   if (Array.isArray(ctx.missingSlots) && ctx.missingSlots.length > 0) {

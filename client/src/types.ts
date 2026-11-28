@@ -9,6 +9,8 @@ export interface RoomDimensions {
   width_m: number;
   length_m: number;
   wall_note?: string;
+  canvas_w?: number;
+  canvas_h?: number;
 }
 
 export interface VolumeNotationRule {

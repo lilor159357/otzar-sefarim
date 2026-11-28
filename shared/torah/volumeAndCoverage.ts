@@ -1,4 +1,4 @@
-export type CoverageUnit = "siman" | "daf" | "perek" | "amud" | "any";
+export type CoverageUnit = "siman" | "daf" | "perek" | "amud" | "kerech" | "any";
 
 export interface VolumeNotationRule {
   symbol: string;
@@ -559,10 +559,11 @@ export function parseHebrewOrArabicNumber(raw: string): number {
 
 function detectUnitFromText(segment: string, fallback: CoverageUnit = "any"): CoverageUnit {
   const s = segment.trim();
-  if (/(סימן|סימנים|סי['׳"״]?)(?=\s|$|[א-ת0-9])/.test(s)) return "siman";
-  if (/(דף|דפים|ד['׳])(?=\s|$|[א-ת0-9])/.test(s)) return "daf";
-  if (/(פרק|פרקים|פ['׳])(?=\s|$|[א-ת0-9])/.test(s)) return "perek";
-  if (/(עמוד|עמודים|עמ['׳])(?=\s|$|[א-ת0-9])/.test(s)) return "amud";
+  if (/(?:^|[\s·,;/(])(כרכים|כרך)(?=\s|$|[א-ת0-9"'״׳])/.test(s)) return "kerech";
+  if (/(?:^|[\s·,;/(])(סימנים|סימן|סי['׳"״])(?=\s|$|[א-ת0-9"'״׳])/.test(s)) return "siman";
+  if (/(?:^|[\s·,;/(])(דפים|דף)(?=\s|$|[א-ת0-9"'״׳])/.test(s) || /(?:^|[\s·,;/(])ד['׳](?=\s+[א-ת0-9])/.test(s)) return "daf";
+  if (/(?:^|[\s·,;/(])(פרקים|פרק)(?=\s|$|[א-ת0-9"'״׳])/.test(s) || /(?:^|[\s·,;/(])פ['׳](?=\s+[א-ת0-9])/.test(s)) return "perek";
+  if (/(?:^|[\s·,;/(])(עמודים|עמוד|עמ['׳])(?=\s|$|[א-ת0-9"'״׳])/.test(s)) return "amud";
   return fallback;
 }
 
@@ -570,6 +571,7 @@ export interface DetailedCoverageSegment extends ParsedCoverageSegment {
   rawStart: number;
   rawEnd: number;
   isReversed: boolean;
+  hasExplicitOtherPrefix?: boolean;
 }
 
 export function parseCoverageRangesDetailed(coverageStr: string | undefined | null): DetailedCoverageSegment[] {
@@ -583,13 +585,19 @@ export function parseCoverageRangesDetailed(coverageStr: string | undefined | nu
     const unit = detectUnitFromText(part, lastUnit);
     if (unit !== "any") lastUnit = unit;
     const stripped = part
-      .replace(/(סימנים|סימן|סי['׳"״]|דפים|דף|פרקים|פרק|עמודים|עמוד|עמ['׳])/g, " ")
+      .replace(/(סימנים|סימן|סי['׳"״]|דפים|דף|פרקים|פרק|עמודים|עמוד|עמ['׳]|כרכים|כרך)/g, " ")
       .replace(/\s+עד\s+/g, "-")
       .trim();
 
     const rangeRegex = /([א-ת"'״׳]{1,6}|\d{1,5})\s*[\-–—]+\s*([א-ת"'״׳]{1,6}|\d{1,5})/g;
     let matchedAnyRange = false;
     let m: RegExpExecArray | null;
+    const leftoverWithoutNums = stripped
+      .replace(rangeRegex, " ")
+      .replace(/[0-9"'״׳\-–—.,()\[\]]+/g, " ")
+      .trim();
+    const hasExplicitOtherPrefix = unit === "any" && /[א-ת]{2,}/.test(leftoverWithoutNums);
+    rangeRegex.lastIndex = 0;
     while ((m = rangeRegex.exec(stripped)) !== null) {
       const a = parseHebrewOrArabicNumber(m[1]);
       const b = parseHebrewOrArabicNumber(m[2]);
@@ -601,6 +609,7 @@ export function parseCoverageRangesDetailed(coverageStr: string | undefined | nu
           rawStart: a,
           rawEnd: b,
           isReversed: a > b,
+          hasExplicitOtherPrefix,
           raw: part,
         });
         matchedAnyRange = true;
@@ -608,10 +617,11 @@ export function parseCoverageRangesDetailed(coverageStr: string | undefined | nu
     }
     if (!matchedAnyRange) {
       const tokens = stripped.split(/\s+/).filter(Boolean);
+      const otherWords = unit === "any" && tokens.some((tok) => tok.replace(/["'״׳]/g, "").length >= 2 && parseHebrewOrArabicNumber(tok) === 0);
       for (const tok of tokens) {
         const val = parseHebrewOrArabicNumber(tok);
         if (val > 0) {
-          out.push({ unit, start: val, end: val, rawStart: val, rawEnd: val, isReversed: false, raw: part });
+          out.push({ unit, start: val, end: val, rawStart: val, rawEnd: val, isReversed: false, hasExplicitOtherPrefix: otherWords, raw: part });
         }
       }
     }
@@ -646,6 +656,7 @@ export function extractQueryCoverageTargets(rawQuery: string): CoverageQueryTarg
     else if (/^(דף|דפים)$/.test(cleanCur)) markerUnit = "daf";
     else if (/^(פרק|פרקים)$/.test(cleanCur)) markerUnit = "perek";
     else if (/^(עמוד|עמודים|עמ)$/.test(cleanCur)) markerUnit = "amud";
+    else if (/^(כרך|כרכים)$/.test(cleanCur)) markerUnit = "kerech";
 
     if (markerUnit && i + 1 < tokens.length) {
       const val = parseHebrewOrArabicNumber(tokens[i + 1]);
@@ -692,6 +703,7 @@ function unitLabelHe(unit: CoverageUnit): string {
   if (unit === "daf") return "דף";
   if (unit === "perek") return "פרק";
   if (unit === "amud") return "עמוד";
+  if (unit === "kerech") return "כרך";
   return "סימן/קטע";
 }
 
@@ -741,6 +753,7 @@ function unitPluralLabelHe(unit: CoverageUnit): string {
   if (unit === "daf") return "דפים";
   if (unit === "perek") return "פרקים";
   if (unit === "amud") return "עמודים";
+  if (unit === "kerech") return "כרכים";
   return "";
 }
 
@@ -749,6 +762,7 @@ function unitSingularLabelHe(unit: CoverageUnit): string {
   if (unit === "daf") return "דף";
   if (unit === "perek") return "פרק";
   if (unit === "amud") return "עמוד";
+  if (unit === "kerech") return "כרך";
   return "";
 }
 
@@ -758,6 +772,7 @@ export function inferDominantCoverageUnit(ranges: Array<string | undefined | nul
     daf: 0,
     perek: 0,
     amud: 0,
+    kerech: 0,
   };
   for (const r of ranges) {
     const clean = String(r || "").trim();
@@ -769,7 +784,7 @@ export function inferDominantCoverageUnit(ranges: Array<string | undefined | nul
   }
   let best: CoverageUnit = "any";
   let bestCount = 0;
-  for (const u of ["siman", "daf", "perek", "amud"] as const) {
+  for (const u of ["siman", "daf", "perek", "amud", "kerech"] as const) {
     if (counts[u] > bestCount) {
       bestCount = counts[u];
       best = u;
@@ -784,7 +799,7 @@ export function normalizeCoverageRange(
 ): string {
   const str = String(raw || "").trim();
   if (!str) return "";
-  const segs = parseCoverageRanges(str);
+  const segs = parseCoverageRangesDetailed(str);
   if (segs.length === 0) {
     // Standardize dashes & Hebrew punctuation to ASCII
     return str
@@ -795,6 +810,14 @@ export function normalizeCoverageRange(
       .trim();
   }
   const formattedSegments = segs.map((seg) => {
+    if (seg.unit === "any" && seg.hasExplicitOtherPrefix) {
+      return seg.raw
+        .replace(/([א-ת])['`׳]/g, "$1'")
+        .replace(/([א-ת])["״]/g, '$1"')
+        .replace(/\s*[-–—]+\s*/g, "-")
+        .replace(/\s{2,}/g, " ")
+        .trim();
+    }
     const unit = seg.unit !== "any" ? seg.unit : preferredUnit;
     const startHeb = formatHebrewNumeralWithPunctuation(seg.start);
     const endHeb = formatHebrewNumeralWithPunctuation(seg.end);

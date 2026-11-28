@@ -362,7 +362,7 @@ export async function startOtzarServer(options: OtzarServerOptions = {}): Promis
       saveUiPrefs(DATA_DIR, getThemeSnapshot());
     }
     if (["library_name", "default_loan_days", "map_entrance", "room_dimensions", "volume_notation_rules", "ignored_missing_volumes"].some((k) => k in body)) {
-      void syncService?.pushLibraryMeta().catch(() => {});
+      void syncService?.pushLibraryMeta(true).catch(() => {});
     }
     res.json({ ok: true });
   });
@@ -1492,7 +1492,7 @@ function readIgnoredMissingSet(db: DbClient): Set<string> {
       curSet.delete(key);
     }
     writeIgnoredMissingSet(db, curSet);
-    void syncService?.pushLibraryMeta().catch(() => {});
+    void syncService?.pushLibraryMeta(true).catch(() => {});
     res.json({ ok: true, ignoredKeys: Array.from(curSet) });
   });
 
@@ -1508,7 +1508,7 @@ function readIgnoredMissingSet(db: DbClient): Set<string> {
       setName
     );
     const dominantUnit: CoverageUnit =
-      explicitUnit && ["siman", "daf", "perek", "amud"].includes(explicitUnit)
+      explicitUnit && ["siman", "daf", "perek", "amud", "kerech"].includes(explicitUnit)
         ? explicitUnit
         : inferDominantCoverageUnit(rows.map((r) => String(r.coverage_range || "")));
 
