@@ -13,6 +13,7 @@ import {
   filterHighlightsForVersion,
   compareSemver,
   getBuiltinHighlightsForVersion,
+  getExactHighlightsForVersion,
   readPendingUpdateNotes,
   savePendingUpdateNotes,
 } from "../sync/releaseNotes.ts";
@@ -528,26 +529,30 @@ export function registerUpdaterRoutes(
     const pending = readPendingUpdateNotes(dataDir);
     const lastSeen = getSetting(db, "last_seen_app_version", "").trim();
 
+    const exactLocal = getExactHighlightsForVersion(currentVersion, rootDir);
+
     if (pending && compareSemver(currentVersion, pending.targetVersion) >= 0) {
       const filteredPending =
         Array.isArray(pending.highlights) && pending.highlights.length > 0
           ? filterHighlightsForVersion(pending.highlights, currentVersion)
           : [];
       const highlights =
-        filteredPending.length > 0
-          ? filteredPending
-          : getBuiltinHighlightsForVersion(currentVersion);
+        exactLocal && exactLocal.length > 0
+          ? exactLocal
+          : filteredPending.length > 0
+            ? filteredPending
+            : getBuiltinHighlightsForVersion(currentVersion, rootDir);
       return res.json({
         hasRecentUpdate: true,
         version: currentVersion,
         previousVersion: pending.previousVersion || lastSeen || null,
         highlights,
-        summary: pending.summary || highlights.join(" · "),
+        summary: highlights.join(" · "),
       });
     }
 
     if (!lastSeen || compareSemver(currentVersion, lastSeen) > 0) {
-      const highlights = getBuiltinHighlightsForVersion(currentVersion);
+      const highlights = exactLocal && exactLocal.length > 0 ? exactLocal : getBuiltinHighlightsForVersion(currentVersion, rootDir);
       return res.json({
         hasRecentUpdate: true,
         version: currentVersion,

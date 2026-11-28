@@ -22,6 +22,10 @@ export interface UiPrefsSnapshot {
 }
 
 const VERSION_HIGHLIGHTS_FALLBACK: Record<string, string[]> = {
+  "1.0.36": [
+    "תיקון חלון 'מה חדש בגרסה': הצגת החידושים המדויקים של הגרסה המותקנת בלבד במקום הצגת הערות של גרסאות קודמות.",
+    "בידוד הערות השחרור ב-GitHub Releases לפי מספר הגרסה הנוכחי בלבד."
+  ],
   "1.0.35": [
     "תמיכה מלאה ביחידת הכיסוי 'כרכים' / 'כרך' בעריכת ספר, בחיפוש ובנורמליזציה ללא חזרה ל'דפים' בשמירה.",
     "סנכרון דו-כיווני ובזמן אמת של מידות החדר ורשימת ההתעלמויות מול Firebase ללא דריסה בין מחשבים.",
@@ -215,10 +219,20 @@ export function cleanReleaseNotes(raw: unknown, fallbackVersion?: string | null)
     const exactIdx = cleanTargetVer
       ? headingIndices.findIndex((h) => h.ver === cleanTargetVer)
       : -1;
-    const chosen = exactIdx >= 0 ? exactIdx : 0;
-    const startIdx = headingIndices[chosen].idx + 1;
-    const endIdx = chosen + 1 < headingIndices.length ? headingIndices[chosen + 1].idx : allLines.length;
-    scopedLines = allLines.slice(startIdx, endIdx);
+    if (exactIdx >= 0) {
+      const startIdx = headingIndices[exactIdx].idx + 1;
+      const endIdx = exactIdx + 1 < headingIndices.length ? headingIndices[exactIdx + 1].idx : allLines.length;
+      scopedLines = allLines.slice(startIdx, endIdx);
+    } else if (!cleanTargetVer) {
+      const startIdx = headingIndices[0].idx + 1;
+      const endIdx = 1 < headingIndices.length ? headingIndices[1].idx : allLines.length;
+      scopedLines = allLines.slice(startIdx, endIdx);
+    } else {
+      // Target version header wasn't found in release notes (e.g., stale RELEASE_NOTES.md).
+      // Never fall back to an older version's section (like 1.0.32)! Check for GitHub's What's Changed section or return empty.
+      const whatsChangedIdx = allLines.findIndex((l) => /^#{0,6}\s*what'?s changed:?$/i.test(l.trim()));
+      scopedLines = whatsChangedIdx >= 0 ? allLines.slice(whatsChangedIdx + 1) : [];
+    }
   }
 
   const rawLines = scopedLines
@@ -299,10 +313,27 @@ export function filterHighlightsForVersion(highlights: string[], targetVersion?:
   return highlights.slice(start, end).filter((x) => !isVerLine(x));
 }
 
-export function getBuiltinHighlightsForVersion(version: string): string[] {
+export function getExactHighlightsForVersion(version: string, rootDir?: string): string[] | null {
   const cleanVer = String(version || "").replace(/^v/i, "").trim();
+  if (!cleanVer) return null;
   const list = VERSION_HIGHLIGHTS_FALLBACK[cleanVer];
   if (list && list.length > 0) return [...list];
+  if (rootDir) {
+    try {
+      const mdPath = path.join(rootDir, "RELEASE_NOTES.md");
+      if (fs.existsSync(mdPath)) {
+        const rawMd = fs.readFileSync(mdPath, "utf8");
+        const parsed = cleanReleaseNotes(rawMd, cleanVer);
+        if (parsed.highlights.length > 0) return parsed.highlights;
+      }
+    } catch {}
+  }
+  return null;
+}
+
+export function getBuiltinHighlightsForVersion(version: string, rootDir?: string): string[] {
+  const exact = getExactHighlightsForVersion(version, rootDir);
+  if (exact && exact.length > 0) return exact;
   return ["שיפורי יציבות, אבטחה וחוויית שימוש במערכת."];
 }
 
