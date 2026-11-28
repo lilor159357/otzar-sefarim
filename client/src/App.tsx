@@ -1132,6 +1132,8 @@ export default function App() {
 
           {isAdmin && effectiveTab === "catalog" && (
             <CatalogModule
+              isActive={effectiveTab === "catalog"}
+              refreshTick={catalogRefreshTick}
               cabinets={cabinets}
               nextBarcode={String(settings.next_barcode || "100007")}
               barcodePrefix={String(settings.barcode_prefix || "")}
@@ -1139,6 +1141,7 @@ export default function App() {
               hasApiKey={Boolean(settings.ai_api_key || settings.has_api_key)}
               volumeNotationRules={volumeNotationRules}
               recycleBinCount={health?.counts.recycleBin ?? 0}
+              onOpenBookByBarcode={(bc, edit) => void handleOpenBookByBarcode(bc, Boolean(edit))}
               onReload={() => loadAll(searchQuery, statusFilter, categoryFilter, semanticMode)}
             />
           )}
@@ -1183,7 +1186,7 @@ export default function App() {
       <BugReportModal
         isOpen={showBugReportModal}
         onClose={() => setShowBugReportModal(false)}
-        appVersion="v1.0.32"
+        appVersion="v1.0.33"
         totalBooks={books.length}
         totalCabinets={cabinets.length}
       />

@@ -32,7 +32,12 @@ import { RecycleBinModal } from "./RecycleBinModal.tsx";
 import { getAdminToken } from "../lib/adminSession.ts";
 import { AutocompleteInput } from "./AutocompleteInput.tsx";
 import { SetPatternBuilderModal, type PatternTargetField } from "./SetPatternBuilderModal.tsx";
-import { suggestNextVolume, compareSetBooks, deriveTitleFromSetTemplate } from "../lib/torahUtils.ts";
+import {
+  suggestNextVolume,
+  compareSetBooks,
+  deriveTitleFromSetTemplate,
+  type CoverageVolumeSuggestion,
+} from "../lib/torahUtils.ts";
 import { useStrings } from "../lib/stringsContext.tsx";
 
 interface CatalogModuleProps {
@@ -272,6 +277,10 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
     missingCount: number;
     slots: any[];
   }>>([]);
+  const [volumeSuggestions, setVolumeSuggestions] = useState<CoverageVolumeSuggestion[]>([]);
+  const [editedSuggestedVolumes, setEditedSuggestedVolumes] = useState<Record<string, string>>({});
+  const [applyingVolumeSuggestions, setApplyingVolumeSuggestions] = useState(false);
+  const [volumeSuggestionsNotice, setVolumeSuggestionsNotice] = useState<string | null>(null);
   const [missingSetsExpanded, setMissingSetsExpanded] = useState(false);
   const shelfTitleInputRef = useRef<HTMLInputElement>(null);
   const shelfSpineInputRef = useRef<HTMLInputElement>(null);
@@ -514,8 +523,45 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
       if (res.ok) {
         const data = await res.json();
         setMissingSetsSummary(Array.isArray(data.missingSets) ? data.missingSets : []);
+        const nextVols: CoverageVolumeSuggestion[] = Array.isArray(data.volumeSuggestions) ? data.volumeSuggestions : [];
+        setVolumeSuggestions(nextVols);
+        setEditedSuggestedVolumes((prev) => {
+          const updated: Record<string, string> = {};
+          for (const s of nextVols) {
+            updated[s.barcode] = prev[s.barcode] !== undefined ? prev[s.barcode] : s.suggestedVolume;
+          }
+          return updated;
+        });
       }
     } catch {}
+  };
+
+  const handleApplyVolumeSuggestions = async () => {
+    const items = volumeSuggestions
+      .map((s) => ({
+        barcode: s.barcode,
+        volume: String(editedSuggestedVolumes[s.barcode] ?? s.suggestedVolume).trim(),
+      }))
+      .filter((it) => it.barcode && it.volume);
+    if (items.length === 0) return;
+
+    setApplyingVolumeSuggestions(true);
+    setVolumeSuggestionsNotice(null);
+    try {
+      const res = await fetch("/api/books/apply-volume-suggestions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ items }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setVolumeSuggestionsNotice(`הושלמו ונשמרו ${Number(data.updatedCount || items.length)} מספרי חלקים בהצלחה`);
+        await loadMissingSetsSummary();
+        await onReload();
+      }
+    } catch {} finally {
+      setApplyingVolumeSuggestions(false);
+    }
   };
 
   const handleIgnoreMissingSlotInSummary = async (key: string) => {
@@ -1265,8 +1311,20 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
         </div>
       </div>
 
-      {/* Collapsible missing volumes banner */}
-      {missingSetsSummary.length > 0 && (
+      {volumeSuggestionsNotice && (
+        <div className="p-3 rounded-xl border border-emerald-300 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/30 text-emerald-900 dark:text-emerald-200 text-xs font-semibold flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+            <span>{volumeSuggestionsNotice}</span>
+          </div>
+          <button type="button" onClick={() => setVolumeSuggestionsNotice(null)} className="cursor-pointer hover:opacity-75">
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+
+      {/* Collapsible missing volumes + coverage-inferred volume suggestions banner */}
+      {(missingSetsSummary.length > 0 || volumeSuggestions.length > 0) && (
         <div className="rounded-xl border border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/30 overflow-hidden text-xs">
           <div
             onClick={() => setMissingSetsExpanded((p) => !p)}
@@ -1275,17 +1333,99 @@ export const CatalogModule: React.FC<CatalogModuleProps> = ({
             <div className="flex items-center gap-2 text-amber-900 dark:text-amber-200 font-bold">
               <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
               <span>
-                זוהו {missingSetsSummary.length} סטים עם כרכים חסרים בספרייה
-                ({missingSetsSummary.reduce((acc, s) => acc + s.missingCount, 0)} כרכים חסרים סה״כ)
+                {missingSetsSummary.length > 0
+                  ? `זוהו ${missingSetsSummary.length} סטים עם כרכים חסרים או אזהרות (${missingSetsSummary.reduce((acc, s) => acc + s.missingCount, 0)} פריטים)`
+                  : ""}
+                {missingSetsSummary.length > 0 && volumeSuggestions.length > 0 ? " · " : ""}
+                {volumeSuggestions.length > 0
+                  ? `זוהו ${volumeSuggestions.length} ספרים להשלמת חלק לפי טווח`
+                  : ""}
               </span>
             </div>
             <div className="flex items-center gap-1.5 text-amber-800 dark:text-amber-300 font-semibold">
-              <span>{missingSetsExpanded ? "כווץ רשימה" : "הצג פירוט והתעלמות"}</span>
+              <span>{missingSetsExpanded ? "כווץ רשימה" : "הצג פירוט ופעולות"}</span>
               {missingSetsExpanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
             </div>
           </div>
           {missingSetsExpanded && (
             <div className="p-3 pt-0 border-t border-amber-200 dark:border-amber-900 divide-y divide-amber-200 dark:divide-amber-900">
+              {volumeSuggestions.length > 0 && (
+                <div className="py-3 space-y-2.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <div className="font-bold text-amber-950 dark:text-amber-100">
+                        הצעות להשלמת מספרי חלקים לפי טווח דפים / פרקים ({volumeSuggestions.length})
+                      </div>
+                      <div className="text-[11px] text-[var(--otzar-text-muted)]">
+                        ניתן לערוך כל מספר חלק מוצע לפני לחיצה על שמירה.
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={applyingVolumeSuggestions}
+                      onClick={() => void handleApplyVolumeSuggestions()}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[var(--otzar-accent)] hover:bg-[var(--otzar-accent-hover)] text-white font-bold text-xs cursor-pointer disabled:opacity-60"
+                    >
+                      <CheckCircle2 className="w-3.5 h-3.5" />
+                      <span>
+                        {applyingVolumeSuggestions
+                          ? "שומר חלקים..."
+                          : `השלם ושמור מספרי חלקים (${volumeSuggestions.length})`}
+                      </span>
+                    </button>
+                  </div>
+                  {Array.from(new Set(volumeSuggestions.map((s) => s.startWarning).filter(Boolean))).map((warnMsg) => (
+                    <div
+                      key={warnMsg}
+                      className="px-2.5 py-1.5 rounded-lg border border-orange-300 dark:border-orange-800 bg-orange-50/90 dark:bg-orange-950/30 text-orange-900 dark:text-orange-200 text-[11px] font-medium flex items-center gap-1.5"
+                    >
+                      <AlertTriangle className="w-3.5 h-3.5 text-orange-600 shrink-0" />
+                      <span>{warnMsg}</span>
+                    </div>
+                  ))}
+                  <div className="space-y-1.5">
+                    {volumeSuggestions.map((s) => (
+                      <div
+                        key={s.barcode}
+                        className="flex flex-wrap items-center justify-between gap-2 px-2.5 py-2 rounded-lg bg-white dark:bg-black/30 border border-amber-300 dark:border-amber-800"
+                      >
+                        <div className="flex flex-wrap items-center gap-2 min-w-0">
+                          <button
+                            type="button"
+                            onClick={() => onOpenBookByBarcode?.(s.barcode, true)}
+                            className="font-bold text-[var(--otzar-accent)] hover:underline cursor-pointer tabular-nums"
+                            title="פתח ספר זה לעריכה"
+                          >
+                            #{s.barcode}
+                          </button>
+                          <span className="font-semibold text-amber-950 dark:text-amber-100">
+                            {s.title || s.subSeries || s.setName}
+                          </span>
+                          <span className="text-[11px] text-[var(--otzar-text-muted)]">
+                            {s.setName}
+                            {s.subSeries ? ` · ${s.subSeries}` : ""}
+                            {s.coverageRange ? ` · טווח: ${s.coverageRange}` : ""}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          <span className="text-[11px] text-[var(--otzar-text-muted)]">השלם חלק:</span>
+                          <input
+                            type="text"
+                            value={editedSuggestedVolumes[s.barcode] ?? s.suggestedVolume}
+                            onChange={(e) =>
+                              setEditedSuggestedVolumes((prev) => ({
+                                ...prev,
+                                [s.barcode]: e.target.value,
+                              }))
+                            }
+                            className="w-28 px-2 py-1 rounded border border-amber-300 dark:border-amber-700 bg-[var(--otzar-bg)] text-xs font-bold"
+                          />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
               {missingSetsSummary.map((ms) => {
                 const allSetKeys = (ms.slots || []).map((sl: any) => sl.key).filter(Boolean);
                 const anomalySlots = (ms.slots || []).filter((sl: any) => sl.kind === "anomaly");

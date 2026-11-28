@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef } from "react";
+import React, { useEffect, useMemo, useState, useRef } from "react";
 import {
   X,
   MapPin,
@@ -22,6 +22,7 @@ import {
   EyeOff,
   Eye,
   AlertCircle,
+  AlertTriangle,
 } from "lucide-react";
 import { SetPatternBuilderModal, type PatternTargetField } from "./SetPatternBuilderModal.tsx";
 import type {
@@ -40,6 +41,8 @@ import {
   groupSetBySubSeries,
   shouldSuppressSingleVolumeLabel,
   deriveTitleFromSetTemplate,
+  detectBookCoverageTypoWarnings,
+  type CoverageAnomalyWarning,
   type SetSubSeriesSection,
   type SetVolumeGroup,
 } from "../lib/torahUtils.ts";
@@ -99,6 +102,7 @@ export const LocationModal: React.FC<LocationModalProps> = ({
   const [notes, setNotes] = useState(book.notes || "");
   const [setBooks, setSetBooks] = useState<BookRow[]>([]);
   const [missingSlots, setMissingSlots] = useState<MissingVolumeSlotDto[]>([]);
+  const [ignoredAnomalyKeys, setIgnoredAnomalyKeys] = useState<Set<string>>(new Set());
   const [showIgnoredMissing, setShowIgnoredMissing] = useState(false);
   const [loadingSet, setLoadingSet] = useState(false);
   const [expandedVol, setExpandedVol] = useState<string | null>(null);
@@ -209,35 +213,93 @@ export const LocationModal: React.FC<LocationModalProps> = ({
   }, [book.barcode, initialEditMode]);
 
   useEffect(() => {
-    const sName = (book.set_name || "").trim();
+    const sName = (editing ? setName : book.set_name || "").trim();
     if (!sName) {
       setSetBooks([]);
       setMissingSlots([]);
+      setIgnoredAnomalyKeys(new Set());
       return;
     }
     let cancelled = false;
-    setLoadingSet(true);
-    fetch("/api/books/set/" + encodeURIComponent(sName))
-      .then((r) => (r.ok ? r.json() : { books: [], missingSlots: [] }))
-      .then((d) => {
-        if (!cancelled) {
-          setSetBooks(Array.isArray(d?.books) ? d.books : []);
-          setMissingSlots(Array.isArray(d?.missingSlots) ? d.missingSlots : []);
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setSetBooks([]);
-          setMissingSlots([]);
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setLoadingSet(false);
-      });
+    const delay = editing && sName !== (book.set_name || "").trim() ? 260 : 0;
+    const timer = setTimeout(() => {
+      setLoadingSet(true);
+      fetch("/api/books/set/" + encodeURIComponent(sName))
+        .then((r) => (r.ok ? r.json() : { books: [], missingSlots: [], ignoredKeys: [] }))
+        .then((d) => {
+          if (!cancelled) {
+            setSetBooks(Array.isArray(d?.books) ? d.books : []);
+            setMissingSlots(Array.isArray(d?.missingSlots) ? d.missingSlots : []);
+            setIgnoredAnomalyKeys(
+              new Set(Array.isArray(d?.ignoredKeys) ? d.ignoredKeys.map((k: unknown) => String(k || "")) : [])
+            );
+          }
+        })
+        .catch(() => {
+          if (!cancelled) {
+            setSetBooks([]);
+            setMissingSlots([]);
+            setIgnoredAnomalyKeys(new Set());
+          }
+        })
+        .finally(() => {
+          if (!cancelled) setLoadingSet(false);
+        });
+    }, delay);
     return () => {
       cancelled = true;
+      clearTimeout(timer);
     };
-  }, [book.set_name, book.barcode]);
+  }, [book.set_name, book.barcode, editing, setName]);
+
+  // Block Escape closing while editing; keep Escape active in view-only mode
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      if (editing || showPatternBuilder) return;
+      e.preventDefault();
+      onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [editing, showPatternBuilder, onClose]);
+
+  const coverageTypoWarnings: CoverageAnomalyWarning[] = useMemo(() => {
+    if (!editing) return [];
+    const parsedGn = setGlobalNumber.trim() ? Number(setGlobalNumber) : null;
+    return detectBookCoverageTypoWarnings(
+      {
+        barcode: book.barcode,
+        title: title.trim() || book.title,
+        set_name: setName.trim(),
+        sub_series: subSeries.trim(),
+        volume: volume.trim(),
+        coverage_range: coverageRange.trim(),
+        set_global_number: parsedGn != null && Number.isFinite(parsedGn) ? parsedGn : null,
+      },
+      setBooks,
+      ignoredAnomalyKeys
+    );
+  }, [editing, book.barcode, book.title, title, setName, subSeries, volume, coverageRange, setGlobalNumber, setBooks, ignoredAnomalyKeys]);
+
+  const handleIgnoreCoverageAnomaly = async (key: string) => {
+    if (!key) return;
+    try {
+      const res = await fetch("/api/books/ignore-missing-volume", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ key, ignore: true }),
+      });
+      if (res.ok) {
+        setIgnoredAnomalyKeys((prev) => {
+          const next = new Set(prev);
+          next.add(key);
+          return next;
+        });
+        if (onBookUpdated) await onBookUpdated();
+      }
+    } catch {}
+  };
 
   // Auto-pull set details in LocationModal edit mode
   const handlePullSetDetailsInEdit = async (targetSetName: string, overwrite = false) => {
@@ -746,7 +808,9 @@ export const LocationModal: React.FC<LocationModalProps> = ({
   return (
     <div
       className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4"
-      onClick={onClose}
+      onClick={() => {
+        if (!editing) onClose();
+      }}
       role="dialog"
       aria-modal="true"
     >
@@ -1226,8 +1290,41 @@ export const LocationModal: React.FC<LocationModalProps> = ({
                     value={coverageRange}
                     onChange={(e) => setCoverageRange(e.target.value)}
                     placeholder="למשל: סימנים א-קכז / דפים ב-מה / פרקים א-י"
-                    className="w-full px-3 py-2 rounded-lg border border-[var(--otzar-border-muted)] bg-[var(--otzar-bg)]"
+                    className={`w-full px-3 py-2 rounded-lg border bg-[var(--otzar-bg)] ${
+                      coverageTypoWarnings.length > 0
+                        ? "border-orange-400 dark:border-orange-600"
+                        : "border-[var(--otzar-border-muted)]"
+                    }`}
                   />
+                  {coverageTypoWarnings.length > 0 && (
+                    <div className="mt-2 space-y-1.5">
+                      {coverageTypoWarnings.map((w) => (
+                        <div
+                          key={w.key}
+                          className="p-2.5 rounded-lg border border-orange-300 dark:border-orange-800 bg-orange-50 dark:bg-orange-950/40 text-orange-950 dark:text-orange-200 text-xs space-y-1.5"
+                        >
+                          <div className="flex items-start gap-1.5 font-semibold">
+                            <AlertTriangle className="w-3.5 h-3.5 text-orange-600 shrink-0 mt-0.5" />
+                            <span>{w.message}</span>
+                          </div>
+                          {w.siblingHint && (
+                            <div className="text-[11px] text-orange-800 dark:text-orange-300">
+                              להשוואה: {w.siblingHint}
+                            </div>
+                          )}
+                          <div className="flex justify-end">
+                            <button
+                              type="button"
+                              onClick={() => void handleIgnoreCoverageAnomaly(w.key)}
+                              className="px-2 py-0.5 rounded border border-orange-300 dark:border-orange-700 bg-white dark:bg-black/30 text-[11px] font-semibold hover:bg-orange-100/70 cursor-pointer"
+                            >
+                              התעלם קבוע מאזהרה זו
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
                 <AutocompleteInput
                   label="מחבר / מפרש"

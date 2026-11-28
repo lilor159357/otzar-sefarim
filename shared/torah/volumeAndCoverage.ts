@@ -566,11 +566,17 @@ function detectUnitFromText(segment: string, fallback: CoverageUnit = "any"): Co
   return fallback;
 }
 
-export function parseCoverageRanges(coverageStr: string | undefined | null): ParsedCoverageSegment[] {
+export interface DetailedCoverageSegment extends ParsedCoverageSegment {
+  rawStart: number;
+  rawEnd: number;
+  isReversed: boolean;
+}
+
+export function parseCoverageRangesDetailed(coverageStr: string | undefined | null): DetailedCoverageSegment[] {
   const raw = String(coverageStr || "").trim();
   if (!raw) return [];
   const parts = raw.split(/[,;/|·\u00B7]+/).map((p) => p.trim()).filter(Boolean);
-  const out: ParsedCoverageSegment[] = [];
+  const out: DetailedCoverageSegment[] = [];
   let lastUnit: CoverageUnit = "any";
 
   for (const part of parts) {
@@ -588,7 +594,15 @@ export function parseCoverageRanges(coverageStr: string | undefined | null): Par
       const a = parseHebrewOrArabicNumber(m[1]);
       const b = parseHebrewOrArabicNumber(m[2]);
       if (a > 0 && b > 0) {
-        out.push({ unit, start: Math.min(a, b), end: Math.max(a, b), raw: part });
+        out.push({
+          unit,
+          start: Math.min(a, b),
+          end: Math.max(a, b),
+          rawStart: a,
+          rawEnd: b,
+          isReversed: a > b,
+          raw: part,
+        });
         matchedAnyRange = true;
       }
     }
@@ -597,12 +611,21 @@ export function parseCoverageRanges(coverageStr: string | undefined | null): Par
       for (const tok of tokens) {
         const val = parseHebrewOrArabicNumber(tok);
         if (val > 0) {
-          out.push({ unit, start: val, end: val, raw: part });
+          out.push({ unit, start: val, end: val, rawStart: val, rawEnd: val, isReversed: false, raw: part });
         }
       }
     }
   }
   return out;
+}
+
+export function parseCoverageRanges(coverageStr: string | undefined | null): ParsedCoverageSegment[] {
+  return parseCoverageRangesDetailed(coverageStr).map(({ unit, start, end, raw }) => ({
+    unit,
+    start,
+    end,
+    raw,
+  }));
 }
 
 export function extractQueryCoverageTargets(rawQuery: string): CoverageQueryTarget[] {
@@ -852,6 +875,52 @@ export interface MissingVolumeSlot {
   ignored: boolean;
 }
 
+export interface CoverageBookInput {
+  barcode?: string;
+  title?: string;
+  set_name?: string;
+  sub_series?: string;
+  volume?: string;
+  coverage_range?: string;
+  set_global_number?: number | null;
+}
+
+export interface CoverageVolumeSuggestion {
+  barcode: string;
+  title: string;
+  setName: string;
+  subSeries: string;
+  coverageRange: string;
+  unit: CoverageUnit;
+  start: number;
+  end: number;
+  inferredIndex: number;
+  suggestedVolume: string;
+  startsAfterNaturalBeginning: boolean;
+  startWarning?: string;
+}
+
+export type CoverageAnomalyKind =
+  | "reversed_range"
+  | "volume_order_inversion"
+  | "significant_overlap"
+  | "outlier_span"
+  | "outlier_jump";
+
+export interface CoverageAnomalyWarning {
+  key: string;
+  kind: CoverageAnomalyKind;
+  barcode: string;
+  title: string;
+  setName: string;
+  subSeries: string;
+  coverageRange: string;
+  volIndex: number | null;
+  message: string;
+  siblingHint?: string;
+  ignored: boolean;
+}
+
 export function makeMissingVolumeIgnoreKey(
   setName: string,
   subSeries: string,
@@ -861,16 +930,479 @@ export function makeMissingVolumeIgnoreKey(
   return `${setName.trim().toLowerCase()}::${subSeries.trim().toLowerCase()}::${slotType}::${index}`;
 }
 
+export function makeCoverageAnomalyIgnoreKey(
+  setName: string,
+  subSeries: string,
+  anomalyKind: CoverageAnomalyKind,
+  barcode: string,
+  coverageRange: string
+): string {
+  const normCov = String(coverageRange || "").trim().toLowerCase().replace(/\s+/g, " ");
+  return `cov_anomaly::${setName.trim().toLowerCase()}::${subSeries.trim().toLowerCase()}::${anomalyKind}::${barcode.trim()}::${normCov}`;
+}
+
+function getPrimaryDetailedSegment(
+  coverageStr: string | undefined | null,
+  dominantUnit: CoverageUnit
+): DetailedCoverageSegment | null {
+  const segs = parseCoverageRangesDetailed(coverageStr);
+  if (segs.length === 0) return null;
+  if (dominantUnit !== "any") {
+    const exact = segs.find((s) => s.unit === dominantUnit);
+    if (exact) return exact;
+    const generic = segs.find((s) => s.unit === "any");
+    if (generic) return { ...generic, unit: dominantUnit };
+  }
+  return segs[0];
+}
+
+function detectPrefixStyleForGroup(
+  groupBooks: CoverageBookInput[],
+  allSetBooks: CoverageBookInput[],
+  subSeries: string
+): string {
+  const collectSample = (list: CoverageBookInput[]) => {
+    for (const b of list) {
+      const v = String(b.volume || "").trim();
+      if (!v) continue;
+      if (/^\d+$/.test(v) || /^חלק\s+/.test(v) || /^כרך\s+/.test(v) || /^ספר\s+/.test(v)) {
+        return v;
+      }
+    }
+    return "";
+  };
+  const fromGroup = collectSample(groupBooks);
+  if (fromGroup) return fromGroup;
+  const fromSet = collectSample(allSetBooks);
+  if (fromSet) return fromSet;
+  return subSeries ? "חלק א'" : "כרך א'";
+}
+
+function isNaturalCoverageStart(unit: CoverageUnit, startVal: number): boolean {
+  if (unit === "daf") return startVal <= 2;
+  return startVal <= 1;
+}
+
+export function inferVolumesFromCoverage(
+  books: CoverageBookInput[],
+  setName: string
+): CoverageVolumeSuggestion[] {
+  const cleanSet = String(setName || "").trim();
+  if (!cleanSet || !Array.isArray(books) || books.length < 2) return [];
+
+  const bySub = new Map<string, CoverageBookInput[]>();
+  for (const b of books) {
+    const sub = String(b.sub_series || "").trim();
+    const arr = bySub.get(sub) || [];
+    arr.push(b);
+    bySub.set(sub, arr);
+  }
+
+  const suggestions: CoverageVolumeSuggestion[] = [];
+
+  for (const [subSeries, groupBooks] of bySub.entries()) {
+    const domUnit = inferDominantCoverageUnit(groupBooks.map((b) => String(b.coverage_range || "")));
+    type RangeItem = {
+      book: CoverageBookInput;
+      seg: DetailedCoverageSegment;
+      effectiveUnit: CoverageUnit;
+      explicitIdx: number | null;
+      rangeKey: string;
+    };
+    const items: RangeItem[] = [];
+    for (const b of groupBooks) {
+      const seg = getPrimaryDetailedSegment(b.coverage_range, domUnit);
+      if (!seg || seg.isReversed) continue;
+      const effUnit = seg.unit !== "any" ? seg.unit : domUnit;
+      if (domUnit !== "any" && effUnit !== domUnit) continue;
+      const explicitIdx = extractVolumeNumberIndex(b.volume, null);
+      items.push({
+        book: b,
+        seg,
+        effectiveUnit: effUnit,
+        explicitIdx,
+        rangeKey: `${seg.start}-${seg.end}`,
+      });
+    }
+
+    const clusterMap = new Map<string, { start: number; end: number; unit: CoverageUnit; items: RangeItem[] }>();
+    for (const it of items) {
+      const existing = clusterMap.get(it.rangeKey);
+      if (existing) {
+        existing.items.push(it);
+      } else {
+        clusterMap.set(it.rangeKey, {
+          start: it.seg.start,
+          end: it.seg.end,
+          unit: it.effectiveUnit,
+          items: [it],
+        });
+      }
+    }
+
+    // Require at least 2 distinct coverage ranges in this sub-series/group
+    if (clusterMap.size < 2) continue;
+
+    const sortedClusters = Array.from(clusterMap.values()).sort((a, b) =>
+      a.start !== b.start ? a.start - b.start : a.end - b.end
+    );
+
+    const sampleVolStyle = detectPrefixStyleForGroup(groupBooks, books, subSeries);
+    const hasExplicitVol1 = groupBooks.some((b) => extractVolumeNumberIndex(b.volume, null) === 1);
+    const firstCluster = sortedClusters[0];
+    const startsAfterNaturalBeginning =
+      !hasExplicitVol1 && !isNaturalCoverageStart(firstCluster.unit, firstCluster.start);
+    const startWarning = startsAfterNaturalBeginning
+      ? `הטווח הראשון מתחיל מ-${unitLabelHe(firstCluster.unit)} ${formatHebrewNumeralWithPunctuation(firstCluster.start)} — ייתכן שהכרך הראשון חסר`
+      : undefined;
+
+    let nextMinIndex = 1;
+    for (const cluster of sortedClusters) {
+      const explicitIndices = cluster.items
+        .map((x) => x.explicitIdx)
+        .filter((n): n is number => n != null && n > 0);
+      let assignedIdx = nextMinIndex;
+      if (explicitIndices.length > 0) {
+        const anchor = Math.min(...explicitIndices);
+        if (anchor >= nextMinIndex) {
+          assignedIdx = anchor;
+        }
+      }
+      nextMinIndex = Math.max(nextMinIndex, assignedIdx) + 1;
+
+      for (const it of cluster.items) {
+        const rawVol = String(it.book.volume || "").trim();
+        const bc = String(it.book.barcode || "").trim();
+        if (!rawVol && it.explicitIdx == null && bc) {
+          suggestions.push({
+            barcode: bc,
+            title: String(it.book.title || "").trim(),
+            setName: cleanSet,
+            subSeries,
+            coverageRange: String(it.book.coverage_range || "").trim(),
+            unit: cluster.unit,
+            start: cluster.start,
+            end: cluster.end,
+            inferredIndex: assignedIdx,
+            suggestedVolume: buildMissingVolumeLabel(assignedIdx, sampleVolStyle),
+            startsAfterNaturalBeginning,
+            ...(startWarning ? { startWarning } : {}),
+          });
+        }
+      }
+    }
+  }
+
+  return suggestions;
+}
+
+function medianPositive(nums: number[]): number {
+  if (nums.length === 0) return 0;
+  const sorted = [...nums].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+function formatUnitValue(unit: CoverageUnit, val: number): string {
+  const lbl = unit === "any" ? "" : `${unitLabelHe(unit)} `;
+  return `${lbl}${formatHebrewNumeralWithPunctuation(val)}`.trim();
+}
+
+export function detectCoverageAnomaliesForSet(
+  books: CoverageBookInput[],
+  setName: string,
+  ignoredKeys?: Set<string>
+): CoverageAnomalyWarning[] {
+  const cleanSet = String(setName || "").trim();
+  if (!cleanSet || !Array.isArray(books) || books.length === 0) return [];
+
+  const warnings: CoverageAnomalyWarning[] = [];
+  const emittedKeys = new Set<string>();
+
+  const pushWarning = (w: Omit<CoverageAnomalyWarning, "key" | "ignored">) => {
+    const key = makeCoverageAnomalyIgnoreKey(cleanSet, w.subSeries, w.kind, w.barcode, w.coverageRange);
+    if (emittedKeys.has(key)) return;
+    emittedKeys.add(key);
+    warnings.push({
+      ...w,
+      key,
+      ignored: Boolean(ignoredKeys?.has(key)),
+    });
+  };
+
+  const bySub = new Map<string, CoverageBookInput[]>();
+  for (const b of books) {
+    const sub = String(b.sub_series || "").trim();
+    const arr = bySub.get(sub) || [];
+    arr.push(b);
+    bySub.set(sub, arr);
+  }
+
+  for (const [subSeries, groupBooks] of bySub.entries()) {
+    const domUnit = inferDominantCoverageUnit(groupBooks.map((b) => String(b.coverage_range || "")));
+    type ParsedEntry = {
+      book: CoverageBookInput;
+      barcode: string;
+      title: string;
+      coverageRange: string;
+      seg: DetailedCoverageSegment;
+      effectiveUnit: CoverageUnit;
+      volIdx: number | null;
+      span: number;
+    };
+
+    const parsedEntries: ParsedEntry[] = [];
+
+    for (const b of groupBooks) {
+      const bc = String(b.barcode || "").trim();
+      const title = String(b.title || "").trim();
+      const cov = String(b.coverage_range || "").trim();
+      if (!cov) continue;
+      const detailed = parseCoverageRangesDetailed(cov);
+      if (detailed.length === 0) continue;
+
+      const volIdx = extractVolumeNumberIndex(b.volume, null);
+      const rev = detailed.find((s) => s.isReversed);
+      if (rev) {
+        pushWarning({
+          kind: "reversed_range",
+          barcode: bc,
+          title,
+          setName: cleanSet,
+          subSeries,
+          coverageRange: cov,
+          volIndex: volIdx,
+          message: `טווח הפוך בספר ${bc ? `#${bc}` : ""} (${title || subSeries || cleanSet}): "${rev.raw}" מתחיל מ-${formatHebrewNumeralWithPunctuation(rev.rawStart)} ומסתיים ב-${formatHebrewNumeralWithPunctuation(rev.rawEnd)}`,
+        });
+      }
+
+      const primary = getPrimaryDetailedSegment(cov, domUnit);
+      if (primary && !primary.isReversed) {
+        const effUnit = primary.unit !== "any" ? primary.unit : domUnit;
+        parsedEntries.push({
+          book: b,
+          barcode: bc,
+          title,
+          coverageRange: cov,
+          seg: primary,
+          effectiveUnit: effUnit,
+          volIdx,
+          span: primary.end - primary.start + 1,
+        });
+      }
+    }
+
+    const byUnit = new Map<CoverageUnit, ParsedEntry[]>();
+    for (const e of parsedEntries) {
+      const arr = byUnit.get(e.effectiveUnit) || [];
+      arr.push(e);
+      byUnit.set(e.effectiveUnit, arr);
+    }
+
+    for (const [unit, unitEntries] of byUnit.entries()) {
+      if (unitEntries.length < 2) continue;
+
+      // 1. Volume order inversion
+      const withVol = unitEntries
+        .filter((e) => e.volIdx != null && e.volIdx > 0)
+        .sort((a, b) => (a.volIdx! !== b.volIdx! ? a.volIdx! - b.volIdx! : a.seg.start - b.seg.start));
+      for (let i = 1; i < withVol.length; i++) {
+        const prev = withVol[i - 1];
+        const curr = withVol[i];
+        if (curr.volIdx! > prev.volIdx! && curr.seg.start < prev.seg.start) {
+          pushWarning({
+            kind: "volume_order_inversion",
+            barcode: curr.barcode,
+            title: curr.title,
+            setName: cleanSet,
+            subSeries,
+            coverageRange: curr.coverageRange,
+            volIndex: curr.volIdx,
+            message: `חוסר התאמה בין מספר החלק לטווח בספר ${curr.barcode ? `#${curr.barcode}` : ""}: חלק ${formatHebrewNumeralWithPunctuation(curr.volIdx!)} מתחיל ב-${formatUnitValue(unit, curr.seg.start)} לפני חלק ${formatHebrewNumeralWithPunctuation(prev.volIdx!)} שמתחיל ב-${formatUnitValue(unit, prev.seg.start)}`,
+            siblingHint: `חלק ${formatHebrewNumeralWithPunctuation(prev.volIdx!)} (#${prev.barcode}): ${prev.coverageRange}`,
+          });
+        }
+      }
+
+      // 2. Significant overlap across distinct volumes (allowing 1-unit boundary overlap)
+      const allSpans = unitEntries.map((e) => e.span);
+      const groupMedSpan = medianPositive(allSpans);
+      for (let i = 0; i < unitEntries.length; i++) {
+        for (let j = i + 1; j < unitEntries.length; j++) {
+          const a = unitEntries[i];
+          const b = unitEntries[j];
+          if (a.volIdx != null && b.volIdx != null && a.volIdx === b.volIdx) continue;
+          if (a.seg.start === b.seg.start && a.seg.end === b.seg.end) continue;
+
+          const overlap = Math.min(a.seg.end, b.seg.end) - Math.max(a.seg.start, b.seg.start) + 1;
+          const minSpan = Math.min(a.span, b.span);
+          const oneContainsOther =
+            (a.seg.start <= b.seg.start && a.seg.end >= b.seg.end) ||
+            (b.seg.start <= a.seg.start && b.seg.end >= a.seg.end);
+
+          if (overlap >= 4 || (oneContainsOther && minSpan >= 3 && overlap >= 3)) {
+            const diffA = Math.abs(a.span - groupMedSpan);
+            const diffB = Math.abs(b.span - groupMedSpan);
+            const suspect = diffA > diffB ? a : b;
+            const other = suspect === a ? b : a;
+            pushWarning({
+              kind: "significant_overlap",
+              barcode: suspect.barcode,
+              title: suspect.title,
+              setName: cleanSet,
+              subSeries,
+              coverageRange: suspect.coverageRange,
+              volIndex: suspect.volIdx,
+              message: `חשד לחפיפת טווח שגויה בספר ${suspect.barcode ? `#${suspect.barcode}` : ""} (${suspect.coverageRange}) מול כרך אחר (${other.barcode ? `#${other.barcode}: ` : ""}${other.coverageRange}) — חפיפה של ${overlap} יחידות`,
+              siblingHint: `כרך מקביל (#${other.barcode}): ${other.coverageRange}`,
+            });
+          }
+        }
+      }
+
+      // 3. Outlier span or implausible jump (requires >= 3 books so >= 2 reference siblings exist)
+      if (unitEntries.length >= 3) {
+        for (let i = 0; i < unitEntries.length; i++) {
+          const cand = unitEntries[i];
+          const otherSpans = unitEntries.filter((_, idx) => idx !== i).map((x) => x.span);
+          const medOther = medianPositive(otherSpans);
+          if (medOther >= 3 && cand.span >= Math.max(60, medOther * 3.5)) {
+            pushWarning({
+              kind: "outlier_span",
+              barcode: cand.barcode,
+              title: cand.title,
+              setName: cleanSet,
+              subSeries,
+              coverageRange: cand.coverageRange,
+              volIndex: cand.volIdx,
+              message: `חשד לטעות הקלדה בטווח בספר ${cand.barcode ? `#${cand.barcode}` : ""} (${cand.coverageRange}) — אורך חריג של ${cand.span} יחידות לעומת ~ ${Math.round(medOther)} בכרכים המקבילים`,
+            });
+          }
+        }
+
+        if (withVol.length >= 3) {
+          for (let i = 1; i < withVol.length; i++) {
+            const prev = withVol[i - 1];
+            const curr = withVol[i];
+            if (curr.volIdx! === prev.volIdx! + 1 && curr.seg.start > prev.seg.end) {
+              const otherSpans = withVol.filter((_, idx) => idx !== i).map((x) => x.span);
+              const medOther = medianPositive(otherSpans);
+              const gap = curr.seg.start - prev.seg.end;
+              if (medOther >= 3 && gap > Math.max(60, medOther * 3)) {
+                pushWarning({
+                  kind: "outlier_jump",
+                  barcode: curr.barcode,
+                  title: curr.title,
+                  setName: cleanSet,
+                  subSeries,
+                  coverageRange: curr.coverageRange,
+                  volIndex: curr.volIdx,
+                  message: `חשד לטעות הקלדה בתחילת הטווח בספר ${curr.barcode ? `#${curr.barcode}` : ""} (${curr.coverageRange}) — קפיצה של ${gap} יחידות אחרי סיום הכרך הקודם (${formatUnitValue(unit, prev.seg.end)})`,
+                  siblingHint: `כרך קודם (#${prev.barcode}): ${prev.coverageRange}`,
+                });
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  return warnings;
+}
+
+export function detectBookCoverageTypoWarnings(
+  draftBook: CoverageBookInput,
+  setBooks: CoverageBookInput[],
+  ignoredKeys?: Set<string>
+): CoverageAnomalyWarning[] {
+  const cleanSet = String(draftBook.set_name || "").trim();
+  const bc = String(draftBook.barcode || "").trim();
+  const merged: CoverageBookInput[] = [];
+  let replaced = false;
+  for (const b of setBooks || []) {
+    if (bc && String(b.barcode || "").trim() === bc) {
+      merged.push(draftBook);
+      replaced = true;
+    } else {
+      merged.push(b);
+    }
+  }
+  if (!replaced) merged.push(draftBook);
+
+  const effectiveSet = cleanSet || String(setBooks?.[0]?.set_name || "").trim() || "__single__";
+  const all = detectCoverageAnomaliesForSet(merged, effectiveSet, ignoredKeys);
+  const direct = all.filter((w) => !w.ignored && w.barcode === bc);
+
+  const cov = String(draftBook.coverage_range || "").trim();
+  if (!cov) return direct;
+  const sub = String(draftBook.sub_series || "").trim();
+  const sameSub = merged.filter((b) => String(b.sub_series || "").trim() === sub);
+  const domUnit = inferDominantCoverageUnit(sameSub.map((b) => String(b.coverage_range || "")));
+  const draftSeg = getPrimaryDetailedSegment(cov, domUnit);
+  const draftVol = extractVolumeNumberIndex(draftBook.volume, null);
+  if (draftSeg && !draftSeg.isReversed) {
+    const draftUnit = draftSeg.unit !== "any" ? draftSeg.unit : domUnit;
+    for (const sib of sameSub) {
+      const sibBc = String(sib.barcode || "").trim();
+      if (!sibBc || sibBc === bc) continue;
+      const sibCov = String(sib.coverage_range || "").trim();
+      const sibSeg = getPrimaryDetailedSegment(sibCov, domUnit);
+      if (!sibSeg || sibSeg.isReversed) continue;
+      const sibUnit = sibSeg.unit !== "any" ? sibSeg.unit : domUnit;
+      if (sibUnit !== draftUnit) continue;
+      const sibVol = extractVolumeNumberIndex(sib.volume, null);
+      if (draftVol != null && sibVol != null && draftVol !== sibVol) {
+        if (draftVol < sibVol && draftSeg.start > sibSeg.start) {
+          const k = makeCoverageAnomalyIgnoreKey(effectiveSet, sub, "volume_order_inversion", bc, cov);
+          if (!ignoredKeys?.has(k) && !direct.some((d) => d.key === k)) {
+            direct.push({
+              key: k,
+              kind: "volume_order_inversion",
+              barcode: bc,
+              title: String(draftBook.title || "").trim(),
+              setName: effectiveSet,
+              subSeries: sub,
+              coverageRange: cov,
+              volIndex: draftVol,
+              message: `חוסר התאמה בין מספר החלק לטווח: חלק ${formatHebrewNumeralWithPunctuation(draftVol)} מתחיל ב-${formatUnitValue(draftUnit, draftSeg.start)} אחרי חלק ${formatHebrewNumeralWithPunctuation(sibVol)} (#${sibBc}: ${sibCov})`,
+              siblingHint: `חלק ${formatHebrewNumeralWithPunctuation(sibVol)} (#${sibBc}): ${sibCov}`,
+              ignored: false,
+            });
+          }
+        }
+        const overlap = Math.min(draftSeg.end, sibSeg.end) - Math.max(draftSeg.start, sibSeg.start) + 1;
+        const minSpan = Math.min(draftSeg.end - draftSeg.start + 1, sibSeg.end - sibSeg.start + 1);
+        const oneContainsOther =
+          (draftSeg.start <= sibSeg.start && draftSeg.end >= sibSeg.end) ||
+          (sibSeg.start <= draftSeg.start && sibSeg.end >= draftSeg.end);
+        if (overlap >= 4 || (oneContainsOther && minSpan >= 3 && overlap >= 3)) {
+          const k = makeCoverageAnomalyIgnoreKey(effectiveSet, sub, "significant_overlap", bc, cov);
+          if (!ignoredKeys?.has(k) && !direct.some((d) => d.key === k)) {
+            direct.push({
+              key: k,
+              kind: "significant_overlap",
+              barcode: bc,
+              title: String(draftBook.title || "").trim(),
+              setName: effectiveSet,
+              subSeries: sub,
+              coverageRange: cov,
+              volIndex: draftVol,
+              message: `חפיפה של ${overlap} יחידות מול כרך #${sibBc} (${sibCov})`,
+              siblingHint: `כרך מקביל (#${sibBc}): ${sibCov}`,
+              ignored: false,
+            });
+          }
+        }
+      }
+    }
+  }
+
+  return direct;
+}
+
 export function computeMissingSetSlots(
-  books: Array<{
-    barcode?: string;
-    title?: string;
-    set_name?: string;
-    sub_series?: string;
-    volume?: string;
-    coverage_range?: string;
-    set_global_number?: number | null;
-  }>,
+  books: CoverageBookInput[],
   setName: string,
   ignoredKeys?: Set<string>
 ): MissingVolumeSlot[] {
@@ -1002,6 +1534,11 @@ export function computeMissingSetSlots(
     }
   }
 
+  const inferredCoverageVols = inferVolumesFromCoverage(books, cleanSet);
+  const inferredByBarcode = new Map<string, CoverageVolumeSuggestion>(
+    inferredCoverageVols.map((s) => [s.barcode, s])
+  );
+
   // 1. Per sub_series volume sequence gaps (skipping consecutive single-book sub-series)
   for (const [subSeries, list] of bySub.entries()) {
     if (subSeries && consecutiveSingleBookSubSeriesNames.has(subSeries)) {
@@ -1010,8 +1547,11 @@ export function computeMissingSetSlots(
     const volIndexToBook = new Map<number, BookEntry>();
     let sampleVol = "";
     for (const b of list) {
+      const bc = String(b.barcode || "").trim();
+      const inferred = bc ? inferredByBarcode.get(bc) : undefined;
       if (!sampleVol && String(b.volume || "").trim()) sampleVol = String(b.volume || "").trim();
-      const idx = extractVolumeNumberIndex(b.volume, null);
+      if (!sampleVol && inferred?.suggestedVolume) sampleVol = inferred.suggestedVolume;
+      const idx = extractVolumeNumberIndex(b.volume, null) ?? inferred?.inferredIndex ?? null;
       if (idx != null && idx > 0 && !volIndexToBook.has(idx)) {
         volIndexToBook.set(idx, b);
       }
@@ -1025,6 +1565,27 @@ export function computeMissingSetSlots(
       explicitGlobalCount > 0,
       150
     );
+  }
+
+  // 1b. Coverage range typo / anomaly detection across sibling volumes
+  const covAnomalies = detectCoverageAnomaliesForSet(books, cleanSet, ignoredKeys);
+  for (const ca of covAnomalies) {
+    if (seenKeys.has(ca.key)) continue;
+    seenKeys.add(ca.key);
+    slots.push({
+      key: ca.key,
+      setName: cleanSet,
+      subSeries: ca.subSeries,
+      slotType: "volume",
+      kind: "anomaly",
+      index: ca.volIndex || 0,
+      suggestedVolume: "",
+      suggestedGlobalNumber: null,
+      sourceBookBarcode: ca.barcode || undefined,
+      sourceBookTitle: ca.title || undefined,
+      anomalyMessage: ca.message,
+      ignored: ca.ignored,
+    });
   }
 
   // 2. Overall set_global_number sequence gaps across the whole set

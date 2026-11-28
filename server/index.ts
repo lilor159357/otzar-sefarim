@@ -11,10 +11,12 @@ import {
   computeMissingSetSlots,
   extractVolumeNumberIndex,
   inferDominantCoverageUnit,
+  inferVolumesFromCoverage,
   makeMissingVolumeIgnoreKey,
   normalizeCoverageRange,
   shouldSuppressSingleVolumeLabel,
   type CoverageUnit,
+  type CoverageVolumeSuggestion,
 } from "../shared/torah/volumeAndCoverage.ts";
 import { registerCirculationRoutes } from "./routes/circulation.ts";
 import { registerCatalogAiRoutes } from "./routes/catalogAi.ts";
@@ -1147,7 +1149,7 @@ function readIgnoredMissingSet(db: DbClient): Set<string> {
       ignoredKeys
     );
     const dominantCoverageUnit = inferDominantCoverageUnit(cleanRows.map((r: any) => String(r.coverage_range || "")));
-    res.json({ books: cleanRows, missingSlots, dominantCoverageUnit });
+    res.json({ books: cleanRows, missingSlots, dominantCoverageUnit, ignoredKeys: Array.from(ignoredKeys) });
   });
 
   // Canonical details of a set for auto-pull in edit/manual forms
@@ -1223,7 +1225,7 @@ function readIgnoredMissingSet(db: DbClient): Set<string> {
     });
   });
 
-  // Summary of sets with active (non-ignored) missing volume slots
+  // Summary of sets with active (non-ignored) missing volume slots + coverage-inferred volume suggestions
   app.get("/api/books/missing-sets-summary", (req, res) => {
     const setNames = db.all<{ set_name: string }>(
       "SELECT DISTINCT set_name FROM books WHERE set_name IS NOT NULL AND set_name <> '' AND deleted_at IS NULL"
@@ -1236,6 +1238,7 @@ function readIgnoredMissingSet(db: DbClient): Set<string> {
       missingCount: number;
       slots: any[];
     }> = [];
+    const volumeSuggestions: CoverageVolumeSuggestion[] = [];
 
     for (const sName of setNames) {
       const setBooks = db.all<{
@@ -1260,9 +1263,79 @@ function readIgnoredMissingSet(db: DbClient): Set<string> {
           slots: activeSlots,
         });
       }
+      const inferred = inferVolumesFromCoverage(setBooks, sName);
+      if (inferred.length > 0) {
+        volumeSuggestions.push(...inferred);
+      }
     }
 
-    res.json({ missingSets });
+    res.json({ missingSets, volumeSuggestions });
+  });
+
+  // Apply coverage-inferred volume labels across multiple books in one transaction
+  app.post("/api/books/apply-volume-suggestions", requireAdmin, (req, res) => {
+    const rawItems = Array.isArray(req.body?.items) ? req.body.items : [];
+    const cleanItems: Array<{ barcode: string; volume: string }> = [];
+    const seenBarcodes = new Set<string>();
+    for (const item of rawItems) {
+      const bc = String(item?.barcode || "").trim();
+      const vol = String(item?.volume || "").trim();
+      if (!bc || !vol || seenBarcodes.has(bc)) continue;
+      seenBarcodes.add(bc);
+      cleanItems.push({ barcode: bc, volume: vol });
+    }
+    if (cleanItems.length === 0) {
+      return res.status(400).json({ error: "לא סופקו ספרים להשלמת חלקים" });
+    }
+
+    const now = new Date().toISOString();
+    let updatedCount = 0;
+
+    db.transaction(() => {
+      for (const item of cleanItems) {
+        const existing = db.get<Record<string, any>>(
+          "SELECT * FROM books WHERE barcode = ? AND deleted_at IS NULL",
+          item.barcode
+        );
+        if (!existing) continue;
+        const curVol = String(existing.volume || "").trim();
+        if (curVol === item.volume) continue;
+
+        const tagsArr = parseTags(existing.tags);
+        const norm = buildNormalizedBookSearch([
+          item.barcode,
+          String(existing.title || ""),
+          String(existing.set_name || ""),
+          String(existing.sub_series || ""),
+          String(existing.author || ""),
+          item.volume,
+          String(existing.coverage_range || ""),
+          String(existing.publisher || ""),
+          String(existing.pub_year || ""),
+          String(existing.edition || ""),
+          String(existing.category || ""),
+          tagsArr.join(" "),
+          String(existing.notes || ""),
+        ]);
+
+        db.run(
+          "UPDATE books SET volume = ?, normalized_search = ?, updated_at = ? WHERE barcode = ?",
+          item.volume,
+          norm,
+          now,
+          item.barcode
+        );
+        if (existing.sync_id) {
+          enqueueSyncOutbox(db, "book", String(existing.sync_id), "upsert", { barcode: item.barcode });
+        }
+        updatedCount++;
+      }
+    });
+
+    if (updatedCount > 0) {
+      syncService?.notifyLocalMutation();
+    }
+    res.json({ ok: true, updatedCount });
   });
 
   // Selective multi-book bulk update (only modifies fields explicitly present in req.body.fields)
